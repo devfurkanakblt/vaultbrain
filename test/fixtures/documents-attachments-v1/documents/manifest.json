@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "kdf": {
+    "name": "scrypt",
+    "N": 32768,
+    "salt": "Gclr5TvT+T8yo9DcE3aXWQ=="
+  },
+  "verifier": "f6c35577045a9acd149a6d3f7c926cc3df71691f99cce7493ef5c64475fa0a7b"
+}

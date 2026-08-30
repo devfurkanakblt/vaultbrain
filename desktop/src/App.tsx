@@ -14,23 +14,36 @@ import {
   FilePlus2,
   FileText,
   Folder,
+  FolderKanban,
   FolderOpen,
+  History,
   LayoutGrid,
   LockKeyhole,
   Network,
   Palette,
+  PencilLine,
   PanelRightClose,
   PanelRightOpen,
+  Paperclip,
+  Puzzle,
   Search,
   ShieldCheck,
   Sparkles,
   Star,
+  Sun,
   TableProperties,
+  Trash2,
   X,
 } from "lucide-react";
+import { AttachmentLibrary } from "./AttachmentLibrary";
 import { vaultBridge } from "./bridge";
+import { CanvasBoard } from "./CanvasBoard";
 import { ContextPanel } from "./ContextPanel";
 import { KnowledgeGraph } from "./KnowledgeGraph";
+import { HistoryDialog, RenameDialog, TemplateDialog, TrashDialog } from "./NoteLifecycle";
+import { PluginManager } from "./PluginManager";
+import { PluginHost } from "./plugins/host";
+import type { PluginPanel, PluginRuntimeState, RegisteredCommand } from "./plugins/protocol";
 import { PropertyTable } from "./PropertyTable";
 import { QuickSwitcher } from "./QuickSwitcher";
 import { clearOwnedClipboard, copyWithExpiry } from "./secure-clipboard";
@@ -38,13 +51,13 @@ import { ThemeEditor } from "./ThemeEditor";
 import { WorkspacesDialog } from "./Workspaces";
 import { applyTheme, clearTheme, DEFAULT_THEME, loadTheme, saveTheme, type ThemeSettings } from "./theme";
 import { useVirtualWindow } from "./virtual";
-import type { Backlink, Bookmark, KnowledgeGraph as GraphData, NoteDocument, NoteSummary, PropertyRow, SavedView, SaveState, SearchHit, UnlinkedMention, VaultInfo, WorkspaceLayout, WorkspaceState } from "./types";
+import type { AttachmentInfo, Backlink, Bookmark, CanvasSummary, DeletedNote, KnowledgeGraph as GraphData, NoteDocument, NoteSummary, PluginSecurityPolicy, PluginSummary, PropertyRow, SavedView, SaveState, SearchHit, UnlinkedMention, VaultInfo, WorkspaceLayout, WorkspaceState } from "./types";
 
 const MarkdownEditor = lazy(() => import("./Editor").then((module) => ({ default: module.MarkdownEditor })));
 const MarkdownPreview = lazy(() => import("./Preview"));
 
 type ViewMode = "write" | "read";
-type WorkspaceView = "notes" | "graph" | "properties";
+type WorkspaceView = "notes" | "graph" | "properties" | "canvas" | "files" | "plugins";
 type LockReason = "manual" | "inactivity";
 type TreeRow =
   | { kind: "folder"; key: string; folder: string; count: number; open: boolean }
@@ -157,6 +170,8 @@ export function App() {
   const [graph, setGraph] = useState<GraphData>({ nodes: [], edges: [] });
   const [propertyRows, setPropertyRows] = useState<PropertyRow[]>([]);
   const [savedViews, setSavedViews] = useState<SavedView[]>([]);
+  const [canvases, setCanvases] = useState<CanvasSummary[]>([]);
+  const [attachments, setAttachments] = useState<AttachmentInfo[]>([]);
   const [mentions, setMentions] = useState<UnlinkedMention[]>([]);
   const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
   const [layouts, setLayouts] = useState<WorkspaceLayout[]>([]);
@@ -170,6 +185,17 @@ export function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [quickOpen, setQuickOpen] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [trashOpen, setTrashOpen] = useState(false);
+  const [templateOpen, setTemplateOpen] = useState(false);
+  const [templates, setTemplates] = useState<NoteSummary[]>([]);
+  const [plugins, setPlugins] = useState<PluginSummary[]>([]);
+  const [pluginPolicy, setPluginPolicy] = useState<PluginSecurityPolicy>({ version: 1, restrictedMode: false, revokedSigners: [] });
+  const [pluginStates, setPluginStates] = useState<PluginRuntimeState[]>([]);
+  const [pluginCommands, setPluginCommands] = useState<RegisteredCommand[]>([]);
+  const [pluginPanels, setPluginPanels] = useState<PluginPanel[]>([]);
+  const pluginHost = useRef<PluginHost>(undefined);
   const [notice, setNotice] = useState("");
   const [lockNotice, setLockNotice] = useState("");
   const [idleMinutes, setIdleMinutes] = useState(readIdlePreference);
@@ -190,6 +216,94 @@ export function App() {
   }, [theme]);
 
   const refreshList = useCallback(async () => setNotes(await vaultBridge.listNotes()), []);
+
+  /**
+   * The host's whole reach into the app. A plugin method that is not spelled
+   * out here cannot be served at all, whatever its manifest claims — the
+   * capability table decides what may be asked for, and this decides what
+   * exists to answer.
+   */
+  const pluginBridge = useCallback(async (method: string, params: Record<string, unknown>) => {
+    const reference = String(params.reference ?? "");
+    switch (method) {
+      case "notes.list":
+        return vaultBridge.listNotes();
+      case "notes.metadata": {
+        const note = await vaultBridge.getNote(reference);
+        const { body: _body, ...metadata } = note;
+        return metadata;
+      }
+      case "notes.read":
+        return vaultBridge.getNote(reference);
+      case "notes.create":
+        return vaultBridge.createNote(String(params.path ?? ""), String(params.title ?? ""));
+      case "notes.update": {
+        const current = await vaultBridge.getNote(reference);
+        return vaultBridge.saveNote({ ...current, body: String(params.body ?? "") });
+      }
+      case "search.query":
+        return vaultBridge.search(String(params.query ?? ""));
+      case "canvas.list":
+        return vaultBridge.canvases();
+      case "canvas.read":
+        return vaultBridge.getCanvas(reference);
+      case "canvas.save":
+        return vaultBridge.saveCanvas(params.input as Parameters<typeof vaultBridge.saveCanvas>[0]);
+      case "attachments.list":
+        return vaultBridge.attachments();
+      case "attachments.read":
+        return vaultBridge.readAttachment(String(params.id ?? ""));
+      case "storage.get": {
+        const stored = await vaultBridge.pluginStorage(String(params.pluginId ?? ""));
+        return stored[String(params.key ?? "")] ?? null;
+      }
+      case "storage.set": {
+        const id = String(params.pluginId ?? "");
+        const stored = await vaultBridge.pluginStorage(id);
+        await vaultBridge.savePluginStorage(id, { ...stored, [String(params.key ?? "")]: String(params.value ?? "") });
+        return null;
+      }
+      default:
+        throw new Error(`Unknown plugin method: ${method}`);
+    }
+  }, []);
+
+  const host = useCallback(() => {
+    pluginHost.current ??= new PluginHost({
+      call: pluginBridge,
+      onNotice: (name, message) => setNotice(`${name}: ${message}`),
+      onCommandsChanged: setPluginCommands,
+      onPanelsChanged: setPluginPanels,
+      onStateChanged: setPluginStates,
+    });
+    return pluginHost.current;
+  }, [pluginBridge]);
+
+  /**
+   * Source is fetched only for the plugins that are actually enabled, so a
+   * disabled plugin's code never even enters the webview.
+   */
+  const refreshPlugins = useCallback(async () => {
+    const [listed, policy] = await Promise.all([vaultBridge.plugins(), vaultBridge.pluginSecurityPolicy()]);
+    setPlugins(listed);
+    setPluginPolicy(policy);
+    const runnable = await Promise.all(
+      listed.filter((plugin) => plugin.enabled).map(async (summary) => ({
+        summary,
+        source: (await vaultBridge.getPlugin(summary.id)).source,
+      }))
+    );
+    await host().sync([...runnable, ...listed.filter((plugin) => !plugin.enabled).map((summary) => ({ summary, source: "" }))]);
+    return listed;
+  }, [host]);
+
+  // Canvas nodes point at attachments and notes by id, so the two lists are
+  // reloaded together: a stale attachment list draws a live node as missing.
+  const refreshAssets = useCallback(async () => {
+    const [boards, files] = await Promise.all([vaultBridge.canvases(), vaultBridge.attachments()]);
+    setCanvases(boards);
+    setAttachments(files);
+  }, []);
 
   const rememberTab = useCallback((note: NoteDocument) => {
     setOpenTabs((current) => current.some((tab) => tab.id === note.id)
@@ -271,6 +385,18 @@ export function App() {
 
   const saveNow = useCallback(async () => { await persistActive(); }, [persistActive]);
 
+  const openDaily = useCallback(async () => {
+    try {
+      const daily = await vaultBridge.dailyNote();
+      await refreshList();
+      setWorkspaceView("notes");
+      await openNote(daily.note.id);
+      setNotice(daily.created ? `Created today's note at ${daily.note.path}.` : `Opened today's note.`);
+    } catch (caught) {
+      setNotice(caught instanceof Error ? caught.message : String(caught));
+    }
+  }, [openNote, refreshList]);
+
   const copyGuarded = useCallback(async (label: string, value: string) => {
     try {
       await copyWithExpiry(value, CLIPBOARD_TTL_MS);
@@ -296,7 +422,11 @@ export function App() {
     setBacklinks([]); setMentions([]); setBookmarks([]); setLayouts([]); setWorkspacesOpen(false);
     setQuery(""); setResults([]); setNotice("");
     setSearchOpen(false); setPaletteOpen(false); setQuickOpen(false); setNewOpen(false); setThemeOpen(false);
+    setRenameOpen(false); setHistoryOpen(false); setTrashOpen(false); setTemplateOpen(false); setTemplates([]);
+    pluginHost.current?.stopAll();
+    setPlugins([]); setPluginStates([]); setPluginCommands([]); setPluginPanels([]);
     setWorkspaceView("notes"); setGraph({ nodes: [], edges: [] }); setPropertyRows([]); setSavedViews([]);
+    setCanvases([]); setAttachments([]);
     setLockNotice(reason === "inactivity"
       ? `Locked automatically after ${idleMinutes} minute${idleMinutes === 1 ? "" : "s"} without activity. The clipboard was cleared too.`
       : "");
@@ -344,11 +474,15 @@ export function App() {
       if (control && key === "l") { event.preventDefault(); void lock(); }
       if (control && key === "\\") { event.preventDefault(); if (active) void openInSplit(active.id); }
       if (control && key === "w") { event.preventDefault(); if (active) void closeTab(active.id); }
-      if (event.key === "Escape") { setPaletteOpen(false); setSearchOpen(false); setNewOpen(false); setQuickOpen(false); setThemeOpen(false); }
+      if (control && key === "d") { event.preventDefault(); void openDaily(); }
+      if (event.key === "Escape") {
+        setPaletteOpen(false); setSearchOpen(false); setNewOpen(false); setQuickOpen(false); setThemeOpen(false);
+        setRenameOpen(false); setHistoryOpen(false); setTrashOpen(false); setTemplateOpen(false);
+      }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [active, closeTab, lock, openInSplit, saveNow]);
+  }, [active, closeTab, lock, openDaily, openInSplit, saveNow]);
 
   useEffect(() => {
     if (!query.trim()) { setResults([]); return; }
@@ -366,6 +500,74 @@ export function App() {
     await refreshList(); await openNote(note.id); setNewOpen(false);
   }
 
+  // Every lifecycle write lands as a new revision in the vault, so the tree,
+  // the open tabs and the editor all have to be told rather than left holding a
+  // path or revision the vault has moved past.
+  async function renameActive(path: string, title: string) {
+    if (!active) return;
+    if (!(await persistActive())) throw new Error("Save the current note before moving it.");
+    const moved = await vaultBridge.renameNote(active.id, path, title);
+    setActive(moved);
+    rememberTab(moved);
+    setSaveState("saved");
+    await refreshList();
+    setRenameOpen(false);
+    setNotice(`Moved to ${moved.path}.`);
+  }
+
+  async function deleteActive() {
+    if (!active || !window.confirm(`Delete “${active.title}”? Its encrypted history is kept, so it can be restored.`)) return;
+    const removed = await vaultBridge.deleteNote(active.id);
+    const remaining = openTabs.filter((tab) => tab.id !== removed.id);
+    setOpenTabs(remaining);
+    if (secondary?.id === removed.id) setSecondary(undefined);
+    setActive(undefined);
+    setBacklinks([]);
+    setMentions([]);
+    setSaveState("saved");
+    await refreshList();
+    if (remaining[0]) await openNote(remaining[0].id);
+    setNotice(`Deleted ${removed.title}. Restore it from the deleted-notes list.`);
+  }
+
+  async function restoreRevision(revision: number) {
+    if (!active) return;
+    const restored = await vaultBridge.restoreRevision(active.id, revision);
+    setActive(restored);
+    rememberTab(restored);
+    setSaveState("saved");
+    await refreshList();
+    setHistoryOpen(false);
+    setNotice(`Restored revision ${revision} as revision ${restored.revision}.`);
+  }
+
+  async function restoreDeleted(note: DeletedNote) {
+    const restored = await vaultBridge.restoreRevision(note.id, note.revision);
+    await refreshList();
+    setTrashOpen(false);
+    setWorkspaceView("notes");
+    await openNote(restored.id);
+    setNotice(`Restored ${restored.title}.`);
+  }
+
+  async function createFromTemplate(template: string, path: string, title: string, variables: Record<string, string>) {
+    const note = await vaultBridge.createFromTemplate(template, path, title, variables);
+    await refreshList();
+    setTemplateOpen(false);
+    setWorkspaceView("notes");
+    await openNote(note.id);
+    setNotice(`Created ${note.path} from the template.`);
+  }
+
+  async function showTemplates() {
+    try {
+      setTemplates(await vaultBridge.templates());
+      setTemplateOpen(true);
+    } catch (caught) {
+      setNotice(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+
   async function showWorkspace(next: WorkspaceView) {
     setWorkspaceView(next);
     if (next === "graph") setGraph(await vaultBridge.graph());
@@ -374,6 +576,49 @@ export function App() {
       setPropertyRows(rows);
       setSavedViews(views);
     }
+    if (next === "canvas" || next === "files") await refreshAssets();
+    if (next === "plugins") await refreshPlugins();
+  }
+
+  async function installPlugin(manifest: unknown, source: string) {
+    const installed = await vaultBridge.installPlugin(
+      manifest as Parameters<typeof vaultBridge.installPlugin>[0],
+      source
+    );
+    await refreshPlugins();
+    setNotice(`Installed ${installed.name}. It stays off until you turn it on.`);
+  }
+
+  async function togglePlugin(id: string, enabled: boolean) {
+    const changed = await vaultBridge.setPluginEnabled(id, enabled);
+    await refreshPlugins();
+    setNotice(`${changed.name} is now ${enabled ? "running" : "stopped"}.`);
+  }
+
+  async function removePlugin(plugin: PluginSummary) {
+    if (!window.confirm(`Remove ${plugin.name}? Its settings are deleted with it.`)) return;
+    await vaultBridge.deletePlugin(plugin.id);
+    await refreshPlugins();
+    setNotice(`Removed ${plugin.name}.`);
+  }
+
+  async function setRestrictedPlugins(enabled: boolean) {
+    await vaultBridge.setPluginRestrictedMode(enabled);
+    await refreshPlugins();
+    setNotice(`Restricted plugin mode is ${enabled ? "on" : "off"}.`);
+  }
+
+  async function revokePluginSigner(plugin: PluginSummary) {
+    if (!window.confirm(`Revoke the signer of ${plugin.name}? Every plugin from this key stops immediately.`)) return;
+    await vaultBridge.revokePluginSigner(plugin.id);
+    await refreshPlugins();
+    setNotice(`${plugin.name}'s signer is revoked in this vault.`);
+  }
+
+  async function restorePluginSigner(keyId: string) {
+    await vaultBridge.restorePluginSigner(keyId);
+    await refreshPlugins();
+    setNotice("Plugin signer restored. Plugins remain off until you enable them.");
   }
 
   // A cell edit writes a whole note revision, so the open editor and the file
@@ -437,7 +682,7 @@ export function App() {
     if (layout.secondary && known.has(layout.secondary)) await openInSplit(layout.secondary);
     setWorkspaceView("notes");
     // Only the views this build knows about; a stored view name is not a cast.
-    if (layout.view === "graph" || layout.view === "properties") await showWorkspace(layout.view);
+    if (layout.view === "graph" || layout.view === "properties" || layout.view === "canvas" || layout.view === "files") await showWorkspace(layout.view);
     setWorkspacesOpen(false);
     setNotice(`Opened the "${layout.name}" workspace.`);
   }
@@ -496,6 +741,9 @@ export function App() {
           <button className={workspaceView === "notes" ? "active" : ""} onClick={() => void showWorkspace("notes")}><FileText size={14} /><span>Notes</span></button>
           <button className={workspaceView === "graph" ? "active" : ""} onClick={() => void showWorkspace("graph")}><Network size={14} /><span>Graph</span></button>
           <button className={workspaceView === "properties" ? "active" : ""} onClick={() => void showWorkspace("properties")}><TableProperties size={14} /><span>Data</span></button>
+          <button className={workspaceView === "canvas" ? "active" : ""} onClick={() => void showWorkspace("canvas")}><FolderKanban size={14} /><span>Canvas</span></button>
+          <button className={workspaceView === "files" ? "active" : ""} onClick={() => void showWorkspace("files")}><Paperclip size={14} /><span>Files</span></button>
+          <button className={workspaceView === "plugins" ? "active" : ""} onClick={() => void showWorkspace("plugins")}><Puzzle size={14} /><span>Plugins</span></button>
         </div>
         <button className="quick-find" onClick={() => setSearchOpen(true)}><Search size={15} /><span>Find anything…</span><kbd>⇧⌘F</kbd></button>
         {bookmarks.length > 0 && <div className="bookmark-block">
@@ -510,7 +758,10 @@ export function App() {
           <div style={{ height: tree.topPad }} aria-hidden="true" />
           {treeRows.slice(tree.start, tree.end).map((row) => row.kind === "folder"
             ? <button key={row.key} className="folder-row" aria-expanded={row.open} onClick={() => setExpanded((current) => {
-                const next = new Set(current); row.open ? next.delete(row.folder) : next.add(row.folder); return next;
+                const next = new Set(current);
+                if (row.open) next.delete(row.folder);
+                else next.add(row.folder);
+                return next;
               })}>
                 {row.open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
                 {row.open ? <FolderOpen size={15} /> : <Folder size={15} />}<span>{row.folder}</span><i>{row.count}</i>
@@ -559,6 +810,9 @@ export function App() {
                     aria-pressed={bookmarks.some((bookmark) => bookmark.id === active.id)}
                     title={bookmarks.some((bookmark) => bookmark.id === active.id) ? "Remove bookmark" : "Bookmark this note"}
                   ><Star size={16} /></button>
+                  <button onClick={() => setRenameOpen(true)} title="Rename or move this note"><PencilLine size={16} /></button>
+                  <button onClick={() => setHistoryOpen(true)} title="Encrypted revision history"><History size={16} /></button>
+                  <button onClick={() => void deleteActive()} title="Delete this note"><Trash2 size={16} /></button>
                   <button onClick={() => void copyGuarded("Note", active.body)} title="Copy note to a self-clearing clipboard"><Copy size={16} /></button>
                   <button onClick={() => void openInSplit(active.id)} title="Open in split pane (Ctrl+\)"><Columns2 size={16} /></button>
                   <button className="context-toggle" onClick={() => setRightOpen((value) => !value)} title="Toggle context panel">
@@ -599,7 +853,33 @@ export function App() {
           <div className={`save-state ${saveState}`}><span />{saveState === "saved" ? "Encrypted & saved" : saveState === "saving" ? "Encrypting…" : saveState === "error" ? "Save failed" : "Unsaved changes"}</div>
           <div><span>UTF-8</span><span>MARKDOWN</span><span>Ln {active.body.split("\n").length}</span></div>
         </footer>}
-      </section> : workspaceView === "graph" ? <KnowledgeGraph graph={graph} onOpen={openFromKnowledge} /> : <PropertyTable
+      </section> : workspaceView === "graph" ? <KnowledgeGraph graph={graph} onOpen={openFromKnowledge} />
+      : workspaceView === "canvas" ? <CanvasBoard
+        canvases={canvases}
+        notes={notes}
+        attachments={attachments}
+        onRefresh={refreshAssets}
+        onOpenNote={openFromKnowledge}
+        onNotice={setNotice}
+      />
+      : workspaceView === "files" ? <AttachmentLibrary
+        attachments={attachments}
+        onRefresh={refreshAssets}
+        onNotice={setNotice}
+      />
+      : workspaceView === "plugins" ? <PluginManager
+        plugins={plugins}
+        policy={pluginPolicy}
+        states={pluginStates}
+        onInstall={installPlugin}
+        onToggle={togglePlugin}
+        onRemove={removePlugin}
+        onRestricted={setRestrictedPlugins}
+        onRevoke={revokePluginSigner}
+        onRestore={restorePluginSigner}
+        onNotice={setNotice}
+      />
+      : <PropertyTable
         rows={propertyRows}
         views={savedViews}
         onOpen={openFromKnowledge}
@@ -616,7 +896,8 @@ export function App() {
         onOpen={(id) => void openNote(id)}
         onCopy={(label, value) => void copyGuarded(label, value)}
         onAliases={(aliases) => mutateActive({ aliases })}
-        onLink={linkMention} />}
+        onLink={linkMention}
+        panels={pluginPanels} />}
 
       {notice && <div className="toast" role="status"><Check size={14} />{notice}</div>}
 
@@ -637,10 +918,24 @@ export function App() {
           {[
             { icon: FilePlus2, label: "Create new note", keys: "⌘ N", action: () => setNewOpen(true) },
             { icon: FileText, label: "Quick switch to a note", keys: "⌘ O", action: () => setQuickOpen(true) },
+            { icon: Sun, label: "Open today's daily note", keys: "⌘ D", action: () => void openDaily() },
+            { icon: Sparkles, label: "New note from a template", keys: "", action: () => void showTemplates() },
+            { icon: PencilLine, label: "Rename or move this note", keys: "", action: () => { if (active) setRenameOpen(true); } },
+            { icon: History, label: "Browse this note's history", keys: "", action: () => { if (active) setHistoryOpen(true); } },
+            { icon: Trash2, label: "Restore a deleted note", keys: "", action: () => setTrashOpen(true) },
+            { icon: Puzzle, label: "Manage plugins", keys: "", action: () => void showWorkspace("plugins") },
+            ...pluginCommands.map((command) => ({
+              icon: Puzzle,
+              label: `${command.pluginName}: ${command.label}`,
+              keys: "",
+              action: () => host().invoke(command),
+            })),
             { icon: Search, label: "Search encrypted vault", keys: "⇧⌘ F", action: () => setSearchOpen(true) },
             { icon: Columns2, label: "Open current note in split pane", keys: "⌘ \\", action: () => { if (active) void openInSplit(active.id); } },
             { icon: Network, label: "Open local graph", keys: "", action: () => void showWorkspace("graph") },
             { icon: TableProperties, label: "Open property view", keys: "", action: () => void showWorkspace("properties") },
+            { icon: FolderKanban, label: "Open canvas workspace", keys: "", action: () => void showWorkspace("canvas") },
+            { icon: Paperclip, label: "Open attachment library", keys: "", action: () => void showWorkspace("files") },
             { icon: BookOpen, label: mode === "write" ? "Switch to reading view" : "Switch to writing view", keys: "⌘ E", action: () => setMode(mode === "write" ? "read" : "write") },
             { icon: LayoutGrid, label: "Workspaces and saved layouts", keys: "", action: () => setWorkspacesOpen(true) },
             { icon: Palette, label: "Customize theme", keys: "", action: () => setThemeOpen(true) },
@@ -653,6 +948,10 @@ export function App() {
       {themeOpen && <ThemeEditor settings={theme} onChange={setTheme} onClose={() => setThemeOpen(false)} />}
 
       {newOpen && <NewNoteDialog onClose={() => setNewOpen(false)} onCreate={create} />}
+      {renameOpen && active && <RenameDialog note={active} onClose={() => setRenameOpen(false)} onRename={renameActive} />}
+      {historyOpen && active && <HistoryDialog note={active} onClose={() => setHistoryOpen(false)} onRestore={restoreRevision} />}
+      {trashOpen && <TrashDialog onClose={() => setTrashOpen(false)} onRestore={restoreDeleted} />}
+      {templateOpen && <TemplateDialog templates={templates} onClose={() => setTemplateOpen(false)} onCreate={createFromTemplate} />}
       {workspacesOpen && <WorkspacesDialog
         layouts={layouts}
         tabCount={openTabs.length}

@@ -35,7 +35,8 @@ This is the most important section in the README.
 | Who's involved | You, or a script. No LLM. | An AI agent (e.g. Claude) via MCP |
 | Exposure | Zero — value never enters any model's context | Not zero — content **does** pass through the calling model's context, both when you tell the agent something worth saving (`store_note`) and when it resolves a value back (`resolve_key`) — that's inherent to how a conversational agent has to work |
 | What the agent sees without decrypting anything | N/A | Key names + descriptions (`list_keys` / `find_key`), and note timestamps + tags (`find_notes_in_range`) |
-| Audit | Logged | Logged — writes and reads both |
+| Audit | Logged | Logged — writes and reads both, including denials |
+| Scoping | N/A | Optional per-agent grants: which keys, which actions, for how long, how masked |
 
 Mode 2 is a deliberate trade-off, not a zero-exposure claim: you get an agent
 that can capture and recall notes for you in natural language, in exchange
@@ -44,6 +45,53 @@ get is standing access to your whole vault — every other note stays
 encrypted and out of its context until it specifically asks for that one
 key, and every access (read or write) is logged. If you want a hard
 guarantee that something never touches any LLM, keep using Mode 1 for it.
+
+### Grants: narrowing Mode 2 to one agent, one slice, one answer
+
+By default a vault has no grant policy, and any agent started with the
+passphrase sees every key — that is how this tool has always worked. Adding the
+first grant flips the vault to *governed*, and from then on an agent gets only
+what a live grant gives it.
+
+```bash
+# A kitchen assistant that may read one key, in one category, for a week.
+sbrain grant add claude-code \
+  --scope "health:BLOOD_TYPE:discover,resolve:none" \
+  --expires 7d --note "meal planning"
+
+# The same agent may see that an IBAN exists and confirm the last four digits,
+# but never read the whole thing.
+sbrain grant add claude-code --scope "finance:IBAN:discover,resolve:partial"
+
+# Anything under this grant waits for you before it is answered.
+sbrain grant add research-bot --scope "*:*:discover:full" --confirm
+
+sbrain grant list                  # every grant, active, expired or revoked
+sbrain grant requests              # resolutions waiting on you
+sbrain grant approve <id>          # single-use, expires in five minutes
+sbrain grant revoke <id>           # effective on the agent's very next call
+```
+
+A scope reads `file:keys:actions[:redaction]`. Keys are exact names, a
+`PREFIX*` glob, or `*`; actions are `discover`, `resolve` and `store`;
+redaction is `none`, `partial` (mask identifiers, keep a short tail so the agent
+can confirm a match) or `full` (return the value's *shape* — "an IBAN, 26
+characters" — and none of its characters).
+
+Three properties are worth stating plainly:
+
+- **The narrowest scope wins.** When several scopes cover one key, the
+  strictest redaction is applied, so adding a broad convenience grant can never
+  quietly unmask something you already chose to hide.
+- **An approval is single-use.** One "yes" answers one resolution and is then
+  spent; it never becomes a standing permission.
+- **Redaction narrows exposure, it does not create a boundary.** A masked value
+  still crosses into the model's context as a masked value, and the agent names
+  itself — `SBRAIN_AGENT` is an identity for scoping and audit, not
+  authentication. Anything that must never reach a model belongs in Mode 1.
+
+Grants live encrypted in `grants.enc` inside the vault, so the agent names, the
+scopes and the pending approvals are all unreadable without the passphrase.
 
 ## Format
 
@@ -182,10 +230,11 @@ seconds and answers a full-text query in about 3 ms p95.
 ## Native desktop workspace
 
 The repository now includes a Tauri 2 desktop application. Its React webview has
-no direct filesystem or key access; ten capability-scoped commands cross into
-the Rust core for unlock, lock, note CRUD, search, backlinks, value-minimized
-graph topology and typed property rows. The session key stays in Rust memory and
-is zeroized on lock.
+no direct filesystem or key access; forty-two capability-scoped commands cross into
+the Rust core for unlock, lock, the whole note lifecycle, search, backlinks,
+value-minimized graph topology, typed property rows, templates and daily notes,
+encrypted canvases, content-addressed attachments and sandboxed plugins. The
+session key stays in Rust memory and is zeroized on lock.
 
 ```bash
 # Browser-backed UI development (uses a safe in-memory demo vault)
@@ -194,14 +243,18 @@ npm run desktop:dev
 # Full native application against encrypted vault files
 npm run tauri:dev
 
-# Produce the optimized Windows executable without an installer bundle
+# Produce signed-ready MSI and NSIS installer artifacts
+npm run tauri:build
+
+# Faster local release check without installer generation
 npm run tauri:build -- --no-bundle
 ```
 
 The current workspace includes a lock screen, file tree, tab strip, CodeMirror
 Markdown editor, reading view, split pane, properties, outline, backlinks,
 encrypted search, quick switcher, command palette, keyboard shortcuts, theme
-editor, local knowledge graph and filterable property table. Dirty notes are persisted before
+editor, local knowledge graph, filterable property table, spatial canvas and
+attachment library. Dirty notes are persisted before
 navigation, before a tab closes and before lock, so the 700 ms autosave window
 cannot discard an edit.
 
@@ -212,7 +265,125 @@ cannot discard an edit.
 | `Ctrl+Shift+F` | Search the encrypted vault |
 | `Ctrl+\` | Open the current note in the split pane |
 | `Ctrl+W` | Close the active tab (saving it first if dirty) |
+| `Ctrl+D` | Open (or first create) today's daily note |
 | `Ctrl+N` / `Ctrl+S` / `Ctrl+E` / `Ctrl+L` | New note · save · write/read · lock |
+
+A note's whole life is available from the document toolbar and the command
+palette, not only from the CLI:
+
+- **Move or retitle.** A note keeps its ID, so its history and every link that
+  resolved to it by ID survive the move. Wikilinks that spelled out the old
+  title stay as written and become unresolved mentions, which the context panel
+  can relink in one click.
+- **Delete and restore.** Deleting archives the live revision before unlinking
+  the encrypted object, so the note is still recoverable from *Restore a deleted
+  note* in the command palette.
+- **History.** Every revision is a separate encrypted object. The history dialog
+  decrypts one at a time to read, and restoring writes the old content forward
+  as a new revision rather than rewinding the counter, so nothing already
+  archived is invalidated.
+- **Templates and daily notes.** Any note tagged `template` shows up in *New
+  note from a template*, with the same `{{title}}`, `{{path}}`,
+  `{{date:YYYY-MM-DD}}`, `{{time:HH:mm}}` and custom variables the CLI renders.
+  `Ctrl+D` opens today's daily note, creating it only the first time.
+
+The sidebar's *Canvas* and *Files* views round out the workspace without ever
+handing the webview a file path:
+
+- **Canvas.** A board of freeform text cards, group frames, web links, and file
+  nodes that point at a vault note or an encrypted attachment by id. Nodes are
+  dragged on a fixed surface, connected with directed edges, and written back as
+  one encrypted canvas document under the same stale-revision check that guards
+  notes — a canvas edited elsewhere is rejected rather than overwritten. Edits
+  autosave 900 ms after the last change, and a node whose target has since been
+  deleted renders as a missing reference rather than disappearing.
+- **Files.** The attachment library adds files by encrypting their bytes in the
+  Rust core, and decrypts one only when it is previewed or downloaded. Images,
+  audio, video, PDFs and text preview inline from an object URL that is revoked
+  as soon as the preview closes.
+
+### Plugins, without Obsidian's trust model
+
+An Obsidian plugin runs as arbitrary Node inside the app: it can read your whole
+filesystem, and no amount of encryption at rest survives that. Here a plugin is
+a manifest and one JavaScript file, and its reach is finite and declared.
+
+```json
+{
+  "manifestVersion": 1,
+  "id": "word-count",
+  "name": "Word count",
+  "version": "1.0.0",
+  "description": "Shows how many words the open note holds",
+  "author": "example",
+  "capabilities": ["notes:read", "ui:panel", "commands"]
+}
+```
+
+```bash
+sbrain plugins install ./plugin.json ./main.js   # installs, but leaves it off
+sbrain plugins list                              # what is installed and what it may reach
+sbrain plugins enable word-count
+sbrain plugins remove word-count                 # takes the plugin's settings with it
+```
+
+Publishers can bind the manifest and exact source bytes into one Ed25519
+package. The public key travels in the signature; the private key never enters
+the vault:
+
+```bash
+sbrain plugins keygen ./publisher.private.pem
+sbrain plugins sign ./plugin.json ./main.js \
+  --key ./publisher.private.pem --out ./plugin.signed.json
+sbrain plugins install ./plugin.signed.json ./main.js
+
+# Signed-only operation and local emergency revocation
+sbrain plugins restricted on
+sbrain plugins revoke-signer word-count
+sbrain plugins policy
+sbrain plugins restore-signer <64-character-key-id>
+```
+
+Restricted mode refuses unsigned installation and prevents already-installed
+unsigned packages from running. Revocation is keyed by the SHA-256 fingerprint
+of the publisher's Ed25519 public key, so every installed package from that key
+stops on the next plugin refresh; the encrypted policy travels with the vault.
+The first accepted signing key is pinned to that plugin ID, and an update from
+a different key is refused until the old plugin is explicitly removed.
+Signatures prove that the source and manifest have not changed since the holder
+of that key signed them. They do **not** prove who owns a self-declared key, so
+the first trust decision still belongs to the person installing the plugin.
+
+The capabilities are `notes:metadata`, `notes:read`, `notes:write`, `search`,
+`canvas:read`, `canvas:write`, `attachments:read`, `commands`, `ui:notice`,
+`ui:panel` and `storage`. There is deliberately no network capability: it is not
+offered and cannot be requested. A manifest naming a capability this build does
+not know is **refused**, not trimmed — installing it would mean showing you a
+list that understates its reach.
+
+Three things make that list mean something:
+
+- **It runs in a worker with no DOM, no filesystem and no network.** `fetch`,
+  `XMLHttpRequest`, `WebSocket` and `importScripts` are removed before the
+  plugin's first line runs, and the plugin is *loaded* as a worker script rather
+  than `eval`'d — so the app never has to grant `'unsafe-eval'` to anything.
+- **Every call is checked against the manifest.** A method that isn't in the
+  capability table has no capability and is refused, so a host method added
+  without one is unreachable rather than accidentally public.
+- **The Rust command layer is the actual boundary**, and it does not trust the
+  worker or the host. A plugin that escaped the sandbox entirely would still
+  hold only the capabilities the webview itself has — and the vault key never
+  enters the webview at all.
+
+What this does *not* do is protect you from a plugin abusing what you granted.
+`notes:read` means it reads your notes. The defence there is the capability list
+you approve before it runs, and the switch that turns it off.
+
+Plugins and the restricted/revocation policy live encrypted in the vault like
+everything else, so they travel with it, and one cannot be swapped on disk
+without the passphrase. Both the TypeScript CLI core and the Rust desktop core
+verify the same length-prefixed signature payload before a signed package is
+accepted or loaded.
 
 Two session guards protect an unlocked window you walked away from:
 
@@ -266,7 +437,10 @@ prototype-shaping keys are rejected before anything enters encrypted storage.
     "secondbrain-vault": {
       "command": "node",
       "args": ["/absolute/path/to/secondbrain-vault/dist/cli.js", "--vault", "/absolute/path/to/vault/personal", "mcp"],
-      "env": { "SBRAIN_PASSPHRASE": "use-a-real-passphrase-here" }
+      "env": {
+        "SBRAIN_PASSPHRASE": "use-a-real-passphrase-here",
+        "SBRAIN_AGENT": "claude-code"
+      }
     }
   }
 }
@@ -288,6 +462,11 @@ The server exposes five tools:
 | `find_notes_in_range` | No — timestamps/tags only | No |
 | `store_note` | Yes — that's the point | Yes |
 | `resolve_key` | Yes | Yes |
+
+Under a grant policy the three value-free tools return only the keys that
+agent may discover, `store_note` needs a `store` action, and `resolve_key`
+additionally records who asked, under which grant, how much came back, and
+whether the answer was allowed, denied or held for approval.
 
 `store_note` covers both shapes: pass an explicit `key` for a fact that
 should overwrite itself (like `IBAN`), or omit it for a freeform journal

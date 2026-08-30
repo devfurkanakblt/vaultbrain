@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { Copy, Hash, Link2, Plus, Sparkles, Tag, X } from "lucide-react";
+import { Copy, Hash, Link2, Plus, Puzzle, Sparkles, Tag, X } from "lucide-react";
+import type { PluginPanel } from "./plugins/protocol";
 import type { Backlink, NoteDocument, UnlinkedMention } from "./types";
 
 export interface OutlineItem {
@@ -7,7 +8,7 @@ export interface OutlineItem {
   text: string;
 }
 
-export function ContextPanel({ note, outline, backlinks, mentions, onOpen, onCopy, onAliases, onLink }: {
+export function ContextPanel({ note, outline, backlinks, mentions, onOpen, onCopy, onAliases, onLink, panels = [] }: {
   note: NoteDocument;
   outline: OutlineItem[];
   backlinks: Backlink[];
@@ -16,6 +17,8 @@ export function ContextPanel({ note, outline, backlinks, mentions, onOpen, onCop
   onCopy: (label: string, value: string) => void;
   onAliases: (aliases: string[]) => void;
   onLink: (sourceId: string) => Promise<void>;
+  /** Contributed by sandboxed plugins. Rendered as text, never as markup. */
+  panels?: PluginPanel[];
 }) {
   const [draft, setDraft] = useState("");
   const [linking, setLinking] = useState("");
@@ -90,5 +93,10 @@ export function ContextPanel({ note, outline, backlinks, mentions, onOpen, onCop
         >{linking === mention.id ? "Linking…" : `Link ${mention.count}×`}</button>
       </div>) : <p>Nothing names this note in passing.</p>}</div>
     </section>
+
+    {panels.map((panel) => <section key={panel.pluginId}>
+      <div className="context-heading"><span>{panel.title.toUpperCase()}</span><Puzzle size={12} /></div>
+      <pre className="plugin-panel" title={`Contributed by ${panel.pluginName}`}>{panel.body}</pre>
+    </section>)}
   </aside>;
 }

@@ -194,10 +194,6 @@ knowing: a vault last written by the desktop app pays one index rebuild the
 next time the CLI opens it. Teaching the Rust core to maintain the same lookups
 would remove that, and is the natural follow-up.
 
-One interop gap in the same area: the desktop core has no `frontmatterSource`
-field, so a note whose YAML was imported with comments loses that preserved
-source if the desktop app rewrites the note. The CLI round-trip keeps it.
-
 ### Measured at 100,000 notes
 
 Development machine, one run, after the work above. Budgets are from
@@ -247,10 +243,123 @@ longer exists. Three mechanisms keep that from becoming data loss:
   cannot wedge a vault permanently. It does not defend against someone editing
   the files by hand — nothing advisory can.
 
+The Rust desktop core now uses the same `.sbrain.lock` protocol and plaintext
+write-journal shape as the TypeScript core. Every desktop mutation refreshes the
+encrypted index while holding that cross-process lock, note writes announce
+their stable IDs before touching the object, and unlock replays an interrupted
+object write into the index. A stale editor revision is rejected instead of
+overwriting a newer CLI or desktop write. The Rust serializer also preserves
+unknown canvas index fields and `frontmatterSource`; it removes the TypeScript
+lookup-map marker until Rust maintains those maps itself, so the CLI rebuilds
+once rather than trusting stale derived data.
+
 Recovery is covered by fault-injection tests that reproduce a crash at the
 exact point between the object write and the index write, and assert that the
 next unlock heals the index; a control case without the journal shows the index
 would otherwise stay stale.
+
+## The plugin sandbox
+
+Extensibility is where a local-first encrypted app usually gives up its threat
+model. Obsidian's plugins are arbitrary Node in the app process; that is a
+reasonable trade for a plaintext vault and an unreasonable one here.
+
+A plugin is a manifest plus one JavaScript file, stored as a third encrypted
+object type (`objects/<id>.plugin.enc`) beside notes and canvases, with its own
+AAD — so opening a plugin as a note fails authentication rather than needing a
+check that could be forgotten. Its settings live in a separate object again, so
+writing a setting never rewrites the code and reading settings never decrypts
+it.
+
+Three layers, in increasing order of how much they are trusted:
+
+1. **The manifest**, validated in both cores. It says what a plugin may ask for.
+   An unknown capability is refused rather than dropped: dropping it would
+   install a plugin whose reach cannot be described to the person approving it.
+2. **The worker sandbox.** The plugin runs in a Worker with `fetch`,
+   `XMLHttpRequest`, `WebSocket`, `importScripts`, `indexedDB` and friends
+   removed before its first line. It is *loaded* as a worker script rather than
+   evaluated from a string — which is why the app's CSP gains only
+   `worker-src blob:` and never `'unsafe-eval'`. The host checks each call
+   against the shared capability table and refuses an unlisted method, so a host
+   method added without a capability entry is unreachable rather than public.
+   A plugin that will not stop calling is terminated, not throttled in silence.
+3. **The Rust command layer**, which is the actual boundary and trusts neither
+   of the first two. A full escape from the worker into the webview would still
+   hold only what the webview holds, and the vault key is never there.
+
+The capability table lives in one file, `src/plugins.ts`, imported by both the
+Node core and the browser host. The Rust core keeps its own copy so it can
+refuse an unknown capability at install time; a test reads the TypeScript list
+and asserts the two agree, because a table that drifts by one entry is exactly
+how this model would fail quietly.
+
+What the sandbox does not do is protect against a plugin abusing what it was
+granted. `notes:read` means the plugin reads notes. The control there is the
+capability list shown before installation, and the switch that stops it.
+
+Plugin packages may additionally carry an Ed25519 signature over a canonical,
+length-prefixed encoding of the normalized manifest and the exact JavaScript
+source. The signature envelope contains the raw public key; both cores derive
+its SHA-256 key ID and independently verify the same payload. Verification is
+repeated when an encrypted plugin object is loaded, not trusted only because an
+earlier installer accepted it. The signer key is pinned on first signed install:
+an update may move an unsigned plugin to a signed package, but a signed plugin
+cannot move back to unsigned or change signer without explicit removal and a
+fresh install consent step.
+
+The encrypted `plugin-policy.enc` object holds two vault-wide controls:
+
+- **Restricted mode** refuses unsigned installation and makes every unsigned
+  installed plugin non-runnable without deleting it.
+- **Signer revocation** blocks one public-key fingerprint, immediately making
+  every package from that key non-runnable. Restoration is explicit and does
+  not silently turn a stopped plugin back on.
+
+This is package integrity and local trust continuity, not a public identity
+system. A self-contained public key does not prove the publisher's real-world
+identity; users still need an out-of-band reason to trust it the first time.
+
+## Per-agent grants and redaction
+
+Mode 2 used to be all-or-nothing: an agent holding the passphrase could resolve
+any key. `grants.enc` narrows that without changing the trust boundary.
+
+The file's presence is the switch. A vault without one behaves exactly as
+before, so nothing that works today stops working; adding the first grant makes
+the vault enforcing, and the CLI says so at that moment rather than in a
+release note.
+
+A grant binds one agent name to scopes of `file:keys:actions:redaction`, with an
+optional expiry and an optional per-resolution confirmation policy. Evaluation
+has three properties worth naming:
+
+- **Strictest wins.** Where several scopes cover one key, the most restrictive
+  redaction applies, so a later broad grant cannot widen an earlier narrow one.
+- **Revocation is immediate.** The MCP server reloads the policy per call rather
+  than caching it, and revoking a grant also drops that agent's outstanding
+  approvals, so a revoked agent cannot spend a "yes" it was already given.
+- **Confirmation is out of band.** A stdio MCP server has nobody to prompt, so a
+  held resolution is parked in the vault and the owner approves it from their
+  own terminal. The approval is single-use and short-lived: it is deleted as it
+  is spent.
+
+Redaction has `none`, `partial` and `full` levels. `partial` masks the
+identifiers it recognizes — IBANs, card numbers, emails, phone numbers, long
+opaque strings — keeping a short tail so an agent can confirm it found the right
+field; a value it cannot classify is masked anyway rather than passed through.
+`full` returns a description of the value's shape and none of its characters.
+
+What this is not: a boundary. A redacted value still crosses into the calling
+model's context as a redacted value, and `SBRAIN_AGENT` is a name the agent
+chooses, not a credential — anything that can start the server can pick any
+name. The security boundary remains the passphrase and the encrypted files, and
+Mode 1 remains the only path that involves no model at all.
+
+The audit log carries the new facts — agent, grant, redaction level, and whether
+the call was allowed, denied or held — and signs them. They are folded into the
+signed payload only when present, so a log written before grants existed hashes
+byte-for-byte as it did and keeps verifying.
 
 Unlocking is an explicit lifecycle in the core, not only in the desktop shell.
 `DocumentVault.lock()` overwrites the derived key in place and drops the
@@ -272,15 +381,37 @@ The first native desktop slice is operational on Windows:
 
 - a Tauri 2 shell with a strict content-security policy and no filesystem, shell,
   network or dialog plugin exposed to the webview
-- ten explicitly allowlisted IPC commands for unlock, lock, list, open, save,
-  create, search, backlinks, value-minimized graph data and typed property rows
+- forty-six explicitly allowlisted IPC commands for unlock, lock, list, open,
+  save, create, move, delete, history, restore, templates, daily notes, search,
+  backlinks, value-minimized graph data, typed property rows, saved views,
+  workspace state, unlinked mentions, canvases, attachments and plugins
 - a Rust session that derives the scrypt key once, keeps it outside the webview
   and zeroizes it when the vault locks
 - authenticated AES-GCM note/index objects compatible with the TypeScript
   document format, plus Windows-native atomic replacement with write-through
+- content-addressed attachments in the same layout the CLI writes: one encrypted
+  manifest beside 1 MiB chunks, each chunk authenticating its own index, and an
+  address that is an HMAC of the bytes under the vault key rather than a bare
+  digest, so a directory listing does not identify a known file. Bytes cross the
+  IPC boundary base64-encoded; the webview never touches the filesystem
 - a React workspace with an encrypted-vault lock screen, file tree, CodeMirror
   Markdown editing, reading view, search, command palette, properties, outline
   and backlinks, plus local graph and property-table views
+- the full note lifecycle over one journalled write path: a move keeps the note
+  ID so history and ID-resolved links survive it, a delete archives the live
+  revision before unlinking the object so the note stays recoverable, and a
+  restore writes the historical content forward as a new revision instead of
+  rewinding the counter. History lookups accept an ID the live index no longer
+  knows, but only an ID — the titles a deleted note answered to may since have
+  moved to another note
+- template rendering and idempotent daily notes in Rust, with the same variable
+  grammar and local-clock semantics as the TypeScript core, so a note created in
+  the desktop app and one created by the CLI are indistinguishable on disk
+- encrypted canvas documents in the same object layout as notes, holding text,
+  group, link and file nodes plus directed edges. A file node stores the note or
+  attachment id, never a decrypted path, so a deleted target degrades to a
+  missing reference instead of leaking what it used to point at; a canvas write
+  carries its base revision and is rejected if the stored one has moved on
 - a tab strip over an editable primary pane and a read-only split pane, with a
   swap action that promotes the split document into the editor
 - a keyboard-driven quick switcher over titles, paths and aliases that opens a

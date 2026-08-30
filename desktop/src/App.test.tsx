@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { NoteDocument, PropertyRow, SavedView, SearchHit, WorkspaceState } from "./types";
+import type { AttachmentInfo, CanvasDocument, CanvasInput, NoteDocument, PropertyRow, SavedView, SearchHit, WorkspaceState } from "./types";
 import { DEFAULT_THEME, presetSettings, shade } from "./theme";
 
 const sampleNote: NoteDocument = {
@@ -36,6 +36,23 @@ const bridgeMock = vi.hoisted(() => ({
   savedViews: vi.fn(),
   saveView: vi.fn(),
   deleteView: vi.fn(),
+  canvases: vi.fn(),
+  getCanvas: vi.fn(),
+  saveCanvas: vi.fn(),
+  deleteCanvas: vi.fn(),
+  renameNote: vi.fn(),
+  deleteNote: vi.fn(),
+  deletedNotes: vi.fn(),
+  noteRevisions: vi.fn(),
+  noteRevision: vi.fn(),
+  restoreRevision: vi.fn(),
+  templates: vi.fn(),
+  createFromTemplate: vi.fn(),
+  dailyNote: vi.fn(),
+  attachments: vi.fn(),
+  addAttachment: vi.fn(),
+  readAttachment: vi.fn(),
+  deleteAttachment: vi.fn(),
 }));
 
 vi.mock("./bridge", () => ({ vaultBridge: bridgeMock }));
@@ -60,6 +77,29 @@ function withTwoNotes() {
   bridgeMock.getNote.mockImplementation(async (reference: string) =>
     reference === secondNote.id ? { ...secondNote } : { ...sampleNote });
 }
+
+const sampleAttachment: AttachmentInfo = {
+  id: "8ad0a1e1c4f04b0f9b5c1de0f2a37c5b8ad0a1e1c4f04b0f9b5c1de0f2a37c5b",
+  filename: "diagram.png",
+  mime: "image/png",
+  size: 2048,
+  chunks: 1,
+  createdAt: "2026-08-30T08:00:00.000Z",
+};
+
+const sampleCanvas: CanvasDocument = {
+  version: 1,
+  id: "c2f0a4d6-1f6c-4f0f-9a5e-6b7f0f21c8aa",
+  path: "Boards/Product map.canvas",
+  title: "Product map",
+  nodes: [],
+  edges: [],
+  nodeCount: 0,
+  edgeCount: 0,
+  createdAt: "2026-08-30T08:00:00.000Z",
+  updatedAt: "2026-08-30T08:00:00.000Z",
+  revision: 3,
+};
 
 function stubClipboard() {
   let held = "";
@@ -113,6 +153,54 @@ describe("desktop workspace", () => {
     bridgeMock.saveView.mockImplementation(async (view: SavedView) => [
       { ...view, id: view.id || "view-1", createdAt: sampleNote.createdAt, updatedAt: sampleNote.updatedAt },
     ]);
+    bridgeMock.canvases.mockResolvedValue([{
+      id: sampleCanvas.id, path: sampleCanvas.path, title: sampleCanvas.title,
+      nodeCount: 0, edgeCount: 0, updatedAt: sampleCanvas.updatedAt, revision: sampleCanvas.revision,
+    }]);
+    bridgeMock.getCanvas.mockResolvedValue({ ...sampleCanvas });
+    bridgeMock.saveCanvas.mockImplementation(async (input: CanvasInput) => ({
+      ...sampleCanvas, ...input, title: input.title ?? sampleCanvas.title,
+      nodeCount: input.nodes.length, edgeCount: input.edges.length,
+      revision: (input.baseRevision ?? 0) + 1,
+    }));
+    bridgeMock.renameNote.mockImplementation(async (_reference: string, path: string, title?: string) => ({
+      ...sampleNote, path: path.endsWith(".md") ? path : `${path}.md`,
+      title: title ?? sampleNote.title, revision: sampleNote.revision + 1,
+    }));
+    bridgeMock.deleteNote.mockResolvedValue({
+      id: sampleNote.id, path: sampleNote.path, title: sampleNote.title, aliases: sampleNote.aliases,
+      tags: sampleNote.tags, updatedAt: sampleNote.updatedAt, revision: sampleNote.revision,
+    });
+    bridgeMock.deletedNotes.mockResolvedValue([{
+      id: "b7d9e2a6-4f13-4a55-9c2e-0f3a1d5b7c88", path: "Inbox/Removed.md",
+      title: "Removed thought", revision: 4, updatedAt: sampleNote.updatedAt,
+    }]);
+    bridgeMock.noteRevisions.mockResolvedValue([
+      { revision: 7, updatedAt: sampleNote.updatedAt, current: true },
+      { revision: 6, updatedAt: "2026-08-29T08:00:00.000Z", current: false },
+    ]);
+    bridgeMock.noteRevision.mockImplementation(async (_reference: string, revision: number) => ({
+      ...sampleNote, revision, body: `# Product principles\n\nRevision ${revision} text.`,
+    }));
+    bridgeMock.restoreRevision.mockImplementation(async (_reference: string, revision: number) => ({
+      ...sampleNote, revision: 8, body: `# Product principles\n\nRevision ${revision} text.`,
+    }));
+    bridgeMock.templates.mockResolvedValue([{
+      id: "3a0f8f2d-19b2-4f61-9d2a-7c8b5e2f1a04", path: "Templates/Meeting.md", title: "Meeting",
+      aliases: [], tags: ["template"], updatedAt: sampleNote.updatedAt, revision: 2,
+    }]);
+    bridgeMock.createFromTemplate.mockResolvedValue({
+      ...sampleNote, id: "9f2b1c34-77aa-4a0e-bd51-1c6f8a3d2b90",
+      path: "Meetings/Kickoff.md", title: "Kickoff", revision: 1,
+    });
+    bridgeMock.dailyNote.mockResolvedValue({
+      note: { ...sampleNote, id: "5c1a7e90-88fd-4f2b-9f0c-2a4e6b8d1c33", path: "Daily/2026-08-30.md", title: "2026-08-30", revision: 1 },
+      created: true,
+    });
+    bridgeMock.attachments.mockResolvedValue([{ ...sampleAttachment }]);
+    bridgeMock.addAttachment.mockResolvedValue({ ...sampleAttachment });
+    bridgeMock.readAttachment.mockResolvedValue({ info: { ...sampleAttachment }, data: "AQID" });
+    bridgeMock.deleteAttachment.mockResolvedValue({ ...sampleAttachment });
     bridgeMock.updateNoteProperty.mockImplementation(async (id: string, key: string, value: unknown) => ({
       id, path: sampleNote.path, title: sampleNote.title, tags: sampleNote.tags,
       properties: { ...sampleNote.properties, [key]: value }, updatedAt: sampleNote.updatedAt,
@@ -401,6 +489,186 @@ describe("desktop workspace", () => {
     fireEvent.click(within(editor).getByRole("button", { name: /reset to archive/i }));
     await waitFor(() => expect(document.documentElement.style.getPropertyValue("--acid")).toBe(DEFAULT_THEME.accent));
     expect(localStorage.getItem("sbrain:theme")).toBeNull();
+  });
+
+  it("opens a canvas, adds a node and writes the board back encrypted", async () => {
+    await unlockWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "Canvas" }));
+    await waitFor(() => expect(bridgeMock.canvases).toHaveBeenCalled());
+    expect(bridgeMock.attachments).toHaveBeenCalled();
+
+    fireEvent.click(await screen.findByRole("button", { name: /Product map/u }));
+    await waitFor(() => expect(bridgeMock.getCanvas).toHaveBeenCalledWith(sampleCanvas.id));
+
+    fireEvent.click(screen.getByTitle("Add text card"));
+    fireEvent.change(await screen.findByLabelText("Canvas text"), { target: { value: "Pricing thesis" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(bridgeMock.saveCanvas).toHaveBeenCalled());
+    const written = bridgeMock.saveCanvas.mock.calls.at(-1)![0] as CanvasInput;
+    expect(written.id).toBe(sampleCanvas.id);
+    expect(written.baseRevision).toBe(sampleCanvas.revision);
+    expect(written.nodes).toHaveLength(1);
+    expect(written.nodes[0]).toMatchObject({ type: "text", text: "Pricing thesis" });
+  });
+
+  it("places a vault note on the canvas as a linked file node", async () => {
+    withTwoNotes();
+    await unlockWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "Canvas" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Product map/u }));
+    await screen.findByDisplayValue("Product map");
+
+    fireEvent.change(screen.getByLabelText("Note to add"), { target: { value: secondNote.id } });
+    fireEvent.click(screen.getByTitle("Add the selected note"));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(bridgeMock.saveCanvas).toHaveBeenCalled());
+    const written = bridgeMock.saveCanvas.mock.calls.at(-1)![0] as CanvasInput;
+    expect(written.nodes[0]).toMatchObject({ type: "file", noteId: secondNote.id, file: secondNote.path });
+  });
+
+  it("encrypts a chosen file into the attachment library", async () => {
+    await unlockWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "Files" }));
+    await waitFor(() => expect(bridgeMock.attachments).toHaveBeenCalled());
+    expect(await screen.findByText("diagram.png")).toBeInTheDocument();
+
+    const picker = document.querySelector<HTMLInputElement>('input[type="file"]')!;
+    fireEvent.change(picker, {
+      target: { files: [new File([new Uint8Array([1, 2, 3])], "sketch.png", { type: "image/png" })] },
+    });
+
+    await waitFor(() => expect(bridgeMock.addAttachment).toHaveBeenCalledWith("sketch.png", "image/png", "AQID"));
+    expect(await screen.findByText(/1 attachment encrypted and stored/u)).toBeInTheDocument();
+  });
+
+  it("drops canvases and attachments from memory when the vault locks", async () => {
+    await unlockWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "Files" }));
+    expect(await screen.findByText("diagram.png")).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "l", ctrlKey: true });
+    await waitFor(() => expect(bridgeMock.lock).toHaveBeenCalled());
+    expect(screen.queryByText("diagram.png")).not.toBeInTheDocument();
+
+    bridgeMock.attachments.mockClear();
+    fireEvent.change(screen.getByLabelText("Passphrase"), { target: { value: "safe passphrase" } });
+    fireEvent.click(screen.getByRole("button", { name: /unlock workspace/i }));
+    await screen.findByDisplayValue("Product principles");
+    expect(bridgeMock.attachments).not.toHaveBeenCalled();
+  });
+
+  it("moves a note to a new path and keeps the editor on it", async () => {
+    await unlockWorkspace();
+    fireEvent.click(screen.getByTitle("Rename or move this note"));
+    const dialog = await screen.findByRole("dialog", { name: "Rename or move note" });
+    expect(within(dialog).getByLabelText("Logical path")).toHaveValue("Atlas/Product principles");
+
+    fireEvent.change(within(dialog).getByLabelText("Logical path"), { target: { value: "Archive/Principles" } });
+    fireEvent.change(within(dialog).getByLabelText("Title"), { target: { value: "Principles" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Move note" }));
+
+    await waitFor(() => expect(bridgeMock.renameNote).toHaveBeenCalledWith(sampleNote.id, "Archive/Principles", "Principles"));
+    expect(await screen.findByDisplayValue("Principles")).toBeInTheDocument();
+    expect(await screen.findByText(/Moved to Archive\/Principles\.md/u)).toBeInTheDocument();
+  });
+
+  it("deletes the open note and clears it from the workspace", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    bridgeMock.listNotes.mockResolvedValueOnce([{ ...sampleNote }]).mockResolvedValue([]);
+    await unlockWorkspace();
+
+    fireEvent.click(screen.getByTitle("Delete this note"));
+    await waitFor(() => expect(bridgeMock.deleteNote).toHaveBeenCalledWith(sampleNote.id));
+    expect(await screen.findByText("The archive is quiet.")).toBeInTheDocument();
+    expect(screen.getByText(/Restore it from the deleted-notes list/u)).toBeInTheDocument();
+    confirm.mockRestore();
+  });
+
+  it("keeps the note when a delete is declined", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    await unlockWorkspace();
+
+    fireEvent.click(screen.getByTitle("Delete this note"));
+    expect(bridgeMock.deleteNote).not.toHaveBeenCalled();
+    expect(screen.getByDisplayValue("Product principles")).toBeInTheDocument();
+    confirm.mockRestore();
+  });
+
+  it("reads an archived revision and restores it forward", async () => {
+    await unlockWorkspace();
+    fireEvent.click(screen.getByTitle("Encrypted revision history"));
+    const dialog = await screen.findByRole("dialog", { name: "Note history" });
+
+    // The newest non-current revision is selected, so history opens on a diff.
+    await waitFor(() => expect(bridgeMock.noteRevision).toHaveBeenCalledWith(sampleNote.id, 6));
+    expect(await within(dialog).findByText(/Revision 6 text/u)).toBeInTheDocument();
+    expect(within(dialog).getByText("current")).toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: /Restore revision 6/u }));
+    await waitFor(() => expect(bridgeMock.restoreRevision).toHaveBeenCalledWith(sampleNote.id, 6));
+    expect(await screen.findByText(/Restored revision 6 as revision 8/u)).toBeInTheDocument();
+  });
+
+  it("restores a deleted note from its encrypted history", async () => {
+    await unlockWorkspace();
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    const palette = await screen.findByRole("dialog", { name: "Command palette" });
+    fireEvent.click(within(palette).getByRole("button", { name: "Restore a deleted note" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Deleted notes" });
+    expect(await within(dialog).findByText("Removed thought")).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: /restore/i }));
+
+    await waitFor(() => expect(bridgeMock.restoreRevision).toHaveBeenCalledWith("b7d9e2a6-4f13-4a55-9c2e-0f3a1d5b7c88", 4));
+  });
+
+  it("renders a template into a new note with caller variables", async () => {
+    const rendered = { ...sampleNote, id: "9f2b1c34-77aa-4a0e-bd51-1c6f8a3d2b90", path: "Meetings/Kickoff.md", title: "Kickoff", revision: 1 };
+    bridgeMock.getNote.mockImplementation(async (reference: string) =>
+      reference === rendered.id ? { ...rendered } : { ...sampleNote });
+    await unlockWorkspace();
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    const palette = await screen.findByRole("dialog", { name: "Command palette" });
+    fireEvent.click(within(palette).getByRole("button", { name: "New note from a template" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "New note from template" });
+    await waitFor(() => expect(bridgeMock.templates).toHaveBeenCalled());
+    fireEvent.change(within(dialog).getByLabelText("Title"), { target: { value: "Kickoff" } });
+    fireEvent.change(within(dialog).getByLabelText("Folder"), { target: { value: "Meetings/" } });
+    fireEvent.change(within(dialog).getByLabelText("Variables"), { target: { value: "client=Acme\nowner = You" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Create note" }));
+
+    await waitFor(() => expect(bridgeMock.createFromTemplate).toHaveBeenCalledWith(
+      "3a0f8f2d-19b2-4f61-9d2a-7c8b5e2f1a04", "Meetings/Kickoff", "Kickoff",
+      { client: "Acme", owner: "You" },
+    ));
+    expect(await screen.findByDisplayValue("Kickoff")).toBeInTheDocument();
+  });
+
+  it("opens today's daily note from the keyboard", async () => {
+    const daily = { ...sampleNote, id: "5c1a7e90-88fd-4f2b-9f0c-2a4e6b8d1c33", path: "Daily/2026-08-30.md", title: "2026-08-30", revision: 1 };
+    bridgeMock.getNote.mockImplementation(async (reference: string) =>
+      reference === daily.id ? { ...daily } : { ...sampleNote });
+    await unlockWorkspace();
+    fireEvent.keyDown(window, { key: "d", ctrlKey: true });
+
+    await waitFor(() => expect(bridgeMock.dailyNote).toHaveBeenCalled());
+    expect(await screen.findByDisplayValue("2026-08-30")).toBeInTheDocument();
+    expect(screen.getByText(/Created today's note at Daily\/2026-08-30\.md/u)).toBeInTheDocument();
+  });
+
+  it("warns instead of failing when no note is tagged as a template", async () => {
+    bridgeMock.templates.mockResolvedValue([]);
+    await unlockWorkspace();
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    const palette = await screen.findByRole("dialog", { name: "Command palette" });
+    fireEvent.click(within(palette).getByRole("button", { name: "New note from a template" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "New note from template" });
+    expect(within(dialog).getByText(/No note in this vault carries the/u)).toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: "Create note" })).not.toBeInTheDocument();
   });
 
   it("warns when an edited theme drops below readable contrast", async () => {

@@ -50,6 +50,11 @@ const budget = budgetFor(noteCount);
 const shouldAssert = process.argv.includes("--assert");
 const passphrase = "benchmark-only-passphrase";
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "secondbrain-benchmark-"));
+const resolvedRoot = path.resolve(root);
+const resolvedTemp = path.resolve(os.tmpdir());
+if (!resolvedRoot.startsWith(`${resolvedTemp}${path.sep}`)) {
+  throw new Error("Refusing unsafe benchmark cleanup.");
+}
 
 try {
   const createStart = performance.now();
@@ -138,10 +143,5 @@ try {
     console.log(`Performance gates at the ${budget.notes}-note tier: PASS`);
   }
 } finally {
-  const resolvedRoot = path.resolve(root);
-  const resolvedTemp = path.resolve(os.tmpdir());
-  if (!resolvedRoot.startsWith(`${resolvedTemp}${path.sep}`)) {
-    throw new Error("Refusing unsafe benchmark cleanup.");
-  }
   fs.rmSync(resolvedRoot, { recursive: true, force: true });
 }

@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Backlink, Bookmark, KnowledgeGraph, NoteDocument, NoteSummary, PropertyRow, SavedView, SearchHit, UnlinkedMention, VaultInfo, WorkspaceState } from "./types";
+import type { AttachmentContent, AttachmentInfo, Backlink, Bookmark, CanvasDocument, CanvasInput, CanvasSummary, DailyNote, DeletedNote, KnowledgeGraph, NoteDocument, NoteSummary, PluginPackage, PluginSecurityPolicy, PluginSummary, PropertyRow, RevisionInfo, SavedView, SearchHit, UnlinkedMention, VaultInfo, WorkspaceState } from "./types";
 
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -47,6 +47,11 @@ let demoNotes: NoteDocument[] = [
 ];
 
 let demoViews: SavedView[] = [];
+/** Demo mode keeps archived revisions in memory so history and undelete work. */
+let demoHistory: NoteDocument[] = [];
+let demoPlugins: PluginPackage[] = [];
+let demoPluginStorage: Record<string, Record<string, string>> = {};
+let demoPluginPolicy: PluginSecurityPolicy = { version: 1, restrictedMode: false, revokedSigners: [] };
 let demoWorkspace: WorkspaceState = { version: 1, bookmarks: [], layouts: [] };
 
 const WIKILINK = /\[\[[^\]]*\]\]/gu;
@@ -103,6 +108,21 @@ function demoClusters(nodeIds: string[], edges: KnowledgeGraph["edges"]) {
   return new Map(groups.flatMap((group, cluster) => group.map((id) => [id, cluster] as const)));
 }
 
+let demoAttachments: { info: AttachmentInfo; data: string }[] = [];
+let demoCanvases: CanvasDocument[] = [];
+
+/**
+ * Demo mode has no vault key, so this is a plain content hash standing in for
+ * the real address, which is an HMAC of the bytes under the vault key.
+ */
+function demoAttachmentId(data: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < data.length; index += 1) {
+    hash = Math.imul(hash ^ data.charCodeAt(index), 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0").repeat(8);
+}
+
 export const vaultBridge = {
   async unlock(path: string, passphrase: string): Promise<VaultInfo> {
     if (isTauri) return call<VaultInfo>("unlock_vault", { vaultPath: path, passphrase });
@@ -148,13 +168,147 @@ export const vaultBridge = {
     demoNotes = [...demoNotes, note];
     return structuredClone(note);
   },
+  async renameNote(reference: string, path: string, title?: string): Promise<NoteDocument> {
+    if (isTauri) return call<NoteDocument>("rename_note", { reference, path, title });
+    const note = await vaultBridge.getNote(reference);
+    const logical = path.toLowerCase().endsWith(".md") ? path : `${path}.md`;
+    if (demoNotes.some((item) => item.id !== note.id && item.path.toLocaleLowerCase() === logical.toLocaleLowerCase())) {
+      throw new Error(`A note already exists at ${logical}.`);
+    }
+    demoHistory = [...demoHistory, structuredClone(note)];
+    const next: NoteDocument = {
+      ...note,
+      path: logical,
+      title: title?.trim() || note.title,
+      revision: note.revision + 1,
+      updatedAt: new Date().toISOString(),
+    };
+    demoNotes = demoNotes.map((item) => (item.id === note.id ? next : item));
+    return structuredClone(next);
+  },
+  async deleteNote(reference: string): Promise<NoteSummary> {
+    if (isTauri) return call<NoteSummary>("delete_note", { reference });
+    const note = await vaultBridge.getNote(reference);
+    demoHistory = [...demoHistory, structuredClone(note)];
+    demoNotes = demoNotes.filter((item) => item.id !== note.id);
+    const { body: _body, properties: _properties, createdAt: _createdAt, version: _version, ...summary } = note;
+    return summary;
+  },
+  async deletedNotes(): Promise<DeletedNote[]> {
+    if (isTauri) return call<DeletedNote[]>("list_deleted_notes");
+    const latest = new Map<string, NoteDocument>();
+    for (const note of demoHistory) {
+      if (demoNotes.some((item) => item.id === note.id)) continue;
+      const held = latest.get(note.id);
+      if (!held || held.revision < note.revision) latest.set(note.id, note);
+    }
+    return [...latest.values()]
+      .map((note) => ({ id: note.id, path: note.path, title: note.title, revision: note.revision, updatedAt: note.updatedAt }))
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  },
+  async noteRevisions(reference: string): Promise<RevisionInfo[]> {
+    if (isTauri) return call<RevisionInfo[]>("list_note_revisions", { reference });
+    const live = demoNotes.find((note) => note.id === reference || note.path === reference);
+    const id = live?.id ?? reference;
+    const archived = demoHistory
+      .filter((note) => note.id === id)
+      .map((note) => ({ revision: note.revision, updatedAt: note.updatedAt, current: false }));
+    const current = live ? [{ revision: live.revision, updatedAt: live.updatedAt, current: true }] : [];
+    return [...archived, ...current].sort((left, right) => right.revision - left.revision);
+  },
+  async noteRevision(reference: string, revision: number): Promise<NoteDocument> {
+    if (isTauri) return call<NoteDocument>("get_note_revision", { reference, revision });
+    const live = demoNotes.find((note) => note.id === reference || note.path === reference);
+    const id = live?.id ?? reference;
+    if (live?.revision === revision) return structuredClone(live);
+    const archived = demoHistory.find((note) => note.id === id && note.revision === revision);
+    if (!archived) throw new Error(`Revision ${revision} not found for note ${reference}.`);
+    return structuredClone(archived);
+  },
+  async restoreRevision(reference: string, revision: number): Promise<NoteDocument> {
+    if (isTauri) return call<NoteDocument>("restore_note_revision", { reference, revision });
+    const historical = await vaultBridge.noteRevision(reference, revision);
+    const live = demoNotes.find((note) => note.id === historical.id);
+    if (live) demoHistory = [...demoHistory, structuredClone(live)];
+    const base = live?.revision ?? Math.max(0, ...demoHistory.filter((note) => note.id === historical.id).map((note) => note.revision));
+    const restored: NoteDocument = { ...historical, revision: base + 1, updatedAt: new Date().toISOString() };
+    demoNotes = live
+      ? demoNotes.map((note) => (note.id === restored.id ? restored : note))
+      : [...demoNotes, restored];
+    return structuredClone(restored);
+  },
+  async templates(): Promise<NoteSummary[]> {
+    if (isTauri) return call<NoteSummary[]>("list_templates");
+    return demoNotes
+      .filter((note) => note.tags.includes("template"))
+      .map(({ body: _body, properties: _properties, createdAt: _createdAt, version: _version, ...note }) => note)
+      .sort((left, right) => left.path.localeCompare(right.path));
+  },
+  async createFromTemplate(template: string, path: string, title?: string, variables?: Record<string, string>, date?: string): Promise<NoteDocument> {
+    if (isTauri) return call<NoteDocument>("create_from_template", { template, path, title, variables, date });
+    const source = await vaultBridge.getNote(template);
+    const logical = path.toLowerCase().endsWith(".md") ? path : `${path}.md`;
+    if (demoNotes.some((note) => note.path.toLocaleLowerCase() === logical.toLocaleLowerCase())) {
+      throw new Error(`A note already exists at ${logical}.`);
+    }
+    const chosen = title?.trim() || logical.split("/").at(-1)!.replace(/\.md$/iu, "");
+    const render = demoRenderer(chosen, logical, date, variables);
+    const note: NoteDocument = {
+      version: 1,
+      id: crypto.randomUUID(),
+      path: logical,
+      title: render(chosen),
+      body: render(source.body),
+      aliases: [],
+      tags: source.tags.filter((tag) => tag !== "template"),
+      properties: Object.fromEntries(Object.entries(source.properties).map(([key, value]) => [key, typeof value === "string" ? render(value) : value])),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      revision: 1,
+    };
+    demoNotes = [...demoNotes, note];
+    return structuredClone(note);
+  },
+  async dailyNote(date?: string, folder?: string, template?: string): Promise<DailyNote> {
+    if (isTauri) return call<DailyNote>("open_daily_note", { date, folder, template });
+    const day = demoDay(date);
+    const directory = (folder ?? "Daily").trim().replace(/^\/+|\/+$/gu, "");
+    const logical = `${directory ? `${directory}/` : ""}${day}.md`;
+    const existing = demoNotes.find((note) => note.path.toLocaleLowerCase() === logical.toLocaleLowerCase());
+    if (existing) return { note: structuredClone(existing), created: false };
+    if (template) {
+      const note = await vaultBridge.createFromTemplate(template, logical, day, undefined, day);
+      const tagged = { ...note, tags: [...new Set(["daily", ...note.tags])], properties: { ...note.properties, date: day } };
+      demoNotes = demoNotes.map((item) => (item.id === note.id ? tagged : item));
+      return { note: structuredClone(tagged), created: true };
+    }
+    const note: NoteDocument = {
+      version: 1,
+      id: crypto.randomUUID(),
+      path: logical,
+      title: day,
+      body: `# ${day}\n\n`,
+      aliases: [],
+      tags: ["daily"],
+      properties: { date: day },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      revision: 1,
+    };
+    demoNotes = [...demoNotes, note];
+    return { note: structuredClone(note), created: true };
+  },
   async search(query: string): Promise<SearchHit[]> {
     if (isTauri) return call<SearchHit[]>("search_notes", { query, limit: 50 });
     const normalized = query.toLocaleLowerCase();
     if (!normalized) return [];
     return demoNotes
       .filter((note) => `${note.title} ${note.path} ${note.tags.join(" ")} ${note.body}`.toLocaleLowerCase().includes(normalized))
-      .map((note) => ({ ...note, score: note.title.toLocaleLowerCase().includes(normalized) ? 20 : 4, excerpt: note.body.replace(/[#*_\[\]]/gu, " ").slice(0, 150) }))
+      .map((note) => ({
+        ...note,
+        score: note.title.toLocaleLowerCase().includes(normalized) ? 20 : 4,
+        excerpt: note.body.replace(/[#*_]/gu, " ").replaceAll("[", " ").replaceAll("]", " ").slice(0, 150),
+      }))
       .sort((a, b) => b.score - a.score);
   },
   async backlinks(reference: string): Promise<Backlink[]> {
@@ -270,6 +424,57 @@ export const vaultBridge = {
     }
     return mentions.sort((left, right) => left.path.localeCompare(right.path));
   },
+  async canvases(): Promise<CanvasSummary[]> {
+    if (isTauri) return call<CanvasSummary[]>("list_canvases");
+    return demoCanvases
+      .map(({ nodes, edges, createdAt: _createdAt, version: _version, ...summary }) => ({
+        ...summary,
+        nodeCount: nodes.length,
+        edgeCount: edges.length,
+      }))
+      .sort((left, right) => left.path.localeCompare(right.path));
+  },
+  async getCanvas(reference: string): Promise<CanvasDocument> {
+    if (isTauri) return call<CanvasDocument>("get_canvas", { reference });
+    const normalized = reference.toLocaleLowerCase().replace(/\.canvas$/u, "");
+    const canvas = demoCanvases.find((item) => item.id === reference
+      || item.path.toLocaleLowerCase().replace(/\.canvas$/u, "") === normalized
+      || item.title.toLocaleLowerCase() === normalized);
+    if (!canvas) throw new Error(`Canvas not found: ${reference}`);
+    return structuredClone(canvas);
+  },
+  async saveCanvas(input: CanvasInput): Promise<CanvasDocument> {
+    if (isTauri) return call<CanvasDocument>("save_canvas", { input });
+    const canvasPath = input.path.toLocaleLowerCase().endsWith(".canvas") ? input.path : `${input.path}.canvas`;
+    const existing = demoCanvases.find((item) => item.id === input.id || item.path.toLocaleLowerCase() === canvasPath.toLocaleLowerCase());
+    if (existing && input.baseRevision !== undefined && input.baseRevision !== existing.revision) {
+      throw new Error(`Canvas revision conflict: expected ${input.baseRevision}, current ${existing.revision}.`);
+    }
+    const stamp = new Date().toISOString();
+    const canvas: CanvasDocument = {
+      version: 1,
+      id: existing?.id ?? input.id ?? crypto.randomUUID(),
+      path: canvasPath,
+      title: input.title?.trim() || canvasPath.split("/").at(-1)?.replace(/\.canvas$/iu, "") || "Untitled canvas",
+      nodes: structuredClone(input.nodes),
+      edges: structuredClone(input.edges),
+      nodeCount: input.nodes.length,
+      edgeCount: input.edges.length,
+      createdAt: existing?.createdAt ?? input.createdAt ?? stamp,
+      updatedAt: stamp,
+      revision: (existing?.revision ?? 0) + 1,
+    };
+    demoCanvases = existing
+      ? demoCanvases.map((item) => item.id === existing.id ? canvas : item)
+      : [...demoCanvases, canvas];
+    return structuredClone(canvas);
+  },
+  async deleteCanvas(reference: string): Promise<CanvasDocument> {
+    if (isTauri) return call<CanvasDocument>("delete_canvas", { reference });
+    const canvas = await vaultBridge.getCanvas(reference);
+    demoCanvases = demoCanvases.filter((item) => item.id !== canvas.id);
+    return canvas;
+  },
   async linkMention(source: string, target: string): Promise<UnlinkedMention[]> {
     if (isTauri) return call<UnlinkedMention[]>("link_unlinked_mention", { source, target });
     const from = demoNotes.find((note) => note.id === source);
@@ -285,7 +490,183 @@ export const vaultBridge = {
     demoNotes = demoNotes.map((note) => (note.id === from.id ? next : note));
     return vaultBridge.unlinkedMentions(target);
   },
+  async plugins(): Promise<PluginSummary[]> {
+    if (isTauri) return call<PluginSummary[]>("list_plugins");
+    return demoPlugins.map(summarizeDemoPlugin).sort((left, right) => left.name.localeCompare(right.name));
+  },
+  async getPlugin(reference: string): Promise<PluginPackage> {
+    if (isTauri) return call<PluginPackage>("get_plugin", { reference });
+    const plugin = demoPlugins.find((item) => item.id === reference || item.manifest.id === reference);
+    if (!plugin) throw new Error(`Plugin not found: ${reference}`);
+    return structuredClone(plugin);
+  },
+  async pluginSecurityPolicy(): Promise<PluginSecurityPolicy> {
+    if (isTauri) return call<PluginSecurityPolicy>("get_plugin_security_policy");
+    return structuredClone(demoPluginPolicy);
+  },
+  async setPluginRestrictedMode(restrictedMode: boolean): Promise<PluginSecurityPolicy> {
+    if (isTauri) return call<PluginSecurityPolicy>("set_plugin_restricted_mode", { restrictedMode });
+    demoPluginPolicy = { ...demoPluginPolicy, restrictedMode };
+    return structuredClone(demoPluginPolicy);
+  },
+  async revokePluginSigner(reference: string): Promise<PluginSecurityPolicy> {
+    if (isTauri) return call<PluginSecurityPolicy>("revoke_plugin_signer", { reference });
+    const plugin = await vaultBridge.getPlugin(reference);
+    const signer = plugin.signature?.keyId ?? (plugin.manifest.signature ? `demo-${plugin.manifest.id}` : undefined);
+    if (!signer) throw new Error("An unsigned plugin has no signer to revoke.");
+    demoPluginPolicy = {
+      ...demoPluginPolicy,
+      revokedSigners: [...new Set([...demoPluginPolicy.revokedSigners, signer])],
+    };
+    demoPlugins = demoPlugins.map((item) => {
+      const itemSigner = item.signature?.keyId ?? (item.manifest.signature ? `demo-${item.manifest.id}` : undefined);
+      return itemSigner === signer ? { ...item, enabled: false } : item;
+    });
+    return structuredClone(demoPluginPolicy);
+  },
+  async restorePluginSigner(keyId: string): Promise<PluginSecurityPolicy> {
+    if (isTauri) return call<PluginSecurityPolicy>("restore_plugin_signer", { keyId });
+    demoPluginPolicy = {
+      ...demoPluginPolicy,
+      revokedSigners: demoPluginPolicy.revokedSigners.filter((entry) => entry !== keyId),
+    };
+    return structuredClone(demoPluginPolicy);
+  },
+  async installPlugin(manifest: PluginPackage["manifest"], source: string, enabled?: boolean): Promise<PluginSummary> {
+    if (isTauri) return call<PluginSummary>("install_plugin", { manifest, source, enabled });
+    if (demoPluginPolicy.restrictedMode && !manifest.signature) {
+      throw new Error("Restricted mode accepts cryptographically signed plugins only.");
+    }
+    const existing = demoPlugins.find((item) => item.manifest.id === manifest.id);
+    const stamp = new Date().toISOString();
+    const plugin: PluginPackage = {
+      version: 1,
+      id: existing?.id ?? crypto.randomUUID(),
+      manifest,
+      source,
+      enabled: enabled ?? existing?.enabled ?? false,
+      installedAt: existing?.installedAt ?? stamp,
+      updatedAt: stamp,
+      revision: (existing?.revision ?? 0) + 1,
+    };
+    demoPlugins = existing
+      ? demoPlugins.map((item) => (item.id === existing.id ? plugin : item))
+      : [...demoPlugins, plugin];
+    return summarizeDemoPlugin(plugin);
+  },
+  async setPluginEnabled(reference: string, enabled: boolean): Promise<PluginSummary> {
+    if (isTauri) return call<PluginSummary>("set_plugin_enabled", { reference, enabled });
+    const plugin = await vaultBridge.getPlugin(reference);
+    const next = { ...plugin, enabled, updatedAt: new Date().toISOString() };
+    demoPlugins = demoPlugins.map((item) => (item.id === plugin.id ? next : item));
+    return summarizeDemoPlugin(next);
+  },
+  async deletePlugin(reference: string): Promise<PluginSummary> {
+    if (isTauri) return call<PluginSummary>("delete_plugin", { reference });
+    const plugin = await vaultBridge.getPlugin(reference);
+    demoPlugins = demoPlugins.filter((item) => item.id !== plugin.id);
+    delete demoPluginStorage[plugin.id];
+    return summarizeDemoPlugin(plugin);
+  },
+  async pluginStorage(reference: string): Promise<Record<string, string>> {
+    if (isTauri) return call<Record<string, string>>("get_plugin_storage", { reference });
+    const plugin = await vaultBridge.getPlugin(reference);
+    return { ...(demoPluginStorage[plugin.id] ?? {}) };
+  },
+  async savePluginStorage(reference: string, data: Record<string, string>): Promise<Record<string, string>> {
+    if (isTauri) return call<Record<string, string>>("set_plugin_storage", { reference, data });
+    const plugin = await vaultBridge.getPlugin(reference);
+    demoPluginStorage = { ...demoPluginStorage, [plugin.id]: { ...data } };
+    return { ...data };
+  },
+  async attachments(): Promise<AttachmentInfo[]> {
+    if (isTauri) return call<AttachmentInfo[]>("list_attachments");
+    return demoAttachments.map((entry) => structuredClone(entry.info));
+  },
+  /** `data` is base64: bytes cross the IPC boundary as JSON or not at all. */
+  async addAttachment(filename: string, mime: string, data: string): Promise<AttachmentInfo> {
+    if (isTauri) return call<AttachmentInfo>("add_attachment", { filename, mime, data });
+    if (!data) throw new Error("Attachments must be between 1 byte and 250 MiB.");
+    const id = demoAttachmentId(data);
+    const existing = demoAttachments.find((entry) => entry.info.id === id);
+    if (existing) return structuredClone(existing.info);
+    const info: AttachmentInfo = {
+      id,
+      filename: filename.trim(),
+      mime: mime.trim().toLowerCase(),
+      size: Math.floor((data.length * 3) / 4),
+      chunks: 1,
+      createdAt: new Date().toISOString(),
+    };
+    demoAttachments = [...demoAttachments, { info, data }];
+    return structuredClone(info);
+  },
+  async readAttachment(id: string): Promise<AttachmentContent> {
+    if (isTauri) return call<AttachmentContent>("read_attachment", { id });
+    const entry = demoAttachments.find((item) => item.info.id === id);
+    if (!entry) throw new Error(`Attachment not found: ${id}`);
+    return structuredClone(entry);
+  },
+  async deleteAttachment(id: string): Promise<AttachmentInfo> {
+    if (isTauri) return call<AttachmentInfo>("delete_attachment", { id });
+    const entry = demoAttachments.find((item) => item.info.id === id);
+    if (!entry) throw new Error(`Attachment not found: ${id}`);
+    demoAttachments = demoAttachments.filter((item) => item.info.id !== id);
+    return structuredClone(entry.info);
+  },
 };
+
+/** Demo-mode mirror of the Rust template renderer, same variable grammar. */
+function demoRenderer(title: string, path: string, date: string | undefined, variables?: Record<string, string>) {
+  const when = date ? new Date(`${date}T12:00:00`) : new Date();
+  const pad = (value: number) => String(value).padStart(2, "0");
+  const stamp = (format: string) => format.replace(/YYYY|MM|DD|HH|mm|ss/gu, (token) => ({
+    YYYY: String(when.getFullYear()),
+    MM: pad(when.getMonth() + 1),
+    DD: pad(when.getDate()),
+    HH: pad(when.getHours()),
+    mm: pad(when.getMinutes()),
+    ss: pad(when.getSeconds()),
+  })[token]!);
+  return (text: string) => text.replace(/\{\{\s*([\w.-]+)(?::([^}]+))?\s*\}\}/gu, (whole, name: string, format?: string) => {
+    if (name === "date") return stamp(format?.trim() || "YYYY-MM-DD");
+    if (name === "time") return stamp(format?.trim() || "HH:mm");
+    if (name === "title") return title;
+    if (name === "path") return path;
+    if (name === "year") return stamp("YYYY");
+    if (name === "month") return stamp("MM");
+    if (name === "day") return stamp("DD");
+    return variables?.[name] ?? whole;
+  });
+}
+
+function demoDay(date?: string) {
+  const when = date ? new Date(`${date}T12:00:00`) : new Date();
+  if (Number.isNaN(when.getTime())) throw new Error("A daily note date must use YYYY-MM-DD.");
+  return `${when.getFullYear()}-${String(when.getMonth() + 1).padStart(2, "0")}-${String(when.getDate()).padStart(2, "0")}`;
+}
+
+function summarizeDemoPlugin(plugin: PluginPackage): PluginSummary {
+  const signer = plugin.signature?.keyId ?? (plugin.manifest.signature ? `demo-${plugin.manifest.id}` : undefined);
+  const revoked = Boolean(signer && demoPluginPolicy.revokedSigners.includes(signer));
+  const signatureStatus = revoked ? "revoked" : signer ? "verified" : "unsigned";
+  return {
+    id: plugin.id,
+    manifestId: plugin.manifest.id,
+    name: plugin.manifest.name,
+    version: plugin.manifest.version,
+    description: plugin.manifest.description,
+    author: plugin.manifest.author,
+    capabilities: plugin.manifest.capabilities,
+    enabled: plugin.enabled && !revoked && (!demoPluginPolicy.restrictedMode || signatureStatus === "verified"),
+    signatureStatus,
+    ...(signer ? { signer } : {}),
+    signed: signatureStatus === "verified",
+    sourceBytes: new TextEncoder().encode(plugin.source).length,
+    updatedAt: plugin.updatedAt,
+    revision: plugin.revision,
+  };
+}
 
 function rowOf(note: NoteDocument): PropertyRow {
   return {

@@ -7,3 +7,4 @@ vault/**/audit.log
 .env
 .sbrain.lock
 src-tauri/gen/
+src-tauri/vault/

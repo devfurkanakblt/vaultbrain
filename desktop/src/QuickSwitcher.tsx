@@ -44,7 +44,8 @@ export function QuickSwitcher({ notes, onClose, onOpen, onSplit }: {
   function choose(index: number, split = false) {
     const match = matches[index];
     if (!match) return;
-    split ? onSplit(match.note.id) : onOpen(match.note.id);
+    if (split) onSplit(match.note.id);
+    else onOpen(match.note.id);
     onClose();
   }
 

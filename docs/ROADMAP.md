@@ -52,7 +52,8 @@ Each phase must ship a usable vertical slice and keep older vaults readable.
 
 - [x] Value-minimized local graph baseline from the encrypted link index
 - [x] Global graph clustering and large-graph virtualization
-- [ ] Canvas/whiteboard with encrypted assets
+- [x] Content-addressed encrypted attachments in the desktop core
+- [x] Canvas/whiteboard with encrypted assets
 - [x] Database-like property table with local filtering and column sorting
 - [x] Saved property queries and editable cells
 - [x] Bookmarks, workspaces, aliases and unlinked mentions
@@ -60,10 +61,11 @@ Each phase must ship a usable vertical slice and keep older vaults readable.
 
 ## Phase 5 — Controlled ecosystem and AI
 
-- [ ] Capability manifest and sandboxed plugin runtime
-- [ ] Signed plugin packages, restricted mode and revocation
-- [ ] Per-agent scoped grants with expiry and confirmation policies
-- [ ] Redaction-aware MCP results and local-model adapter
+- [x] Capability manifest and sandboxed plugin runtime
+- [x] Signed plugin packages, restricted mode and revocation
+- [x] Per-agent scoped grants with expiry and confirmation policies
+- [x] Redaction-aware MCP results
+- [ ] Local-model adapter
 - [ ] Importer for Obsidian vaults with integrity report
 
 ## Phase 6 — Encrypted sync and mobile
@@ -76,12 +78,9 @@ Each phase must ship a usable vertical slice and keep older vaults readable.
 
 ## Known gaps carried forward
 
-Recorded here rather than lost: both come from the TypeScript core and the Rust
-desktop core being two implementations of one on-disk format.
+Recorded here rather than lost: this comes from the TypeScript core and the
+Rust desktop core being two implementations of one on-disk format.
 
 - The desktop core does not maintain the index lookup maps the CLI core added
   for large vaults. The format stays compatible, but a vault last written by
   the desktop app pays one index rebuild the next time the CLI opens it.
-- The desktop core has no `frontmatterSource` field, so a note whose YAML was
-  imported with comments loses that preserved source if the desktop app
-  rewrites it. The CLI round-trip keeps it.

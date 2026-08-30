@@ -33,6 +33,106 @@ description = "Allows creating one note at a validated logical Markdown path."
 commands.allow = ["create_note"]
 
 [[permission]]
+identifier = "allow-rename-note"
+description = "Allows moving or retitling one note at a validated logical Markdown path."
+commands.allow = ["rename_note"]
+
+[[permission]]
+identifier = "allow-delete-note"
+description = "Allows removing one note's object while keeping its encrypted history for recovery."
+commands.allow = ["delete_note"]
+
+[[permission]]
+identifier = "allow-list-deleted-notes"
+description = "Allows listing notes that still have encrypted history but no live object."
+commands.allow = ["list_deleted_notes"]
+
+[[permission]]
+identifier = "allow-list-note-revisions"
+description = "Allows listing the archived and live revisions of one referenced note."
+commands.allow = ["list_note_revisions"]
+
+[[permission]]
+identifier = "allow-get-note-revision"
+description = "Allows decrypting one archived revision of one referenced note."
+commands.allow = ["get_note_revision"]
+
+[[permission]]
+identifier = "allow-restore-note-revision"
+description = "Allows writing one archived revision forward as the note's new revision."
+commands.allow = ["restore_note_revision"]
+
+[[permission]]
+identifier = "allow-list-templates"
+description = "Allows listing the notes the unlocked vault marks as templates."
+commands.allow = ["list_templates"]
+
+[[permission]]
+identifier = "allow-create-from-template"
+description = "Allows creating one note by rendering a template's body and properties."
+commands.allow = ["create_from_template"]
+
+[[permission]]
+identifier = "allow-open-daily-note"
+description = "Allows opening, or first creating, the daily note for one calendar date."
+commands.allow = ["open_daily_note"]
+
+[[permission]]
+identifier = "allow-list-plugins"
+description = "Allows listing installed plugins, their versions and the capabilities they declared."
+commands.allow = ["list_plugins"]
+
+[[permission]]
+identifier = "allow-get-plugin"
+description = "Allows reading one plugin's manifest and source so the sandbox worker can be built."
+commands.allow = ["get_plugin"]
+
+[[permission]]
+identifier = "allow-get-plugin-security-policy"
+description = "Allows reading restricted mode and locally revoked signer key IDs."
+commands.allow = ["get_plugin_security_policy"]
+
+[[permission]]
+identifier = "allow-set-plugin-restricted-mode"
+description = "Allows switching the unlocked vault between consent mode and signed-only restricted mode."
+commands.allow = ["set_plugin_restricted_mode"]
+
+[[permission]]
+identifier = "allow-revoke-plugin-signer"
+description = "Allows blocking the verified signer of one installed plugin in this vault."
+commands.allow = ["revoke_plugin_signer"]
+
+[[permission]]
+identifier = "allow-restore-plugin-signer"
+description = "Allows removing one signer key ID from this vault's local revocation list."
+commands.allow = ["restore_plugin_signer"]
+
+[[permission]]
+identifier = "allow-install-plugin"
+description = "Allows storing one plugin's manifest and source, encrypted, in the unlocked vault."
+commands.allow = ["install_plugin"]
+
+[[permission]]
+identifier = "allow-set-plugin-enabled"
+description = "Allows turning one installed plugin on or off."
+commands.allow = ["set_plugin_enabled"]
+
+[[permission]]
+identifier = "allow-delete-plugin"
+description = "Allows removing one plugin and the settings it owns from the unlocked vault."
+commands.allow = ["delete_plugin"]
+
+[[permission]]
+identifier = "allow-get-plugin-storage"
+description = "Allows reading one plugin's own encrypted settings namespace."
+commands.allow = ["get_plugin_storage"]
+
+[[permission]]
+identifier = "allow-set-plugin-storage"
+description = "Allows writing one plugin's own encrypted settings namespace."
+commands.allow = ["set_plugin_storage"]
+
+[[permission]]
 identifier = "allow-search-notes"
 description = "Allows searching the already-unlocked encrypted index."
 commands.allow = ["search_notes"]
@@ -91,3 +191,43 @@ commands.allow = ["get_unlinked_mentions"]
 identifier = "allow-link-unlinked-mention"
 description = "Allows rewriting one source note so its plain-text mentions become links."
 commands.allow = ["link_unlinked_mention"]
+
+[[permission]]
+identifier = "allow-list-canvases"
+description = "Allows reading canvas names and node counts from the unlocked vault."
+commands.allow = ["list_canvases"]
+
+[[permission]]
+identifier = "allow-get-canvas"
+description = "Allows decrypting one explicitly referenced canvas after unlock."
+commands.allow = ["get_canvas"]
+
+[[permission]]
+identifier = "allow-save-canvas"
+description = "Allows writing one canvas at a validated logical path in the unlocked vault."
+commands.allow = ["save_canvas"]
+
+[[permission]]
+identifier = "allow-delete-canvas"
+description = "Allows removing one canvas from the unlocked vault while keeping its encrypted history."
+commands.allow = ["delete_canvas"]
+
+[[permission]]
+identifier = "allow-add-attachment"
+description = "Allows storing one content-addressed, chunk-encrypted attachment in the unlocked vault."
+commands.allow = ["add_attachment"]
+
+[[permission]]
+identifier = "allow-read-attachment"
+description = "Allows decrypting one explicitly referenced attachment after unlock."
+commands.allow = ["read_attachment"]
+
+[[permission]]
+identifier = "allow-list-attachments"
+description = "Allows reading attachment names, types and sizes from the unlocked vault."
+commands.allow = ["list_attachments"]
+
+[[permission]]
+identifier = "allow-delete-attachment"
+description = "Allows removing one attachment and every chunk it owns from the unlocked vault."
+commands.allow = ["delete_attachment"]

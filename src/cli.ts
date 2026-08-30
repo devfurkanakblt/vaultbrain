@@ -16,6 +16,21 @@ import { appendAudit, readAudit, verifyAudit } from "./audit.js";
 import { getPassphrase, readSecret } from "./passphrase.js";
 import { forgetPassphrase, keychain, recallPassphrase, rememberPassphrase } from "./keychain.js";
 import { startMcpServer } from "./mcp-server.js";
+import {
+  addGrant,
+  approveRequest,
+  denyRequest,
+  grantsExist,
+  listGrants,
+  normalizeScope,
+  pendingRequests,
+  revokeGrant,
+  type GrantAction,
+  type GrantScope,
+} from "./grants.js";
+import { isRedactionLevel, REDACTION_LEVELS, type RedactionLevel } from "./redaction.js";
+import { describeCapabilities, parsePluginManifest, type PluginCapability } from "./plugins.js";
+import { generatePluginSigningKey, signPluginPackage } from "./plugin-signatures.js";
 import { DocumentVault, type PropertyValue } from "./documents.js";
 import { writeFileAtomic } from "./fs-safe.js";
 import {
@@ -407,6 +422,157 @@ docs
   });
 
 docs
+  .command("canvas-import <path> <source.canvas>")
+  .description("import a JSON Canvas file into encrypted canvas storage")
+  .action(async (canvasPath, source) => {
+    const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
+    const dir = program.opts().vault;
+    const canvas = new DocumentVault(dir, passphrase).importCanvas(
+      canvasPath,
+      fs.readFileSync(source, "utf8")
+    );
+    appendAudit(dir, { actor: "cli-direct-write", file: "canvases", key: canvas.id }, passphrase);
+    console.log(`Imported ${canvas.path} (${canvas.id}, revision ${canvas.revision}).`);
+  });
+
+docs
+  .command("canvases")
+  .description("list encrypted canvas metadata after unlocking")
+  .action(async () => {
+    const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
+    const vault = new DocumentVault(program.opts().vault, passphrase);
+    for (const canvas of vault.listCanvases()) {
+      console.log(
+        `${canvas.path}  — ${canvas.title}  (${canvas.id}, r${canvas.revision}, ${canvas.nodeCount} nodes, ${canvas.edgeCount} edges)`
+      );
+    }
+  });
+
+docs
+  .command("canvas-get <reference>")
+  .description("decrypt one canvas by ID, path or title")
+  .action(async (reference) => {
+    const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
+    const dir = program.opts().vault;
+    const canvas = new DocumentVault(dir, passphrase).getCanvas(reference);
+    appendAudit(dir, { actor: "cli-direct", file: "canvases", key: canvas.id }, passphrase);
+    process.stdout.write(`${JSON.stringify(canvas, null, 2)}\n`);
+  });
+
+docs
+  .command("canvas-export <reference> <destination>")
+  .description("export one canvas as portable JSON Canvas")
+  .option("--assets <dir>", "explicitly decrypt referenced attachment bytes into this directory")
+  .action(async (reference, destination, opts) => {
+    const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
+    const dir = program.opts().vault;
+    const vault = new DocumentVault(dir, passphrase);
+    const canvas = vault.getCanvas(reference);
+    const assetsLabel = opts.assets ? path.basename(path.resolve(opts.assets)) : "assets";
+    writeFileAtomic(path.resolve(destination), vault.exportCanvas(canvas.id, assetsLabel), { mode: 0o600 });
+
+    if (opts.assets) {
+      const assetsDir = path.resolve(opts.assets);
+      const filenames = new Set<string>();
+      for (const node of canvas.nodes) {
+        if (node.type !== "file" || !node.attachmentId) continue;
+        const attachment = vault.getAttachment(node.attachmentId);
+        const filename = path.basename(attachment.info.filename);
+        if (filenames.has(filename)) {
+          throw new Error(`Two canvas attachments export as the same filename: ${filename}`);
+        }
+        filenames.add(filename);
+        writeFileAtomic(path.join(assetsDir, filename), attachment.data, { mode: 0o600 });
+      }
+    }
+    appendAudit(dir, { actor: "cli-direct", file: "canvases", key: canvas.id }, passphrase);
+    console.log(`Exported ${canvas.path} to ${path.resolve(destination)}.`);
+  });
+
+docs
+  .command("canvas-remove <reference>")
+  .description("delete one encrypted canvas without cascading to notes or attachments")
+  .action(async (reference) => {
+    const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
+    const dir = program.opts().vault;
+    const canvas = new DocumentVault(dir, passphrase).removeCanvas(reference);
+    appendAudit(dir, { actor: "cli-direct-write", file: "canvases", key: canvas.id }, passphrase);
+    console.log(`Removed ${canvas.path} (${canvas.id}).`);
+  });
+
+docs
+  .command("canvas-rename <reference> <new-path>")
+  .description("rename or move a canvas without changing its stable ID")
+  .action(async (reference, newPath) => {
+    const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
+    const dir = program.opts().vault;
+    const canvas = new DocumentVault(dir, passphrase).renameCanvas(reference, newPath);
+    appendAudit(dir, { actor: "cli-direct-write", file: "canvases", key: canvas.id }, passphrase);
+    console.log(`Renamed to ${canvas.path} (${canvas.id}, revision ${canvas.revision}).`);
+  });
+
+docs
+  .command("canvas-history <reference>")
+  .description("list encrypted revisions for an active or deleted canvas ID")
+  .action(async (reference) => {
+    const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
+    const vault = new DocumentVault(program.opts().vault, passphrase);
+    for (const revision of vault.canvasRevisions(reference)) {
+      console.log(`r${revision.revision}  ${revision.updatedAt}${revision.current ? "  CURRENT" : ""}`);
+    }
+  });
+
+docs
+  .command("canvas-revision <reference> <number>")
+  .description("decrypt and print one historical canvas revision")
+  .action(async (reference, number) => {
+    const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
+    const dir = program.opts().vault;
+    const canvas = new DocumentVault(dir, passphrase).getCanvasRevision(
+      reference,
+      Number.parseInt(number, 10)
+    );
+    appendAudit(dir, { actor: "cli-direct", file: "canvases", key: canvas.id }, passphrase);
+    process.stdout.write(`${JSON.stringify(canvas, null, 2)}\n`);
+  });
+
+docs
+  .command("canvas-restore <reference> <number>")
+  .description("restore a historical canvas as a new current revision")
+  .action(async (reference, number) => {
+    const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
+    const dir = program.opts().vault;
+    const canvas = new DocumentVault(dir, passphrase).restoreCanvas(
+      reference,
+      Number.parseInt(number, 10)
+    );
+    appendAudit(dir, { actor: "cli-direct-write", file: "canvases", key: canvas.id }, passphrase);
+    console.log(`Restored ${canvas.path} as revision ${canvas.revision}.`);
+  });
+
+docs
+  .command("canvas-refs <note-reference>")
+  .description("list canvases that reference a note")
+  .action(async (noteReference) => {
+    const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
+    const vault = new DocumentVault(program.opts().vault, passphrase);
+    for (const canvas of vault.canvasesReferencing(noteReference)) {
+      console.log(`${canvas.path}  — ${canvas.title}  (${canvas.id})`);
+    }
+  });
+
+docs
+  .command("attachments-unreferenced")
+  .description("report attachments not referenced by notes or canvases; never deletes them")
+  .action(async () => {
+    const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
+    const vault = new DocumentVault(program.opts().vault, passphrase);
+    for (const info of vault.unreferencedAttachments()) {
+      console.log(`${info.id}  ${info.size} bytes  ${info.mime}  ${info.filename}`);
+    }
+  });
+
+docs
   .command("from-template <template> <path>")
   .description("create an encrypted note from another note used as a safe template")
   .option("--title <title>", "target note title")
@@ -458,6 +624,334 @@ docs
     console.log(`${result.created ? "Created" : "Opened"} ${result.note.path} (${result.note.id}).`);
   });
 
+/**
+ * `--scope health:IBAN,CARD*:resolve:partial`
+ *
+ * Written positionally on purpose: a grant is short enough to read in one line
+ * in a terminal, and a person approving access should be able to see the whole
+ * of what they are granting without opening an editor.
+ */
+function parseScope(input: string): GrantScope {
+  const [file, keys, actions, redact = "none"] = input.split(":");
+  if (!file || !keys || !actions) {
+    throw new Error(
+      `Invalid scope: ${input}. Use file:keys:actions[:redaction], e.g. health:*:discover,resolve:partial`
+    );
+  }
+  if (!isRedactionLevel(redact)) {
+    throw new Error(`Invalid redaction level: ${redact}. Use one of ${REDACTION_LEVELS.join(", ")}.`);
+  }
+  return normalizeScope({
+    file,
+    keys: keys.split(",").map((value) => value.trim()).filter(Boolean),
+    actions: actions.split(",").map((value) => value.trim()).filter(Boolean) as GrantAction[],
+    redact: redact as RedactionLevel,
+  });
+}
+
+/** `7d`, `12h`, `30m`, or an absolute ISO timestamp. */
+function parseExpiry(input?: string): string | null {
+  if (!input) return null;
+  const relative = /^(\d+)([mhd])$/u.exec(input.trim());
+  if (relative) {
+    const amount = Number(relative[1]);
+    const unit = { m: 60_000, h: 3_600_000, d: 86_400_000 }[relative[2] as "m" | "h" | "d"];
+    return new Date(Date.now() + amount * unit).toISOString();
+  }
+  const absolute = new Date(input);
+  if (Number.isNaN(absolute.getTime())) {
+    throw new Error(`Invalid expiry: ${input}. Use 30m, 12h, 7d or an ISO timestamp.`);
+  }
+  return absolute.toISOString();
+}
+
+const grant = program
+  .command("grant")
+  .description("per-agent scoped grants: who may discover, resolve or store what, and how masked");
+
+grant
+  .command("add <agent>")
+  .description("grant one agent identity a narrow, optionally expiring slice of the vault")
+  .requiredOption(
+    "--scope <scope...>",
+    "file:keys:actions[:redaction], e.g. health:*:discover,resolve:partial"
+  )
+  .option("--expires <when>", "30m, 12h, 7d or an ISO timestamp; omit for no expiry")
+  .option("--confirm", "hold every resolution for your approval before it is answered")
+  .option("--note <text>", "why this grant exists, for your own review later")
+  .action(async (agentName, opts) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const first = !grantsExist(dir);
+    const created = addGrant(
+      dir,
+      {
+        agent: agentName,
+        scopes: opts.scope.map(parseScope),
+        expiresAt: parseExpiry(opts.expires),
+        confirm: opts.confirm ? "always" : "never",
+        note: opts.note,
+      },
+      passphrase
+    );
+    if (first) {
+      console.log("This vault is now GOVERNED: agents without a grant can no longer read it.");
+    }
+    console.log(`Granted ${created.id.slice(0, 8)} to "${created.agent}".`);
+    for (const scope of created.scopes) {
+      console.log(
+        `  ${scope.file} · ${scope.keys.join(",")} · ${scope.actions.join(",")} · redaction ${scope.redact}`
+      );
+    }
+    console.log(`  expires ${created.expiresAt ?? "never"} · confirmation ${created.confirm}`);
+  });
+
+grant
+  .command("list")
+  .description("show every grant, active or not, with no secret values")
+  .option("--json", "emit machine-readable JSON")
+  .action(async (opts) => {
+    const dir = program.opts().vault;
+    if (!grantsExist(dir)) {
+      console.log("This vault has no grant policy; any agent with the passphrase sees everything.");
+      return;
+    }
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const grants = listGrants(dir, passphrase);
+    if (opts.json) {
+      console.log(JSON.stringify(grants, null, 2));
+      return;
+    }
+    const now = Date.now();
+    for (const entry of grants) {
+      const state = entry.revokedAt
+        ? "revoked"
+        : entry.expiresAt && new Date(entry.expiresAt).getTime() <= now
+          ? "expired"
+          : "active";
+      console.log(`${entry.id.slice(0, 8)}  ${entry.agent}  [${state}]`);
+      for (const scope of entry.scopes) {
+        console.log(
+          `    ${scope.file} · ${scope.keys.join(",")} · ${scope.actions.join(",")} · redaction ${scope.redact}`
+        );
+      }
+      console.log(`    expires ${entry.expiresAt ?? "never"} · confirmation ${entry.confirm}`);
+      if (entry.note) console.log(`    note: ${entry.note}`);
+    }
+    if (!grants.length) console.log("No grants recorded yet.");
+  });
+
+grant
+  .command("revoke <id>")
+  .description("revoke a grant immediately, by full ID or unique prefix")
+  .action(async (id) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const revoked = revokeGrant(dir, id, passphrase);
+    console.log(`Revoked ${revoked.id.slice(0, 8)} for "${revoked.agent}" at ${revoked.revokedAt}.`);
+  });
+
+grant
+  .command("requests")
+  .description("list resolutions waiting for your approval")
+  .action(async () => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const requests = pendingRequests(dir, passphrase);
+    if (!requests.length) {
+      console.log("Nothing is waiting for approval.");
+      return;
+    }
+    for (const request of requests) {
+      console.log(
+        `${request.id.slice(0, 8)}  ${request.agent} wants ${request.file}.${request.key}  (expires ${request.expiresAt})`
+      );
+    }
+  });
+
+grant
+  .command("approve <id>")
+  .description("approve one held resolution; the approval is single-use and expires shortly")
+  .action(async (id) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const approved = approveRequest(dir, id, passphrase);
+    console.log(
+      `Approved ${approved.file}.${approved.key} for "${approved.agent}" until ${approved.expiresAt}.`
+    );
+  });
+
+grant
+  .command("deny <id>")
+  .description("drop one held resolution without approving it")
+  .action(async (id) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    denyRequest(dir, id, passphrase);
+    console.log(`Denied ${id}.`);
+  });
+
+const plugins = program
+  .command("plugins")
+  .description("sandboxed extensions: what is installed, what it may reach, and whether it runs");
+
+plugins
+  .command("list")
+  .description("list installed plugins and the capabilities each one declared")
+  .option("--json", "emit machine-readable JSON")
+  .action(async (opts) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const installed = new DocumentVault(dir, passphrase).listPlugins();
+    if (opts.json) {
+      console.log(JSON.stringify(installed, null, 2));
+      return;
+    }
+    if (!installed.length) {
+      console.log("No plugins installed.");
+      return;
+    }
+    for (const plugin of installed) {
+      console.log(
+        `${plugin.name} v${plugin.version}  [${plugin.enabled ? "on" : "off"}]  [${plugin.signatureStatus}]  ${plugin.manifestId}`
+      );
+      for (const line of describeCapabilities(plugin.capabilities as PluginCapability[])) {
+        console.log(`    - ${line}`);
+      }
+      if (!plugin.capabilities.length) console.log("    - asks for nothing at all");
+    }
+  });
+
+plugins
+  .command("keygen <private-key>")
+  .description("create an Ed25519 private key for signing plugin packages")
+  .action((privateKeyPath) => {
+    if (fs.existsSync(privateKeyPath)) throw new Error(`Refusing to overwrite: ${privateKeyPath}`);
+    const generated = generatePluginSigningKey();
+    writeFileAtomic(privateKeyPath, generated.privateKeyPem, { mode: 0o600 });
+    console.log(`Created plugin signing key: ${privateKeyPath}`);
+    console.log(`Signer key ID: ${generated.keyId}`);
+    console.log(`Public key (base64url): ${generated.publicKey}`);
+  });
+
+plugins
+  .command("sign <manifest> <source>")
+  .description("sign a plugin manifest and its exact JavaScript source")
+  .requiredOption("--key <private-key>", "Ed25519 private key created by plugins keygen")
+  .requiredOption("--out <manifest>", "write the signed manifest here")
+  .action((manifestPath, sourcePath, opts) => {
+    if (fs.existsSync(opts.out)) throw new Error(`Refusing to overwrite: ${opts.out}`);
+    const raw = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as Record<string, unknown>;
+    delete raw.signature;
+    const manifest = parsePluginManifest(raw);
+    const source = fs.readFileSync(sourcePath, "utf8");
+    const signature = signPluginPackage(
+      manifest,
+      source,
+      fs.readFileSync(opts.key, "utf8")
+    );
+    writeFileAtomic(opts.out, `${JSON.stringify({ ...manifest, signature }, null, 2)}\n`, { mode: 0o600 });
+    console.log(`Signed manifest written to ${opts.out}.`);
+  });
+
+plugins
+  .command("policy")
+  .description("show restricted mode and locally revoked plugin signers")
+  .option("--json", "emit machine-readable JSON")
+  .action(async (opts) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const policy = new DocumentVault(dir, passphrase).pluginSecurityPolicy();
+    if (opts.json) console.log(JSON.stringify(policy, null, 2));
+    else {
+      console.log(`Restricted mode: ${policy.restrictedMode ? "on" : "off"}`);
+      console.log(`Revoked signers: ${policy.revokedSigners.length}`);
+      for (const keyId of policy.revokedSigners) console.log(`  ${keyId}`);
+    }
+  });
+
+plugins
+  .command("restricted <mode>")
+  .description("turn signed-only plugin mode on or off")
+  .action(async (mode) => {
+    if (mode !== "on" && mode !== "off") throw new Error("Restricted mode must be 'on' or 'off'.");
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    new DocumentVault(dir, passphrase).setPluginRestrictedMode(mode === "on");
+    console.log(`Restricted mode is ${mode}.`);
+  });
+
+plugins
+  .command("revoke-signer <reference>")
+  .description("locally block the signer of an installed plugin")
+  .action(async (reference) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const policy = new DocumentVault(dir, passphrase).revokePluginSigner(reference);
+    console.log(`Signer revoked. ${policy.revokedSigners.length} signer(s) are now blocked.`);
+  });
+
+plugins
+  .command("restore-signer <key-id>")
+  .description("remove a signer key ID from this vault's local revocation list")
+  .action(async (keyId) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const policy = new DocumentVault(dir, passphrase).restorePluginSigner(keyId);
+    console.log(`Signer restored. ${policy.revokedSigners.length} signer(s) remain blocked.`);
+  });
+
+plugins
+  .command("install <manifest> <source>")
+  .description("install a plugin from its manifest (.json) and source (.js); it stays off until enabled")
+  .option("--enable", "turn it on immediately")
+  .action(async (manifestPath, sourcePath, opts) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const installed = new DocumentVault(dir, passphrase).installPlugin({
+      manifest: JSON.parse(fs.readFileSync(manifestPath, "utf8")),
+      source: fs.readFileSync(sourcePath, "utf8"),
+      enabled: opts.enable === true,
+    });
+    console.log(`Installed ${installed.manifest.name} v${installed.manifest.version}.`);
+    console.log(`It may:`);
+    for (const line of describeCapabilities(installed.manifest.capabilities)) {
+      console.log(`  - ${line}`);
+    }
+    if (!installed.manifest.capabilities.length) console.log("  - nothing at all");
+    console.log(installed.enabled ? "It is enabled." : "It is installed but not enabled.");
+  });
+
+plugins
+  .command("enable <reference>")
+  .description("turn one installed plugin on")
+  .action(async (reference) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const changed = new DocumentVault(dir, passphrase).setPluginEnabled(reference, true);
+    console.log(`${changed.name} is enabled.`);
+  });
+
+plugins
+  .command("disable <reference>")
+  .description("turn one installed plugin off")
+  .action(async (reference) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const changed = new DocumentVault(dir, passphrase).setPluginEnabled(reference, false);
+    console.log(`${changed.name} is disabled.`);
+  });
+
+plugins
+  .command("remove <reference>")
+  .description("remove one plugin and the settings it owns")
+  .action(async (reference) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const removed = new DocumentVault(dir, passphrase).removePlugin(reference);
+    console.log(`Removed ${removed.name}.`);
+  });
+
 program
   .command("audit")
   .description("verify and print the value-free, passphrase-authenticated audit trail")
@@ -477,7 +971,15 @@ program
     );
     if (verification.error) console.log(`  ${verification.error}`);
     for (const entry of entries) {
-      console.log(`${entry.timestamp}  ${entry.actor}  ${entry.file}.${entry.key}`);
+      const governed = [
+        entry.agent && `agent ${entry.agent}`,
+        entry.outcome && entry.outcome,
+        entry.redaction && entry.redaction !== "none" && `redacted ${entry.redaction}`,
+      ].filter(Boolean);
+      console.log(
+        `${entry.timestamp}  ${entry.actor}  ${entry.file}.${entry.key}` +
+          (governed.length ? `  (${governed.join(", ")})` : "")
+      );
     }
     if (!verification.valid) process.exitCode = 2;
   });
@@ -487,6 +989,12 @@ program
   .description("MODE 2 — start the MCP server for AI-agent-assisted, scoped, audited access")
   .action(async () => {
     const dir = program.opts().vault;
+    if (!grantsExist(dir)) {
+      console.error(
+        "Note: this vault has no grant policy, so any agent that starts this server sees every key. " +
+          "Run 'sbrain grant add <agent> --scope ...' to govern it."
+      );
+    }
     await startMcpServer(dir);
   });
 
