@@ -71,6 +71,16 @@ migration into the document model. Markdown is a first-class import/export
 format, but plaintext Markdown is not the default at-rest representation because
 that would break the product's security promise.
 
+Whole-vault Obsidian migration is a boundary operation rather than a second
+storage mode. The importer scans a user-selected source without following
+symbolic links, validates Markdown/frontmatter before the bulk note write,
+encrypts non-note files through the content-addressed attachment store, then
+imports JSON Canvas after note and attachment identities exist. It leaves source
+links untouched for portability and emits a plaintext integrity report covering
+malformed inputs, missing or ambiguous assets, and unresolved local links. The
+encrypted destination must live outside the source tree, so the scanner cannot
+ingest its own output.
+
 ## Search design
 
 SQLite FTS5 supports prefix, phrase, NEAR and boolean queries plus BM25 ranking
@@ -78,6 +88,22 @@ and snippets. A normal FTS5 database exposes tokens on disk, so it must not be
 used unencrypted. During the transition, the app builds an incremental in-memory
 index after unlock. The production desktop core will persist the same logical
 index only behind a reviewed encrypted SQLite integration.
+
+Semantic recall is a separate, explicit path rather than a silent replacement
+for lexical search. `DocumentVault.semanticSearch` sends bounded note text to an
+embedding adapter only when called, caches normalized vectors by note revision
+in the unlocked process, and overwrites them on lock. It does not add an
+embedding file to the vault, so a locked or copied vault gains no new plaintext
+or vector sidecar. The first query after each process start pays the embedding
+cost; later queries embed only the query and notes whose revisions changed.
+
+The first local-model adapter targets Ollama's embedding and generation APIs.
+It accepts only literal HTTP loopback hosts (`127.0.0.1`, `localhost`, `[::1]`),
+refuses redirects, bounds time and response size, and validates vector shape and
+finite values before ranking by cosine similarity. This protects against an
+accidental remote endpoint; it does not make an untrusted local model process
+safe. The caller also controls the per-note character ceiling, 16,000 by
+default, so model exposure and recall depth are explicit tradeoffs.
 
 Reference: <https://www.sqlite.org/fts5.html>
 

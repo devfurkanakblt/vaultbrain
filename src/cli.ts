@@ -32,6 +32,8 @@ import { isRedactionLevel, REDACTION_LEVELS, type RedactionLevel } from "./redac
 import { describeCapabilities, parsePluginManifest, type PluginCapability } from "./plugins.js";
 import { generatePluginSigningKey, signPluginPackage } from "./plugin-signatures.js";
 import { DocumentVault, type PropertyValue } from "./documents.js";
+import { OllamaLocalModelAdapter } from "./semantic.js";
+import { importObsidianVault } from "./obsidian-import.js";
 import { writeFileAtomic } from "./fs-safe.js";
 import {
   createFromTemplate,
@@ -254,6 +256,31 @@ docs
   });
 
 docs
+  .command("semantic-search <query>")
+  .description("opt in to semantic recall through a loopback-only Ollama model")
+  .option("--model <name>", "local Ollama embedding model", "nomic-embed-text")
+  .option("--url <url>", "loopback Ollama base URL", "http://127.0.0.1:11434")
+  .option("--limit <number>", "maximum result count", "20")
+  .option("--min-score <number>", "minimum cosine similarity (-1 to 1)", "0")
+  .option("--max-characters <number>", "maximum plaintext characters sent per note", "16000")
+  .action(async (query, opts) => {
+    const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
+    const dir = program.opts().vault;
+    const vault = new DocumentVault(dir, passphrase);
+    const adapter = new OllamaLocalModelAdapter({ model: opts.model, baseUrl: opts.url });
+    const hits = await vault.semanticSearch(query, adapter, {
+      limit: Number.parseInt(opts.limit, 10),
+      minScore: Number.parseFloat(opts.minScore),
+      maxCharacters: Number.parseInt(opts.maxCharacters, 10),
+    });
+    appendAudit(dir, { actor: "cli-direct", file: "documents", key: "semantic-search" }, passphrase);
+    for (const hit of hits) {
+      console.log(`${hit.score.toFixed(3).padStart(6)}  ${hit.path}  — ${hit.title}`);
+      if (hit.excerpt) console.log(`        ${hit.excerpt}`);
+    }
+  });
+
+docs
   .command("links <reference>")
   .description("show outgoing wikilinks and whether they resolve")
   .action(async (reference) => {
@@ -347,6 +374,49 @@ docs
     );
     appendAudit(dir, { actor: "cli-direct-write", file: "documents", key: note.id }, passphrase);
     console.log(`Imported ${note.path} (${note.id}).`);
+  });
+
+docs
+  .command("import-obsidian <source-directory>")
+  .description("import an Obsidian vault and validate its note, attachment and canvas references")
+  .option("--report <file>", "write the complete integrity report as JSON")
+  .option("--include-hidden", "include hidden files and directories (the default skips .obsidian, .git and peers)")
+  .action(async (sourceDirectory, opts) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const report = importObsidianVault(sourceDirectory, dir, passphrase, {
+      includeHidden: Boolean(opts.includeHidden),
+    });
+    appendAudit(
+      dir,
+      {
+        actor: "cli-direct-write",
+        file: "documents",
+        key: `obsidian-import:${report.notes.imported}:${report.attachments.imported}:${report.canvases.imported}`,
+      },
+      passphrase
+    );
+    if (opts.report) {
+      writeFileAtomic(path.resolve(opts.report), `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+    }
+
+    console.log(`Imported ${report.notes.imported}/${report.notes.discovered} Markdown notes.`);
+    console.log(
+      `Imported ${report.attachments.imported}/${report.attachments.discovered} attachments ` +
+      `(${report.attachments.unique} unique encrypted objects).`
+    );
+    console.log(`Imported ${report.canvases.imported}/${report.canvases.discovered} canvases.`);
+    const errors = report.issues.filter((issue) => issue.severity === "error");
+    const warnings = report.issues.filter((issue) => issue.severity === "warning");
+    console.log(`Integrity report: ${errors.length} error(s), ${warnings.length} warning(s).`);
+    for (const issue of report.issues.slice(0, 20)) {
+      console.log(`  ${issue.severity.toUpperCase()} [${issue.code}] ${issue.path}: ${issue.message}`);
+    }
+    if (report.issues.length > 20) {
+      console.log(`  ... ${report.issues.length - 20} more issue(s); use --report <file> for the complete report.`);
+    }
+    if (opts.report) console.log(`Full report written to ${path.resolve(opts.report)}.`);
+    if (!report.ok) process.exitCode = 2;
   });
 
 docs

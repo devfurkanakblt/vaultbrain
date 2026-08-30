@@ -57,7 +57,7 @@ Each phase must ship a usable vertical slice and keep older vaults readable.
 - [x] Database-like property table with local filtering and column sorting
 - [x] Saved property queries and editable cells
 - [x] Bookmarks, workspaces, aliases and unlinked mentions
-- [ ] Optional on-device semantic recall
+- [x] Optional on-device semantic recall
 
 ## Phase 5 — Controlled ecosystem and AI
 
@@ -65,8 +65,8 @@ Each phase must ship a usable vertical slice and keep older vaults readable.
 - [x] Signed plugin packages, restricted mode and revocation
 - [x] Per-agent scoped grants with expiry and confirmation policies
 - [x] Redaction-aware MCP results
-- [ ] Local-model adapter
-- [ ] Importer for Obsidian vaults with integrity report
+- [x] Local-model adapter
+- [x] Importer for Obsidian vaults with integrity report
 
 ## Phase 6 — Encrypted sync and mobile
 

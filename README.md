@@ -206,6 +206,44 @@ node dist/cli.js --vault ./vault/personal docs attachments
 node dist/cli.js --vault ./vault/personal docs attachment-get <id> ./restored-diagram.png
 ```
 
+Semantic recall is available as an explicit, on-device path and never changes
+ordinary full-text search. With an embedding model already available in a local
+Ollama instance:
+
+```bash
+node dist/cli.js --vault ./vault/personal docs semantic-search \
+  "where did I write about fixing a car?" \
+  --model nomic-embed-text \
+  --url http://127.0.0.1:11434
+```
+
+The command unlocks the vault, sends at most 16,000 characters per note to the
+chosen local model, and keeps its revision-aware vector index only in process
+memory. `--max-characters`, `--min-score`, and `--limit` tune that boundary and
+the result set. Model URLs must be literal HTTP loopback addresses and redirects
+are refused; a remote model cannot be enabled accidentally. Locking clears the
+vectors, and successful semantic searches add a value-free audit event. The
+exported `OllamaLocalModelAdapter` also provides a non-streaming local
+`generate()` boundary for host integrations. Treat the local model process as
+trusted: it receives the bounded plaintext needed for the operation.
+
+An existing Obsidian vault can be migrated as one checked operation. Markdown
+and frontmatter are preserved, ordinary files become content-addressed encrypted
+attachments, and JSON Canvas boards bind to the imported note/attachment IDs.
+Hidden directories such as `.obsidian` and `.git` are skipped by default.
+
+```bash
+node dist/cli.js --vault ./vault/personal docs import-obsidian ./MyObsidianVault \
+  --report ./obsidian-integrity-report.json
+```
+
+The report records malformed notes/canvases, skipped symbolic links, ambiguous
+attachment names, unresolved wikilinks and missing local Markdown links. The
+report itself contains source paths and is plaintext, so store or remove it as
+you would any other migration log. The encrypted destination must be outside
+the source vault, preventing an import from recursively consuming its own
+output. Use `--include-hidden` only when hidden source content is intentional.
+
 ### Performance gates
 
 ```bash

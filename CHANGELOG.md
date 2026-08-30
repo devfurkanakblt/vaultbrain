@@ -16,6 +16,11 @@ Versioning once the encrypted storage format reaches 1.0.
   and immediate revocation, enforced by the MCP server.
 - Added redaction-aware MCP results, and audit entries that sign who asked,
   under which grant, and how much of the value came back.
+- Added opt-in semantic document recall with a revision-aware in-memory index,
+  plus a loopback-only Ollama adapter for embedding and local generation.
+- Added a whole-vault Obsidian importer for Markdown, encrypted attachments and
+  JSON Canvas, with symlink refusal and a machine-readable integrity report for
+  malformed files, ambiguous assets and unresolved links.
 - Added the desktop note lifecycle: move/retitle, delete with recovery,
   encrypted revision history, and restore-forward.
 - Added desktop templates and idempotent daily notes, matching the CLI's

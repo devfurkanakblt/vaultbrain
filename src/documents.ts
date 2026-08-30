@@ -24,6 +24,12 @@ import { resolveInside } from "./safety.js";
 import { applyFrontmatter, parseFrontmatter, stringifyFrontmatter } from "./frontmatter.js";
 import { withVaultLock } from "./vault-lock.js";
 import {
+  SemanticNoteIndex,
+  type EmbeddingAdapter,
+  type SemanticSearchHit,
+  type SemanticSearchOptions,
+} from "./semantic.js";
+import {
   assertCanvasSize,
   canvasBasename,
   DEFAULT_ASSETS_DIR,
@@ -215,6 +221,59 @@ export interface NoteInput {
   frontmatterSource?: string;
 }
 
+/**
+ * Convert portable/Obsidian-style Markdown into the canonical note input used
+ * by both one-file and whole-vault imports. Keeping this conversion outside
+ * `DocumentVault` lets an importer validate every source file before it writes
+ * the first encrypted object.
+ */
+export function parseMarkdownNote(notePath: string, markdown: string): NoteInput {
+  const parsed = parseFrontmatter(markdown);
+  const metadata = { ...parsed.attributes };
+  const legacyProperties =
+    metadata.properties && typeof metadata.properties === "object" && !Array.isArray(metadata.properties)
+      ? (metadata.properties as Record<string, PropertyValue>)
+      : {};
+  const portableId =
+    typeof metadata.sbrain_id === "string"
+      ? metadata.sbrain_id
+      : typeof metadata.id === "string" && /^[a-f0-9-]{36}$/u.test(metadata.id)
+        ? metadata.id
+        : undefined;
+  const reserved = new Set([
+    "sbrain_id", "title", "aliases", "tags", "created", "createdAt",
+    "modified", "updatedAt", "properties",
+  ]);
+  if (portableId) reserved.add("id");
+  const properties: Record<string, PropertyValue> = { ...legacyProperties };
+  for (const [key, value] of Object.entries(metadata)) {
+    if (!reserved.has(key)) properties[key] = value;
+  }
+
+  const stringList = (value: PropertyValue | undefined, split: boolean): string[] => {
+    if (typeof value === "string") {
+      return split ? value.split(/[\s,]+/gu).filter(Boolean) : [value];
+    }
+    return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+  };
+  return {
+    path: notePath,
+    title: typeof metadata.title === "string" ? metadata.title : undefined,
+    body: parsed.body,
+    aliases: stringList(metadata.aliases, false),
+    tags: stringList(metadata.tags, true).map((tag) => tag.replace(/^#/u, "")),
+    properties,
+    frontmatterSource: parsed.hasFrontmatter ? parsed.source : undefined,
+    id: portableId,
+    createdAt:
+      typeof metadata.created === "string"
+        ? metadata.created
+        : typeof metadata.createdAt === "string"
+          ? metadata.createdAt
+          : undefined,
+  };
+}
+
 export interface NoteSummary {
   id: string;
   path: string;
@@ -229,6 +288,8 @@ export interface SearchHit extends NoteSummary {
   score: number;
   excerpt: string;
 }
+
+export type { EmbeddingAdapter, SemanticSearchHit, SemanticSearchOptions } from "./semantic.js";
 
 export interface OutgoingLink extends WikiLink {
   resolvedId?: string;
@@ -408,6 +469,8 @@ export class DocumentVault {
   private indexCache?: DocumentIndex;
   private notesCache?: IndexedNote[];
   private readonly searchCache = new Map<string, SearchFields>();
+  private readonly semanticIndexes = new Map<EmbeddingAdapter, SemanticNoteIndex>();
+  private sessionGeneration = 0;
   private locked = false;
 
   constructor(private readonly vaultDir: string, passphrase: string) {
@@ -421,6 +484,9 @@ export class DocumentVault {
    * the passphrase again — locking is a state change, not a UI gesture.
    */
   lock(): void {
+    this.sessionGeneration += 1;
+    for (const index of this.semanticIndexes.values()) index.clear();
+    this.semanticIndexes.clear();
     this.session.key.fill(0);
     this.indexCache = undefined;
     this.notesCache = undefined;
@@ -1765,6 +1831,41 @@ export class DocumentVault {
       }));
   }
 
+  /**
+   * Optional semantic recall. Calling this method is the opt-in switch: normal
+   * search never loads a model or exposes note text outside this process. The
+   * adapter is expected to enforce its own on-device boundary.
+   */
+  async semanticSearch(
+    query: string,
+    adapter: EmbeddingAdapter,
+    options: SemanticSearchOptions = {}
+  ): Promise<SemanticSearchHit[]> {
+    this.assertUnlocked();
+    const generation = this.sessionGeneration;
+    let semanticIndex = this.semanticIndexes.get(adapter);
+    if (!semanticIndex) {
+      semanticIndex = new SemanticNoteIndex();
+      this.semanticIndexes.set(adapter, semanticIndex);
+    }
+    try {
+      const hits = await semanticIndex.search(this.indexedNotes(), query, adapter, options);
+      if (this.locked || generation !== this.sessionGeneration) {
+        semanticIndex.clear();
+        this.semanticIndexes.delete(adapter);
+        throw new Error("This vault session was locked while semantic search was running.");
+      }
+      return hits;
+    } catch (error) {
+      if (this.locked || generation !== this.sessionGeneration) {
+        semanticIndex.clear();
+        this.semanticIndexes.delete(adapter);
+        throw new Error("This vault session was locked while semantic search was running.", { cause: error });
+      }
+      throw error;
+    }
+  }
+
   outgoing(reference: string): OutgoingLink[] {
     const id = this.resolveId(reference);
     const index = this.loadIndex();
@@ -1993,47 +2094,6 @@ export class DocumentVault {
   }
 
   importMarkdown(notePath: string, markdown: string): NoteDocument {
-    const parsed = parseFrontmatter(markdown);
-    const metadata = { ...parsed.attributes };
-    const legacyProperties =
-      metadata.properties && typeof metadata.properties === "object" && !Array.isArray(metadata.properties)
-        ? (metadata.properties as Record<string, PropertyValue>)
-        : {};
-    const reserved = new Set([
-      "id", "sbrain_id", "title", "aliases", "tags", "created", "createdAt",
-      "modified", "updatedAt", "properties",
-    ]);
-    const properties: Record<string, PropertyValue> = { ...legacyProperties };
-    for (const [key, value] of Object.entries(metadata)) {
-      if (!reserved.has(key)) properties[key] = value;
-    }
-
-    const stringList = (value: PropertyValue | undefined, split: boolean): string[] => {
-      if (typeof value === "string") {
-        return split ? value.split(/[\s,]+/gu).filter(Boolean) : [value];
-      }
-      return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
-    };
-    return this.put({
-      path: notePath,
-      title: typeof metadata.title === "string" ? metadata.title : undefined,
-      body: parsed.body,
-      aliases: stringList(metadata.aliases, false),
-      tags: stringList(metadata.tags, true).map((tag) => tag.replace(/^#/u, "")),
-      properties,
-      frontmatterSource: parsed.hasFrontmatter ? parsed.source : undefined,
-      id:
-        typeof metadata.sbrain_id === "string"
-          ? metadata.sbrain_id
-          : typeof metadata.id === "string"
-            ? metadata.id
-            : undefined,
-      createdAt:
-        typeof metadata.created === "string"
-          ? metadata.created
-          : typeof metadata.createdAt === "string"
-            ? metadata.createdAt
-            : undefined,
-    });
+    return this.put(parseMarkdownNote(notePath, markdown));
   }
 }
