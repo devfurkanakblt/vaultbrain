@@ -1,0 +1,19 @@
+{
+  "generatedAt": "2026-08-30T09:46:25.698Z",
+  "files": {
+    "health": [
+      {
+        "key": "DOCTOR_NEXT_APPOINTMENT",
+        "desc": "Bir sonraki doktor kontrol tarihi"
+      },
+      {
+        "key": "NOTE_20260830_094623_c58a",
+        "desc": "Doktor ziyareti notu"
+      },
+      {
+        "key": "NOTE_20260830_094625_a026",
+        "desc": "Hastalık notu"
+      }
+    ]
+  }
+}

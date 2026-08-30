@@ -1,0 +1,53 @@
+[default]
+description = "No custom vault commands are granted implicitly."
+permissions = []
+
+[[permission]]
+identifier = "allow-unlock-vault"
+description = "Allows the main local window to unlock one explicitly supplied vault path."
+commands.allow = ["unlock_vault"]
+
+[[permission]]
+identifier = "allow-lock-vault"
+description = "Allows the main local window to zeroize and close its current vault session."
+commands.allow = ["lock_vault"]
+
+[[permission]]
+identifier = "allow-list-notes"
+description = "Allows listing decrypted note summaries only after unlock."
+commands.allow = ["list_notes"]
+
+[[permission]]
+identifier = "allow-get-note"
+description = "Allows decrypting one explicitly referenced note after unlock."
+commands.allow = ["get_note"]
+
+[[permission]]
+identifier = "allow-save-note"
+description = "Allows updating one note in the unlocked vault."
+commands.allow = ["save_note"]
+
+[[permission]]
+identifier = "allow-create-note"
+description = "Allows creating one note at a validated logical Markdown path."
+commands.allow = ["create_note"]
+
+[[permission]]
+identifier = "allow-search-notes"
+description = "Allows searching the already-unlocked encrypted index."
+commands.allow = ["search_notes"]
+
+[[permission]]
+identifier = "allow-get-backlinks"
+description = "Allows reading backlinks for one explicitly referenced note."
+commands.allow = ["get_backlinks"]
+
+[[permission]]
+identifier = "allow-get-knowledge-graph"
+description = "Allows reading value-free note and resolved-link topology from the unlocked encrypted index."
+commands.allow = ["get_knowledge_graph"]
+
+[[permission]]
+identifier = "allow-list-property-rows"
+description = "Allows reading typed properties for the unlocked vault's local table view."
+commands.allow = ["list_property_rows"]

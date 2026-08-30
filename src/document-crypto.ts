@@ -1,0 +1,121 @@
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { assertNoSymlinkComponents, assertNotSymlink, writeFileAtomic } from "./fs-safe.js";
+import { resolveInside } from "./safety.js";
+
+const SCRYPT_N = 2 ** 15;
+const KEY_LENGTH = 32;
+const KEY_CHECK_CONTEXT = "secondbrain-vault:document-key:v1";
+
+export interface DocumentManifest {
+  version: 1;
+  kdf: { name: "scrypt"; N: number; salt: string };
+  verifier: string;
+}
+
+export interface DocumentPayload {
+  version: 1;
+  iv: string;
+  authTag: string;
+  ciphertext: string;
+}
+
+export interface DocumentKeySession {
+  rootDir: string;
+  key: Buffer;
+  manifest: DocumentManifest;
+}
+
+function derive(passphrase: string, salt: Buffer, N: number): Buffer {
+  return crypto.scryptSync(passphrase, salt, KEY_LENGTH, {
+    N,
+    maxmem: 64 * 1024 * 1024,
+  });
+}
+
+function verifier(key: Buffer): string {
+  return crypto.createHmac("sha256", key).update(KEY_CHECK_CONTEXT).digest("hex");
+}
+
+export function openDocumentKey(vaultDir: string, passphrase: string): DocumentKeySession {
+  if (!passphrase) throw new Error("A non-empty vault passphrase is required.");
+  const rootDir = resolveInside(vaultDir, "documents");
+  const manifestPath = resolveInside(rootDir, "manifest.json");
+  assertNoSymlinkComponents(vaultDir, rootDir);
+  fs.mkdirSync(rootDir, { recursive: true, mode: 0o700 });
+
+  let manifest: DocumentManifest;
+  if (fs.existsSync(manifestPath)) {
+    assertNotSymlink(manifestPath);
+    manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as DocumentManifest;
+    if (
+      manifest.version !== 1 ||
+      manifest.kdf?.name !== "scrypt" ||
+      manifest.kdf.N !== SCRYPT_N ||
+      !manifest.kdf.salt ||
+      !/^[a-f0-9]{64}$/u.test(manifest.verifier)
+    ) {
+      throw new Error("Unsupported or invalid document vault manifest.");
+    }
+  } else {
+    const salt = crypto.randomBytes(16);
+    const key = derive(passphrase, salt, SCRYPT_N);
+    manifest = {
+      version: 1,
+      kdf: { name: "scrypt", N: SCRYPT_N, salt: salt.toString("base64") },
+      verifier: verifier(key),
+    };
+    writeFileAtomic(manifestPath, JSON.stringify(manifest, null, 2), { mode: 0o600 });
+    return { rootDir, key, manifest };
+  }
+
+  const key = derive(passphrase, Buffer.from(manifest.kdf.salt, "base64"), manifest.kdf.N);
+  const actual = Buffer.from(verifier(key), "hex");
+  const expected = Buffer.from(manifest.verifier, "hex");
+  if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) {
+    throw new Error("Unable to unlock document vault: wrong passphrase or damaged manifest.");
+  }
+  return { rootDir, key, manifest };
+}
+
+export function encryptDocument(plaintext: string, key: Buffer, aad: string): DocumentPayload {
+  return encryptDocumentBytes(Buffer.from(plaintext, "utf8"), key, aad);
+}
+
+export function encryptDocumentBytes(data: Buffer, key: Buffer, aad: string): DocumentPayload {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  cipher.setAAD(Buffer.from(aad, "utf8"));
+  const ciphertext = Buffer.concat([cipher.update(data), cipher.final()]);
+  return {
+    version: 1,
+    iv: iv.toString("base64"),
+    authTag: cipher.getAuthTag().toString("base64"),
+    ciphertext: ciphertext.toString("base64"),
+  };
+}
+
+export function decryptDocument(payload: DocumentPayload, key: Buffer, aad: string): string {
+  return decryptDocumentBytes(payload, key, aad).toString("utf8");
+}
+
+export function decryptDocumentBytes(payload: DocumentPayload, key: Buffer, aad: string): Buffer {
+  if (payload.version !== 1) throw new Error("Unsupported encrypted document version.");
+  const decipher = crypto.createDecipheriv(
+    "aes-256-gcm",
+    key,
+    Buffer.from(payload.iv, "base64")
+  );
+  decipher.setAAD(Buffer.from(aad, "utf8"));
+  decipher.setAuthTag(Buffer.from(payload.authTag, "base64"));
+  return Buffer.concat([
+    decipher.update(Buffer.from(payload.ciphertext, "base64")),
+    decipher.final(),
+  ]);
+}
+
+export function encryptedDocumentPath(rootDir: string, id: string): string {
+  if (!/^[a-f0-9-]{36}$/u.test(id)) throw new Error("Invalid note ID.");
+  return resolveInside(path.join(rootDir, "objects"), `${id}.note.enc`);
+}

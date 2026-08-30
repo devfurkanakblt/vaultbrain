@@ -1,0 +1,11 @@
+# Normalize text in the repository, check out with the platform's endings.
+* text=auto
+
+# Encrypted payloads and format fixtures are bytes, not text: never let a
+# line-ending conversion touch a file whose whole point is to decrypt cleanly.
+*.enc -text
+*.kv.enc -text
+
+*.png binary
+*.ico binary
+*.icns binary

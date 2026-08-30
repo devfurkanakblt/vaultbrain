@@ -1,0 +1,20 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "The main workspace may call only the narrow encrypted-vault command surface.",
+  "local": true,
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "allow-unlock-vault",
+    "allow-lock-vault",
+    "allow-list-notes",
+    "allow-get-note",
+    "allow-save-note",
+    "allow-create-note",
+    "allow-search-notes",
+    "allow-get-backlinks",
+    "allow-get-knowledge-graph",
+    "allow-list-property-rows"
+  ]
+}

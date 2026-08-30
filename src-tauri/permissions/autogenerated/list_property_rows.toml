@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-list-property-rows"
+description = "Enables the list_property_rows command without any pre-configured scope."
+commands.allow = ["list_property_rows"]
+
+[[permission]]
+identifier = "deny-list-property-rows"
+description = "Denies the list_property_rows command without any pre-configured scope."
+commands.deny = ["list_property_rows"]

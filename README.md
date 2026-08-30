@@ -1,0 +1,340 @@
+# secondbrain-vault
+
+> A least-exposure, `.env`-style personal data vault for the AI age.
+
+> **Project direction:** this MVP is evolving into a desktop-first, local-first,
+> encrypted knowledge workspace under the motto **“Faster to recall. Safer to
+> trust.”** See [`docs/PRODUCT.md`](docs/PRODUCT.md),
+> [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), and
+> [`docs/ROADMAP.md`](docs/ROADMAP.md).
+
+**TL;DR (TR):** Obsidian gibi "2. beyin" araçları kişisel verini (sağlık, kimlik,
+finans) düz metin olarak AI ajanlarına besliyor. `secondbrain-vault`, veriyi
+şifreli anahtar-değer çiftleri olarak saklar; AI önce sadece anahtar adlarını
+ve açıklamaları görür (değerleri değil), ihtiyaç duyduğu **tek** değeri talep
+eder, ve her erişim denetim kaydına (audit log) yazılır.
+
+## Why
+
+Personal-knowledge-management tools are increasingly wired straight into AI
+agents. The common pattern — a graph of free-text notes, fully readable by
+whatever model touches it — means every query potentially exposes your whole
+vault, not just the fact you asked about.
+
+This project borrows a habit developers already trust: **`.env` files**. We
+don't hand an agent a whole config file to "figure out" — we let it ask for
+one variable at a time. `secondbrain-vault` applies the same discipline to
+personal data.
+
+## Two modes — read this before you wire it into anything
+
+This is the most important section in the README.
+
+| | Mode 1 — `sbrain get` (Direct) | Mode 2 — `sbrain mcp` (AI-assisted) |
+|---|---|---|
+| Who's involved | You, or a script. No LLM. | An AI agent (e.g. Claude) via MCP |
+| Exposure | Zero — value never enters any model's context | Not zero — content **does** pass through the calling model's context, both when you tell the agent something worth saving (`store_note`) and when it resolves a value back (`resolve_key`) — that's inherent to how a conversational agent has to work |
+| What the agent sees without decrypting anything | N/A | Key names + descriptions (`list_keys` / `find_key`), and note timestamps + tags (`find_notes_in_range`) |
+| Audit | Logged | Logged — writes and reads both |
+
+Mode 2 is a deliberate trade-off, not a zero-exposure claim: you get an agent
+that can capture and recall notes for you in natural language, in exchange
+for that agent seeing what you tell it *in that moment*. What it does **not**
+get is standing access to your whole vault — every other note stays
+encrypted and out of its context until it specifically asks for that one
+key, and every access (read or write) is logged. If you want a hard
+guarantee that something never touches any LLM, keep using Mode 1 for it.
+
+## Format
+
+```env
+# @desc: Bir sonraki doktor kontrol tarihi
+DOCTOR_NEXT_APPOINTMENT="2026-09-15"
+
+# @desc: Kan grubu
+BLOOD_TYPE="0 Rh+"
+```
+
+- Files live as `vault/<name>.kv.enc` — AES-256-GCM encrypted, scrypt-derived
+  key from your passphrase. The plaintext above never touches disk.
+- The `@desc` comment is the **only** thing that ever leaves the vault
+  unencrypted (via `sbrain index` → `schema.json`). Never put sensitive
+  information in a description — the tool can't enforce that for you.
+
+## Quickstart
+
+```bash
+npm install
+npm run build
+
+export SBRAIN_PASSPHRASE="use-a-real-passphrase-here"
+
+node dist/cli.js --vault ./vault/personal init
+node dist/cli.js --vault ./vault/personal add health 'DOCTOR_NEXT_APPOINTMENT="2026-09-15"' --desc "Bir sonraki doktor kontrol tarihi"
+node dist/cli.js --vault ./vault/personal index
+
+# Mode 1 — direct, zero-exposure
+node dist/cli.js --vault ./vault/personal get health DOCTOR_NEXT_APPOINTMENT
+
+# fast path — search the value-free schema
+node dist/cli.js --vault ./vault/personal search "doktor"
+
+# freeform journal entry (dev/testing — normally an agent calls store_note for you)
+node dist/cli.js --vault ./vault/personal note health "Check-up yaptırdım, sonuçlar normal." --desc "Doktor ziyareti notu"
+
+# browse notes by date, safe index only, no decryption
+node dist/cli.js --vault ./vault/personal timeline --category health
+
+# Mode 2 — start the MCP server for an agent (Claude Code, etc.)
+node dist/cli.js --vault ./vault/personal mcp
+```
+
+A working demo vault (dummy data only) is checked in at `vault/example/`.
+
+### Unlocking, locking and the storage format
+
+```bash
+# Prove the passphrase, and optionally hand it to the OS credential store
+node dist/cli.js --vault ./vault/personal unlock --remember
+
+# Which store is in use, and what this vault currently holds
+node dist/cli.js --vault ./vault/personal keychain-status
+
+# Explicitly end it: the remembered passphrase is forgotten
+node dist/cli.js --vault ./vault/personal lock
+
+# Rewrite pre-versioning files in the current encrypted envelope
+node dist/cli.js --vault ./vault/personal migrate
+```
+
+Encrypted files carry an explicit envelope version, cipher name and the exact
+scrypt parameters they were written with, and those header fields are
+authenticated together with the ciphertext — an attacker cannot edit the
+recorded cost factor to weaken the next derivation without the tag check
+failing. Files written before versioning existed still open, and `sbrain
+migrate` upgrades them in place. `test/fixtures/` holds vaults written by
+earlier formats so a future change has to prove it can still read them.
+
+## Encrypted Markdown documents
+
+The new document engine stores Markdown notes as individually encrypted objects
+with stable IDs and revisions. Its search/link index is encrypted too; titles,
+note bodies, tags and search tokens are not written to disk as plaintext.
+
+```bash
+# Create two linked notes
+node dist/cli.js --vault ./vault/personal docs put Projects/Alpha \
+  --title "Project Alpha" \
+  --body "Launch plan owned by [[People/Ada]]. #project/active"
+
+node dist/cli.js --vault ./vault/personal docs put People/Ada \
+  --title "Ada" \
+  --body "Works on [[Projects/Alpha]]. #person"
+
+# Fast encrypted-index recall and knowledge links
+node dist/cli.js --vault ./vault/personal docs search "launch tag:project/active"
+node dist/cli.js --vault ./vault/personal docs backlinks Projects/Alpha
+node dist/cli.js --vault ./vault/personal docs links Projects/Alpha
+
+# Directly decrypt one note, or emit portable Markdown with frontmatter
+node dist/cli.js --vault ./vault/personal docs get Projects/Alpha
+node dist/cli.js --vault ./vault/personal docs get Projects/Alpha --with-frontmatter
+```
+
+Use `docs list`, `docs import`, `docs rebuild-index`, and `docs remove` for the
+remaining document lifecycle operations. These are direct CLI operations; no
+model sees their output unless you explicitly pipe it into one.
+
+Revision recovery and encrypted attachments are built in:
+
+```bash
+node dist/cli.js --vault ./vault/personal docs history Projects/Alpha
+node dist/cli.js --vault ./vault/personal docs restore Projects/Alpha 1
+node dist/cli.js --vault ./vault/personal docs unresolved
+node dist/cli.js --vault ./vault/personal docs rename Projects/Alpha Archive/Alpha
+
+node dist/cli.js --vault ./vault/personal docs attach ./diagram.png --mime image/png
+node dist/cli.js --vault ./vault/personal docs attachments
+node dist/cli.js --vault ./vault/personal docs attachment-get <id> ./restored-diagram.png
+```
+
+### Performance gates
+
+```bash
+npm run benchmark        # 1,000 notes  — the everyday gate
+npm run benchmark:10k    # 10,000 notes
+npm run benchmark:100k   # 100,000 notes (slow: it writes 100k encrypted objects)
+```
+
+Each builds a disposable encrypted corpus and enforces the p95 budgets from
+[`docs/PRODUCT.md`](docs/PRODUCT.md) at that size: unlock, quick-switch,
+full-text search, note open and backlinks. The gates are measured, not
+aspirational — a tier's numbers are only raised with a measurement and a
+reason, never to turn a red run green.
+
+Building the larger tiers is what surfaced the work behind them. Three write
+and resolve paths scanned the whole vault (quadratic during a bulk import), and
+search re-normalized every note body inside the query loop, so a 10,000-note
+corpus took minutes to build and 80 ms to search. With reverse lookups in the
+index and search text normalized once per session, the same corpus builds in
+seconds and answers a full-text query in about 3 ms p95.
+
+## Native desktop workspace
+
+The repository now includes a Tauri 2 desktop application. Its React webview has
+no direct filesystem or key access; ten capability-scoped commands cross into
+the Rust core for unlock, lock, note CRUD, search, backlinks, value-minimized
+graph topology and typed property rows. The session key stays in Rust memory and
+is zeroized on lock.
+
+```bash
+# Browser-backed UI development (uses a safe in-memory demo vault)
+npm run desktop:dev
+
+# Full native application against encrypted vault files
+npm run tauri:dev
+
+# Produce the optimized Windows executable without an installer bundle
+npm run tauri:build -- --no-bundle
+```
+
+The current workspace includes a lock screen, file tree, tab strip, CodeMirror
+Markdown editor, reading view, split pane, properties, outline, backlinks,
+encrypted search, quick switcher, command palette, keyboard shortcuts, theme
+editor, local knowledge graph and filterable property table. Dirty notes are persisted before
+navigation, before a tab closes and before lock, so the 700 ms autosave window
+cannot discard an edit.
+
+| Shortcut | Action |
+|---|---|
+| `Ctrl+O` | Quick switcher — title, path or alias; `alt+↵` opens it in the split pane |
+| `Ctrl+K` | Command palette |
+| `Ctrl+Shift+F` | Search the encrypted vault |
+| `Ctrl+\` | Open the current note in the split pane |
+| `Ctrl+W` | Close the active tab (saving it first if dirty) |
+| `Ctrl+N` / `Ctrl+S` / `Ctrl+E` / `Ctrl+L` | New note · save · write/read · lock |
+
+Two session guards protect an unlocked window you walked away from:
+
+- **Inactivity lock.** The vault re-locks after a configurable idle window —
+  1, 5 (default) or 15 minutes, or disabled — set from the sidebar's *Auto-lock*
+  control. Keystrokes, pointer input and scrolling reset it; the lock screen
+  then says why it locked.
+- **Self-clearing clipboard.** Copying a note or a single property value marks
+  the clipboard as workspace-owned and rewrites it to empty 30 seconds later,
+  and again on lock — but only if the clipboard still holds exactly what was
+  copied, so it never wipes something you copied elsewhere in the meantime. If
+  the webview denies clipboard read access, the copy still works and the
+  workspace tells you it cannot take the value back.
+
+The file tree and the property view are windowed: they keep a viewport's worth
+of rows in the document no matter how many notes the vault holds, so a
+40,000-row folder costs the same to render as a 40-row one. (The interface is
+bounded; the encrypted core's own 10k/100k budgets are still only measured
+against the 1,000-note benchmark corpus.)
+
+The theme editor — sidebar palette icon, or *Customize theme* in the command
+palette — derives the whole interface from four colours (chrome, surface, ink,
+accent) plus a reading size and typeface, with four presets to start from. It
+shows the WCAG contrast ratio for ink-on-surface and accent-on-chrome as you
+edit and flags a combination that drops below AA. The theme is a per-device
+preference stored in `localStorage`; it never enters the encrypted vault.
+
+Obsidian-style YAML frontmatter, safe templates and daily notes are supported:
+
+```bash
+# Mark any encrypted note as a template and use familiar variables such as
+# {{title}}, {{date:YYYY-MM-DD}}, {{time:HH:mm}} and custom {{name}} values.
+node dist/cli.js --vault ./vault/personal docs from-template \
+  Templates/Meeting Meetings/Kickoff \
+  --title "Kickoff" --date 2026-08-30 --var client=Acme
+
+# Idempotent: the first call creates the note; later calls open the same note.
+node dist/cli.js --vault ./vault/personal docs daily 2026-08-30 \
+  --folder Journal --template Templates/Daily
+```
+
+Imported Markdown accepts nested YAML properties, block scalars, tag/alias lists
+and common scalar values. YAML aliases are deliberately disabled and duplicate or
+prototype-shaping keys are rejected before anything enters encrypted storage.
+
+### Wiring into Claude Code / an MCP client
+
+```json
+{
+  "mcpServers": {
+    "secondbrain-vault": {
+      "command": "node",
+      "args": ["/absolute/path/to/secondbrain-vault/dist/cli.js", "--vault", "/absolute/path/to/vault/personal", "mcp"],
+      "env": { "SBRAIN_PASSPHRASE": "use-a-real-passphrase-here" }
+    }
+  }
+}
+```
+
+Once connected, you don't type CLI commands yourself — you just talk. Tell
+the agent "bugün doktora gittim, tahliller normaldi, 6 ay sonra tekrar
+kontrol" and it calls `store_note` on your behalf. Ask "bir sonraki doktor
+kontrolüm ne zaman?" and it calls `find_key` → `resolve_key`. The CLI's own
+`add`/`note`/`get` commands still exist, but they're there for scripting and
+testing — not the intended everyday interface.
+
+The server exposes five tools:
+
+| Tool | Touches values? | Gets audited? |
+|---|---|---|
+| `list_keys` | No | No |
+| `find_key` | No | No |
+| `find_notes_in_range` | No — timestamps/tags only | No |
+| `store_note` | Yes — that's the point | Yes |
+| `resolve_key` | Yes | Yes |
+
+`store_note` covers both shapes: pass an explicit `key` for a fact that
+should overwrite itself (like `IBAN`), or omit it for a freeform journal
+note — it gets an auto-generated, timestamp-prefixed key (`NOTE_20260830_...`)
+so entries stack up instead of colliding. `find_notes_in_range` then lets an
+agent browse "what did I note about health in August" using only that
+timestamp, with zero decryption — the note-taking equivalent of Obsidian's
+daily-notes view, but without reading your notes to build it.
+
+## The "fast find" layer
+
+`sbrain index` rebuilds `schema.json` — key names + descriptions, no values —
+across the whole vault. `sbrain search` / the `find_key` MCP tool run a fuzzy
+match over that small, safe file instead of decrypting and scanning every
+vault file. This is the speed win over an Obsidian graph traversal: lookup
+cost scales with the number of *keys*, not the size of your notes.
+
+## Threat model / honesty notes
+
+- Encryption protects data **at rest**. Once `sbrain get` or `resolve_key`
+  decrypts a value, it's plaintext in that process's memory / stdout — treat
+  it like any other secret in a terminal.
+- The passphrase prompt is masked on a real terminal, and `sbrain unlock
+  --remember` can hand the passphrase to the OS credential store instead
+  (Windows DPAPI, macOS Keychain, libsecret on Linux). Only the Windows path is
+  exercised by this project's tests, because that is the platform it is
+  developed on. An OS credential store protects the secret from other users and
+  other machines — not from code already running as you.
+- `SBRAIN_PASSPHRASE` still wins over both, which is what makes scripts and MCP
+  work; an environment variable is visible to your own processes, so prefer the
+  credential store for interactive use.
+- Nothing here stops a user (or a misconfigured agent with general filesystem
+  tools) from reading `vault/*.kv.enc` directly — they'll just get ciphertext,
+  which is the actual protection. The real enforcement point is keeping an
+  agent's filesystem access scoped away from the vault directory and routed
+  through the MCP tools instead.
+- This is an MVP. It has not been audited. Don't put real medical or
+  financial identifiers in it yet — validate the model with dummy data first.
+
+## Roadmap
+
+- [ ] Structured (non-scalar) values — dates ranges, lists — without breaking the "one key, one fact" model
+- [ ] `age`/SOPS-compatible encryption backend as an alternative to built-in AES-GCM
+- [ ] Local embedding-based `find_key` (currently substring/token match) for better recall on natural-language queries
+- [ ] `sbrain revoke` — per-agent scoped access tokens instead of one shared passphrase
+- [ ] Host-side redaction support for MCP clients that implement it, to move Mode 2 closer to Mode 1's guarantees
+
+## License
+
+MIT
