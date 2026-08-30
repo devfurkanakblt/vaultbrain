@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { NoteDocument, PropertyRow, SearchHit } from "./types";
+import type { NoteDocument, PropertyRow, SavedView, SearchHit } from "./types";
 import { DEFAULT_THEME, presetSettings, shade } from "./theme";
 
 const sampleNote: NoteDocument = {
@@ -28,6 +28,10 @@ const bridgeMock = vi.hoisted(() => ({
   backlinks: vi.fn(),
   graph: vi.fn(),
   propertyRows: vi.fn(),
+  updateNoteProperty: vi.fn(),
+  savedViews: vi.fn(),
+  saveView: vi.fn(),
+  deleteView: vi.fn(),
 }));
 
 vi.mock("./bridge", () => ({ vaultBridge: bridgeMock }));
@@ -90,9 +94,18 @@ describe("desktop workspace", () => {
     bridgeMock.createNote.mockResolvedValue({ ...sampleNote, id: "f377c38e-256a-4337-895a-a29b72ebde78", title: "Fresh thought" });
     bridgeMock.search.mockResolvedValue([]);
     bridgeMock.backlinks.mockResolvedValue([]);
-    bridgeMock.graph.mockResolvedValue({ nodes: [{ id: sampleNote.id, title: sampleNote.title, path: sampleNote.path, tags: sampleNote.tags, degree: 0 }], edges: [] });
+    bridgeMock.graph.mockResolvedValue({ nodes: [{ id: sampleNote.id, title: sampleNote.title, path: sampleNote.path, tags: sampleNote.tags, degree: 0, cluster: 0 }], edges: [] });
     bridgeMock.propertyRows.mockResolvedValue([{ id: sampleNote.id, path: sampleNote.path, title: sampleNote.title, tags: sampleNote.tags, properties: sampleNote.properties, updatedAt: sampleNote.updatedAt }]);
     bridgeMock.lock.mockResolvedValue(undefined);
+    bridgeMock.savedViews.mockResolvedValue([]);
+    bridgeMock.deleteView.mockResolvedValue([]);
+    bridgeMock.saveView.mockImplementation(async (view: SavedView) => [
+      { ...view, id: view.id || "view-1", createdAt: sampleNote.createdAt, updatedAt: sampleNote.updatedAt },
+    ]);
+    bridgeMock.updateNoteProperty.mockImplementation(async (id: string, key: string, value: unknown) => ({
+      id, path: sampleNote.path, title: sampleNote.title, tags: sampleNote.tags,
+      properties: { ...sampleNote.properties, [key]: value }, updatedAt: sampleNote.updatedAt,
+    }));
   });
 
   it("unlocks locally and opens the first encrypted note", async () => {
@@ -156,6 +169,54 @@ describe("desktop workspace", () => {
     expect(within(propertyView).getByRole("button", { name: "Product principles" })).toBeInTheDocument();
     expect(bridgeMock.propertyRows).toHaveBeenCalledOnce();
   });
+  it("colours the global graph by community and only draws what fits", async () => {
+    const nodes = Array.from({ length: 6 }, (_, index) => ({
+      id: `graph-${index}`,
+      title: `Node ${index}`,
+      path: `Atlas/Node ${index}.md`,
+      tags: [],
+      degree: 2,
+      cluster: index < 3 ? 0 : 1,
+    }));
+    bridgeMock.graph.mockResolvedValue({
+      nodes,
+      edges: [
+        { source: "graph-0", target: "graph-1" }, { source: "graph-1", target: "graph-2" }, { source: "graph-2", target: "graph-0" },
+        { source: "graph-3", target: "graph-4" }, { source: "graph-4", target: "graph-5" }, { source: "graph-5", target: "graph-3" },
+      ],
+    });
+    await unlockWorkspace();
+
+    fireEvent.click(screen.getByRole("button", { name: "Graph" }));
+    const view = await screen.findByRole("region", { name: "Knowledge graph" });
+    expect(await within(view).findByText(/6 of 6 notes drawn/u)).toBeInTheDocument();
+    expect(within(view).getByText(/2 communities/u)).toBeInTheDocument();
+
+    const communities = within(view).getByRole("group", { name: "Communities" });
+    fireEvent.click(within(communities).getByRole("button", { name: /Community 2/u }));
+    expect(await within(view).findByText(/3 of 3 notes drawn/u)).toBeInTheDocument();
+  });
+
+  it("stores a property query in the vault and writes an edited cell back through the bridge", async () => {
+    await unlockWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "Data" }));
+    const table = await screen.findByRole("region", { name: "Property table" });
+    await waitFor(() => expect(bridgeMock.savedViews).toHaveBeenCalledOnce());
+
+    fireEvent.change(within(table).getByLabelText("View name"), { target: { value: "Living notes" } });
+    fireEvent.click(within(table).getByRole("button", { name: "Save view" }));
+    await waitFor(() => expect(bridgeMock.saveView).toHaveBeenCalledWith(expect.objectContaining({ name: "Living notes" })));
+    expect(await within(table).findByRole("option", { name: "Living notes" })).toBeInTheDocument();
+
+    fireEvent.doubleClick(within(table).getByText("living"));
+    const cell = await within(table).findByLabelText("status for Product principles");
+    fireEvent.change(cell, { target: { value: "archived" } });
+    fireEvent.keyDown(cell, { key: "Enter" });
+
+    await waitFor(() => expect(bridgeMock.updateNoteProperty).toHaveBeenCalledWith(sampleNote.id, "status", "archived"));
+    expect(await within(table).findByText("archived")).toBeInTheDocument();
+  });
+
   it("keeps opened notes in tabs and closes the active one back to its neighbour", async () => {
     withTwoNotes();
     await unlockWorkspace();

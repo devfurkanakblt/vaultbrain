@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Backlink, KnowledgeGraph, NoteDocument, NoteSummary, PropertyRow, SearchHit, VaultInfo } from "./types";
+import type { Backlink, KnowledgeGraph, NoteDocument, NoteSummary, PropertyRow, SavedView, SearchHit, VaultInfo } from "./types";
 
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -46,8 +46,40 @@ let demoNotes: NoteDocument[] = [
   },
 ];
 
+let demoViews: SavedView[] = [];
+
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   return invoke<T>(command, args);
+}
+
+/** Demo-mode stand-in for the Rust label propagation: connected components. */
+function demoClusters(nodeIds: string[], edges: KnowledgeGraph["edges"]) {
+  const neighbours = new Map<string, string[]>(nodeIds.map((id) => [id, []]));
+  for (const edge of edges) {
+    neighbours.get(edge.source)?.push(edge.target);
+    neighbours.get(edge.target)?.push(edge.source);
+  }
+  const groups: string[][] = [];
+  const seen = new Set<string>();
+  for (const id of nodeIds) {
+    if (seen.has(id)) continue;
+    const group: string[] = [];
+    const queue = [id];
+    seen.add(id);
+    while (queue.length) {
+      const current = queue.shift()!;
+      group.push(current);
+      for (const next of neighbours.get(current) ?? []) {
+        if (!seen.has(next)) {
+          seen.add(next);
+          queue.push(next);
+        }
+      }
+    }
+    groups.push(group);
+  }
+  groups.sort((left, right) => right.length - left.length);
+  return new Map(groups.flatMap((group, cluster) => group.map((id) => [id, cluster] as const)));
 }
 
 export const vaultBridge = {
@@ -127,6 +159,7 @@ export const vaultBridge = {
         }
       }
     }
+    const clusters = demoClusters(demoNotes.map((note) => note.id), edges);
     return {
       nodes: demoNotes.map((note) => ({
         id: note.id,
@@ -134,19 +167,54 @@ export const vaultBridge = {
         path: note.path,
         tags: note.tags,
         degree: edges.filter((edge) => edge.source === note.id || edge.target === note.id).length,
+        cluster: clusters.get(note.id) ?? 0,
       })),
       edges,
     };
   },
   async propertyRows(): Promise<PropertyRow[]> {
     if (isTauri) return call<PropertyRow[]>("list_property_rows");
-    return demoNotes.map((note) => ({
-      id: note.id,
-      path: note.path,
-      title: note.title,
-      tags: note.tags,
-      properties: structuredClone(note.properties),
-      updatedAt: note.updatedAt,
-    }));
+    return demoNotes.map((note) => rowOf(note));
+  },
+  async updateNoteProperty(reference: string, key: string, value: unknown): Promise<PropertyRow> {
+    if (isTauri) return call<PropertyRow>("update_note_property", { reference, key, value: value ?? null });
+    const note = demoNotes.find((item) => item.id === reference || item.path === reference);
+    if (!note) throw new Error(`Note not found: ${reference}`);
+    const properties = { ...note.properties };
+    if (value === undefined || value === null) delete properties[key];
+    else properties[key] = value;
+    const next = { ...note, properties, revision: note.revision + 1, updatedAt: new Date().toISOString() };
+    demoNotes = demoNotes.map((item) => (item.id === note.id ? next : item));
+    return rowOf(next);
+  },
+  async savedViews(): Promise<SavedView[]> {
+    if (isTauri) return call<SavedView[]>("list_saved_views");
+    return structuredClone(demoViews);
+  },
+  async saveView(view: SavedView): Promise<SavedView[]> {
+    if (isTauri) return call<SavedView[]>("save_saved_view", { view });
+    const stamped: SavedView = { ...view, id: view.id || crypto.randomUUID(), updatedAt: new Date().toISOString() };
+    const index = demoViews.findIndex((item) => item.id === stamped.id);
+    demoViews = index >= 0
+      ? demoViews.map((item) => (item.id === stamped.id ? stamped : item))
+      : [...demoViews, { ...stamped, createdAt: new Date().toISOString() }];
+    demoViews.sort((left, right) => left.name.localeCompare(right.name));
+    return structuredClone(demoViews);
+  },
+  async deleteView(id: string): Promise<SavedView[]> {
+    if (isTauri) return call<SavedView[]>("delete_saved_view", { id });
+    demoViews = demoViews.filter((view) => view.id !== id);
+    return structuredClone(demoViews);
   },
 };
+
+function rowOf(note: NoteDocument): PropertyRow {
+  return {
+    id: note.id,
+    path: note.path,
+    title: note.title,
+    tags: note.tags,
+    properties: structuredClone(note.properties),
+    updatedAt: note.updatedAt,
+  };
+}

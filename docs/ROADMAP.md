@@ -51,10 +51,10 @@ Each phase must ship a usable vertical slice and keep older vaults readable.
 ## Phase 4 — Knowledge views
 
 - [x] Value-minimized local graph baseline from the encrypted link index
-- [ ] Global graph clustering and large-graph virtualization
+- [x] Global graph clustering and large-graph virtualization
 - [ ] Canvas/whiteboard with encrypted assets
 - [x] Database-like property table with local filtering and column sorting
-- [ ] Saved property queries and editable cells
+- [x] Saved property queries and editable cells
 - [ ] Bookmarks, workspaces, aliases and unlinked mentions
 - [ ] Optional on-device semantic recall
 

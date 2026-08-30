@@ -36,7 +36,7 @@ import { clearOwnedClipboard, copyWithExpiry } from "./secure-clipboard";
 import { ThemeEditor } from "./ThemeEditor";
 import { applyTheme, clearTheme, DEFAULT_THEME, loadTheme, saveTheme, type ThemeSettings } from "./theme";
 import { useVirtualWindow } from "./virtual";
-import type { Backlink, KnowledgeGraph as GraphData, NoteDocument, NoteSummary, PropertyRow, SaveState, SearchHit, VaultInfo } from "./types";
+import type { Backlink, KnowledgeGraph as GraphData, NoteDocument, NoteSummary, PropertyRow, SavedView, SaveState, SearchHit, VaultInfo } from "./types";
 
 const MarkdownEditor = lazy(() => import("./Editor").then((module) => ({ default: module.MarkdownEditor })));
 const MarkdownPreview = lazy(() => import("./Preview"));
@@ -154,6 +154,7 @@ export function App() {
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("notes");
   const [graph, setGraph] = useState<GraphData>({ nodes: [], edges: [] });
   const [propertyRows, setPropertyRows] = useState<PropertyRow[]>([]);
+  const [savedViews, setSavedViews] = useState<SavedView[]>([]);
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [rightOpen, setRightOpen] = useState(true);
   const [expanded, setExpanded] = useState(new Set<string>());
@@ -283,7 +284,7 @@ export function App() {
     setVault(undefined); setNotes([]); setActive(undefined); setSecondary(undefined); setOpenTabs([]);
     setBacklinks([]); setQuery(""); setResults([]); setNotice("");
     setSearchOpen(false); setPaletteOpen(false); setQuickOpen(false); setNewOpen(false); setThemeOpen(false);
-    setWorkspaceView("notes"); setGraph({ nodes: [], edges: [] }); setPropertyRows([]);
+    setWorkspaceView("notes"); setGraph({ nodes: [], edges: [] }); setPropertyRows([]); setSavedViews([]);
     setLockNotice(reason === "inactivity"
       ? `Locked automatically after ${idleMinutes} minute${idleMinutes === 1 ? "" : "s"} without activity. The clipboard was cleared too.`
       : "");
@@ -356,7 +357,21 @@ export function App() {
   async function showWorkspace(next: WorkspaceView) {
     setWorkspaceView(next);
     if (next === "graph") setGraph(await vaultBridge.graph());
-    if (next === "properties") setPropertyRows(await vaultBridge.propertyRows());
+    if (next === "properties") {
+      const [rows, views] = await Promise.all([vaultBridge.propertyRows(), vaultBridge.savedViews()]);
+      setPropertyRows(rows);
+      setSavedViews(views);
+    }
+  }
+
+  // A cell edit writes a whole note revision, so the open editor and the file
+  // tree have to hear about it too — otherwise the next save would carry a
+  // stale revision back to disk.
+  async function editProperty(id: string, key: string, value: unknown) {
+    const row = await vaultBridge.updateNoteProperty(id, key, value);
+    setPropertyRows((rows) => rows.map((item) => (item.id === row.id ? row : item)));
+    if (active?.id === id) setActive(await vaultBridge.getNote(id));
+    await refreshList();
   }
 
   function openFromKnowledge(id: string) {
@@ -491,7 +506,14 @@ export function App() {
           <div className={`save-state ${saveState}`}><span />{saveState === "saved" ? "Encrypted & saved" : saveState === "saving" ? "Encrypting…" : saveState === "error" ? "Save failed" : "Unsaved changes"}</div>
           <div><span>UTF-8</span><span>MARKDOWN</span><span>Ln {active.body.split("\n").length}</span></div>
         </footer>}
-      </section> : workspaceView === "graph" ? <KnowledgeGraph graph={graph} onOpen={openFromKnowledge} /> : <PropertyTable rows={propertyRows} onOpen={openFromKnowledge} />}
+      </section> : workspaceView === "graph" ? <KnowledgeGraph graph={graph} onOpen={openFromKnowledge} /> : <PropertyTable
+        rows={propertyRows}
+        views={savedViews}
+        onOpen={openFromKnowledge}
+        onSaveView={async (view) => setSavedViews(await vaultBridge.saveView(view))}
+        onDeleteView={async (id) => setSavedViews(await vaultBridge.deleteView(id))}
+        onEditProperty={editProperty}
+      />}
 
       {workspaceView === "notes" && rightOpen && active && <aside className="context-panel">
         <section><div className="context-heading"><span>PROPERTIES</span><i>{Object.keys(active.properties).length}</i></div>

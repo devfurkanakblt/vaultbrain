@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::Sha256;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -28,6 +28,9 @@ type HmacSha256 = Hmac<Sha256>;
 const INDEX_AAD: &str = "secondbrain-vault:document-index:v1";
 const KEY_CHECK_CONTEXT: &str = "secondbrain-vault:document-key:v1";
 const MAX_NOTE_BYTES: usize = 25 * 1024 * 1024;
+const SAVED_VIEWS_AAD: &str = "secondbrain-vault:saved-views:v1";
+const MAX_SAVED_VIEWS: usize = 200;
+const MAX_CLUSTER_ROUNDS: usize = 20;
 
 #[derive(Default)]
 struct AppState {
@@ -196,13 +199,13 @@ struct VaultInfo {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct GraphNode {
     id: String,
     title: String,
     path: String,
     tags: Vec<String>,
     degree: usize,
+    cluster: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -226,6 +229,52 @@ struct PropertyRow {
     tags: Vec<String>,
     properties: Value,
     updated_at: String,
+}
+
+impl From<&NoteDocument> for PropertyRow {
+    fn from(note: &NoteDocument) -> Self {
+        Self {
+            id: note.id.clone(),
+            path: note.path.clone(),
+            title: note.title.clone(),
+            tags: note.tags.clone(),
+            properties: note.properties.clone(),
+            updated_at: note.updated_at.clone(),
+        }
+    }
+}
+
+/// A saved property query. It only ever names columns and filter text the user
+/// typed, but that text is derived from vault content, so it is stored with the
+/// same envelope as the note index rather than in unencrypted app settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedView {
+    #[serde(default)]
+    id: String,
+    name: String,
+    #[serde(default)]
+    filter: String,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    sort: String,
+    #[serde(default)]
+    direction: String,
+    #[serde(default)]
+    columns: Vec<String>,
+    #[serde(default)]
+    created_at: String,
+    #[serde(default)]
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedViewFile {
+    version: u8,
+    #[serde(default)]
+    views: Vec<SavedView>,
 }
 
 fn now() -> String {
@@ -634,6 +683,202 @@ fn open_session(vault_path: &str, passphrase: &str) -> Result<VaultSession, Stri
     Ok(session)
 }
 
+/// Deterministic label propagation over the resolved-link graph.
+///
+/// The graph view colours notes by community, so the same vault must produce the
+/// same colours on every unlock. Nothing here is random: labels start as each
+/// note's position in the caller's already-sorted id list, nodes are visited in
+/// that order, and a tie between two equally common neighbour labels always
+/// falls to the lower label. Each round is O(V + E), so a 100k-note vault stays
+/// well inside the interaction budget.
+fn cluster_nodes(ids: &[String], edges: &[GraphEdge]) -> HashMap<String, usize> {
+    let position: HashMap<&str, usize> = ids.iter().enumerate().map(|(index, id)| (id.as_str(), index)).collect();
+    let mut neighbours: Vec<Vec<usize>> = vec![Vec::new(); ids.len()];
+    for edge in edges {
+        if let (Some(&source), Some(&target)) = (position.get(edge.source.as_str()), position.get(edge.target.as_str())) {
+            if source != target {
+                neighbours[source].push(target);
+                neighbours[target].push(source);
+            }
+        }
+    }
+
+    let mut labels: Vec<usize> = (0..ids.len()).collect();
+    for _ in 0..MAX_CLUSTER_ROUNDS {
+        let mut changed = false;
+        for node in 0..ids.len() {
+            if neighbours[node].is_empty() {
+                continue;
+            }
+            let mut counts: HashMap<usize, usize> = HashMap::new();
+            for &neighbour in &neighbours[node] {
+                *counts.entry(labels[neighbour]).or_default() += 1;
+            }
+            // Most common neighbour label, lowest label wins a tie. The ordering
+            // is total, so the winner never depends on hash iteration order.
+            let mut best: Option<(usize, usize)> = None;
+            for (&label, &count) in &counts {
+                best = match best {
+                    Some((top, winner)) if top > count || (top == count && winner <= label) => Some((top, winner)),
+                    _ => Some((count, label)),
+                };
+            }
+            if let Some((_, label)) = best {
+                if labels[node] != label {
+                    labels[node] = label;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    // Renumber so cluster 0 is always the largest community, and equally sized
+    // communities are ordered by their first member.
+    let mut members: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (node, &label) in labels.iter().enumerate() {
+        members.entry(label).or_default().push(node);
+    }
+    let mut groups: Vec<Vec<usize>> = members.into_values().collect();
+    groups.sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left[0].cmp(&right[0])));
+    let mut clusters = HashMap::with_capacity(ids.len());
+    for (cluster, group) in groups.into_iter().enumerate() {
+        for node in group {
+            clusters.insert(ids[node].clone(), cluster);
+        }
+    }
+    clusters
+}
+
+fn build_graph(index: &DocumentIndex) -> KnowledgeGraph {
+    let mut seen: HashSet<(&str, &str)> = HashSet::new();
+    let mut edges = vec![];
+    for (source, targets) in &index.resolved_links {
+        for target in targets.iter().flatten() {
+            if source != target && seen.insert((source.as_str(), target.as_str())) {
+                edges.push(GraphEdge { source: source.clone(), target: target.clone() });
+            }
+        }
+    }
+    edges.sort_by(|left, right| left.source.cmp(&right.source).then_with(|| left.target.cmp(&right.target)));
+
+    let mut degree: HashMap<&str, usize> = HashMap::new();
+    for edge in &edges {
+        *degree.entry(edge.source.as_str()).or_default() += 1;
+        *degree.entry(edge.target.as_str()).or_default() += 1;
+    }
+    let mut nodes: Vec<_> = index
+        .notes
+        .values()
+        .map(|indexed| GraphNode {
+            id: indexed.note.id.clone(),
+            title: indexed.note.title.clone(),
+            path: indexed.note.path.clone(),
+            tags: indexed.note.tags.clone(),
+            degree: degree.get(indexed.note.id.as_str()).copied().unwrap_or_default(),
+            cluster: 0,
+        })
+        .collect();
+    nodes.sort_by(|left, right| left.path.cmp(&right.path).then_with(|| left.id.cmp(&right.id)));
+
+    let ids: Vec<String> = nodes.iter().map(|node| node.id.clone()).collect();
+    let clusters = cluster_nodes(&ids, &edges);
+    for node in &mut nodes {
+        node.cluster = clusters.get(&node.id).copied().unwrap_or_default();
+    }
+    KnowledgeGraph { nodes, edges }
+}
+
+fn saved_views_path(session: &VaultSession) -> PathBuf {
+    session.root_dir.join("views.enc")
+}
+
+fn load_saved_views(session: &VaultSession) -> Result<Vec<SavedView>, String> {
+    let path = saved_views_path(session);
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+    reject_symlink(&path)?;
+    let payload: EncryptedPayload = serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?)
+        .map_err(|error| error.to_string())?;
+    let file: SavedViewFile = serde_json::from_slice(&decrypt(&payload, session.key.as_ref(), SAVED_VIEWS_AAD)?)
+        .map_err(|error| error.to_string())?;
+    if file.version != 1 {
+        return Err("unsupported saved view file version".into());
+    }
+    Ok(file.views)
+}
+
+fn write_saved_views(session: &VaultSession, views: &[SavedView]) -> Result<(), String> {
+    let file = SavedViewFile { version: 1, views: views.to_vec() };
+    let payload = encrypt(
+        &serde_json::to_vec(&file).map_err(|error| error.to_string())?,
+        session.key.as_ref(),
+        SAVED_VIEWS_AAD,
+    )?;
+    write_atomic(
+        &saved_views_path(session),
+        &serde_json::to_vec(&payload).map_err(|error| error.to_string())?,
+    )
+}
+
+fn normalize_view(mut view: SavedView, existing: &[SavedView]) -> Result<SavedView, String> {
+    view.name = view.name.trim().to_string();
+    if view.name.is_empty() || view.name.chars().count() > 120 {
+        return Err("a saved view needs a name of 1-120 characters".into());
+    }
+    if view.id.chars().count() > 64 {
+        return Err("invalid saved view ID".into());
+    }
+    if view.filter.chars().count() > 500 || view.columns.len() > 64 || view.tags.len() > 64 {
+        return Err("saved view is too large".into());
+    }
+    view.direction = if view.direction == "desc" { "desc".into() } else { "asc".into() };
+    let timestamp = now();
+    view.created_at = existing
+        .iter()
+        .find(|item| item.id == view.id)
+        .map(|item| item.created_at.clone())
+        .unwrap_or_else(|| timestamp.clone());
+    view.updated_at = timestamp;
+    if view.id.trim().is_empty() {
+        view.id = Uuid::new_v4().to_string();
+    }
+    Ok(view)
+}
+
+/// Read-modify-write of one typed property. The caller holds the session lock
+/// for the whole call, so a table cell edit cannot interleave with the editor's
+/// own save, and the write goes through store_note so revision, history
+/// archive and link index all stay consistent.
+fn set_property(session: &mut VaultSession, reference: &str, key: &str, value: Option<Value>) -> Result<PropertyRow, String> {
+    let name = key.trim().to_string();
+    if name.is_empty() || name.chars().count() > 120 {
+        return Err("a property name must be 1-120 characters".into());
+    }
+    let id = resolve_id(&session.index, reference)?;
+    let existing = session.index.notes.get(&id).ok_or("note not found")?.note.clone();
+    let mut note = existing.clone();
+    if !note.properties.is_object() {
+        note.properties = empty_object();
+    }
+    let properties = note.properties.as_object_mut().ok_or("note properties are not an object")?;
+    match value {
+        Some(next) => {
+            properties.insert(name, next);
+        }
+        None => {
+            properties.remove(&name);
+        }
+    }
+    note.updated_at = now();
+    note.revision = existing.revision + 1;
+    let stored = store_note(session, note, Some(existing))?;
+    Ok(PropertyRow::from(&stored))
+}
+
 #[tauri::command(async)]
 fn unlock_vault(vault_path: String, passphrase: String, state: State<'_, AppState>) -> Result<VaultInfo, String> {
     let session = open_session(&vault_path, &passphrase)?;
@@ -774,45 +1019,66 @@ fn get_backlinks(reference: String, state: State<'_, AppState>) -> Result<Vec<No
 fn get_knowledge_graph(state: State<'_, AppState>) -> Result<KnowledgeGraph, String> {
     let guard = state.session.lock().map_err(|_| "vault session lock poisoned")?;
     let session = guard.as_ref().ok_or("vault is locked")?;
-    let mut edges = vec![];
-    for (source, targets) in &session.index.resolved_links {
-        for target in targets.iter().flatten() {
-            if source != target && !edges.iter().any(|edge: &GraphEdge| edge.source == *source && edge.target == *target) {
-                edges.push(GraphEdge { source: source.clone(), target: target.clone() });
-            }
-        }
-    }
-    let mut degree: HashMap<&str, usize> = HashMap::new();
-    for edge in &edges {
-        *degree.entry(&edge.source).or_default() += 1;
-        *degree.entry(&edge.target).or_default() += 1;
-    }
-    let mut nodes: Vec<_> = session.index.notes.values().map(|indexed| GraphNode {
-        id: indexed.note.id.clone(),
-        title: indexed.note.title.clone(),
-        path: indexed.note.path.clone(),
-        tags: indexed.note.tags.clone(),
-        degree: degree.get(indexed.note.id.as_str()).copied().unwrap_or_default(),
-    }).collect();
-    nodes.sort_by(|left, right| left.path.cmp(&right.path));
-    edges.sort_by(|left, right| left.source.cmp(&right.source).then_with(|| left.target.cmp(&right.target)));
-    Ok(KnowledgeGraph { nodes, edges })
+    Ok(build_graph(&session.index))
 }
 
 #[tauri::command(async)]
 fn list_property_rows(state: State<'_, AppState>) -> Result<Vec<PropertyRow>, String> {
     let guard = state.session.lock().map_err(|_| "vault session lock poisoned")?;
     let session = guard.as_ref().ok_or("vault is locked")?;
-    let mut rows: Vec<_> = session.index.notes.values().map(|indexed| PropertyRow {
-        id: indexed.note.id.clone(),
-        path: indexed.note.path.clone(),
-        title: indexed.note.title.clone(),
-        tags: indexed.note.tags.clone(),
-        properties: indexed.note.properties.clone(),
-        updated_at: indexed.note.updated_at.clone(),
-    }).collect();
+    let mut rows: Vec<_> = session.index.notes.values().map(|indexed| PropertyRow::from(&indexed.note)).collect();
     rows.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(rows)
+}
+
+#[tauri::command(async)]
+fn update_note_property(reference: String, key: String, value: Option<Value>, state: State<'_, AppState>) -> Result<PropertyRow, String> {
+    let mut guard = state.session.lock().map_err(|_| "vault session lock poisoned")?;
+    let session = guard.as_mut().ok_or("vault is locked")?;
+    set_property(session, &reference, &key, value)
+}
+
+#[tauri::command(async)]
+fn list_saved_views(state: State<'_, AppState>) -> Result<Vec<SavedView>, String> {
+    let guard = state.session.lock().map_err(|_| "vault session lock poisoned")?;
+    let session = guard.as_ref().ok_or("vault is locked")?;
+    load_saved_views(session)
+}
+
+#[tauri::command(async)]
+fn save_saved_view(view: SavedView, state: State<'_, AppState>) -> Result<Vec<SavedView>, String> {
+    let guard = state.session.lock().map_err(|_| "vault session lock poisoned")?;
+    let session = guard.as_ref().ok_or("vault is locked")?;
+    let mut views = load_saved_views(session)?;
+    let stored = normalize_view(view, &views)?;
+    match views.iter().position(|existing| existing.id == stored.id) {
+        Some(index) => views[index] = stored,
+        None => {
+            if views.len() >= MAX_SAVED_VIEWS {
+                return Err(format!("a vault may hold at most {MAX_SAVED_VIEWS} saved views"));
+            }
+            views.push(stored);
+        }
+    }
+    views.sort_by(|left, right| {
+        left.name.to_lowercase().cmp(&right.name.to_lowercase()).then_with(|| left.id.cmp(&right.id))
+    });
+    write_saved_views(session, &views)?;
+    Ok(views)
+}
+
+#[tauri::command(async)]
+fn delete_saved_view(id: String, state: State<'_, AppState>) -> Result<Vec<SavedView>, String> {
+    let guard = state.session.lock().map_err(|_| "vault session lock poisoned")?;
+    let session = guard.as_ref().ok_or("vault is locked")?;
+    let mut views = load_saved_views(session)?;
+    let before = views.len();
+    views.retain(|view| view.id != id);
+    if views.len() == before {
+        return Err(format!("saved view not found: {id}"));
+    }
+    write_saved_views(session, &views)?;
+    Ok(views)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -830,6 +1096,10 @@ pub fn run() {
             get_backlinks,
             get_knowledge_graph,
             list_property_rows,
+            update_note_property,
+            list_saved_views,
+            save_saved_view,
+            delete_saved_view,
         ])
         .run(tauri::generate_context!())
         .expect("error while running SecondBrain Vault");
@@ -906,6 +1176,143 @@ mod tests {
         let reopened = open_session(&path_text, "test passphrase").unwrap();
         assert_eq!(load_note(&reopened, &id).unwrap().body, updated.body);
         assert!(reopened.root_dir.join("history").join(&id).join("1.note.enc").is_file());
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    fn seeded_note(path: &str, title: &str, body: &str) -> NoteDocument {
+        let timestamp = now();
+        NoteDocument {
+            version: 1,
+            id: Uuid::new_v4().to_string(),
+            path: path.into(),
+            title: title.into(),
+            body: body.into(),
+            aliases: vec![],
+            tags: vec![],
+            properties: empty_object(),
+            created_at: timestamp.clone(),
+            updated_at: timestamp,
+            revision: 1,
+        }
+    }
+
+    fn edge(source: &str, target: &str) -> GraphEdge {
+        GraphEdge { source: source.into(), target: target.into() }
+    }
+
+    #[test]
+    fn communities_are_deterministic_and_keep_disjoint_groups_apart() {
+        let ids: Vec<String> = (0..6).map(|index| format!("n{index}")).collect();
+        // Two triangles with no link between them.
+        let edges = vec![
+            edge("n0", "n1"), edge("n1", "n2"), edge("n2", "n0"),
+            edge("n3", "n4"), edge("n4", "n5"), edge("n5", "n3"),
+        ];
+        let first = cluster_nodes(&ids, &edges);
+        assert_eq!(first, cluster_nodes(&ids, &edges), "clustering must not drift between runs");
+        assert_eq!(first["n0"], first["n1"]);
+        assert_eq!(first["n0"], first["n2"]);
+        assert_eq!(first["n3"], first["n4"]);
+        assert_eq!(first["n3"], first["n5"]);
+        assert_ne!(first["n0"], first["n3"], "unlinked groups must not share a community");
+    }
+
+    #[test]
+    fn unlinked_notes_get_their_own_community_and_the_largest_is_numbered_first() {
+        let ids = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let clusters = cluster_nodes(&ids, &[edge("a", "b")]);
+        assert_eq!(clusters["a"], clusters["b"]);
+        assert_ne!(clusters["c"], clusters["a"]);
+        assert_eq!(clusters["a"], 0);
+        assert_eq!(clusters["c"], 1);
+    }
+
+    #[test]
+    fn the_graph_clusters_linked_notes_and_counts_their_degree() {
+        let path = temporary_vault("graph");
+        let path_text = path.to_string_lossy().into_owned();
+        let mut session = open_session(&path_text, "graph passphrase").unwrap();
+
+        let first = seeded_note("Atlas/First.md", "First", "# First\n\nSee [[Second]].");
+        let second = seeded_note("Atlas/Second.md", "Second", "# Second\n\nBack to [[First]].");
+        let lonely = seeded_note("Atlas/Lonely.md", "Lonely", "# Lonely\n\nNo links here.");
+        for note in [&first, &second, &lonely] {
+            store_note(&mut session, note.clone(), None).unwrap();
+        }
+
+        let graph = build_graph(&session.index);
+        let cluster_of = |id: &str| graph.nodes.iter().find(|node| node.id == id).unwrap().cluster;
+        let degree_of = |id: &str| graph.nodes.iter().find(|node| node.id == id).unwrap().degree;
+        assert_eq!(cluster_of(&first.id), cluster_of(&second.id));
+        assert_ne!(cluster_of(&lonely.id), cluster_of(&first.id));
+        assert_eq!(degree_of(&lonely.id), 0);
+        assert!(degree_of(&first.id) >= 1);
+        assert!(graph.nodes.windows(2).all(|pair| pair[0].path <= pair[1].path), "nodes ship in a stable order");
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn saved_views_round_trip_encrypted_and_refuse_nameless_entries() {
+        let path = temporary_vault("views");
+        let path_text = path.to_string_lossy().into_owned();
+        let session = open_session(&path_text, "view passphrase").unwrap();
+        assert!(load_saved_views(&session).unwrap().is_empty(), "a fresh vault has no saved views");
+
+        let view = normalize_view(
+            SavedView {
+                id: String::new(),
+                name: "  Open questions  ".into(),
+                filter: "status".into(),
+                tags: vec!["research".into()],
+                sort: "status".into(),
+                direction: "sideways".into(),
+                columns: vec!["status".into()],
+                created_at: String::new(),
+                updated_at: String::new(),
+            },
+            &[],
+        )
+        .unwrap();
+        assert_eq!(view.name, "Open questions");
+        assert_eq!(view.direction, "asc", "an unknown direction falls back to ascending");
+        assert!(!view.id.is_empty(), "a new view is given an ID");
+
+        write_saved_views(&session, std::slice::from_ref(&view)).unwrap();
+        let raw = fs::read(saved_views_path(&session)).unwrap();
+        assert!(!String::from_utf8_lossy(&raw).contains("Open questions"), "saved views must never hit disk in the clear");
+        drop(session);
+
+        let reopened = open_session(&path_text, "view passphrase").unwrap();
+        let stored = load_saved_views(&reopened).unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].name, "Open questions");
+
+        let mut nameless = view.clone();
+        nameless.name = "   ".into();
+        assert!(normalize_view(nameless, &stored).is_err());
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn editing_one_property_archives_the_previous_revision_and_leaves_the_body_alone() {
+        let path = temporary_vault("property");
+        let path_text = path.to_string_lossy().into_owned();
+        let mut session = open_session(&path_text, "property passphrase").unwrap();
+        let note = seeded_note("Atlas/Tracked.md", "Tracked", "# Tracked\n\nBody stays put.");
+        store_note(&mut session, note.clone(), None).unwrap();
+
+        let row = set_property(&mut session, &note.id, " status ", Some(Value::String("living".into()))).unwrap();
+        assert_eq!(row.properties["status"], Value::String("living".into()));
+
+        let reloaded = load_note(&session, &note.id).unwrap();
+        assert_eq!(reloaded.revision, 2);
+        assert_eq!(reloaded.body, note.body, "a cell edit must not rewrite the note body");
+        assert!(session.root_dir.join("history").join(&note.id).join("1.note.enc").is_file());
+
+        let cleared = set_property(&mut session, &note.id, "status", None).unwrap();
+        assert!(cleared.properties.get("status").is_none(), "passing no value deletes the property");
+        assert!(set_property(&mut session, &note.id, "   ", Some(Value::Bool(true))).is_err());
+        assert!(set_property(&mut session, "Atlas/Missing.md", "status", Some(Value::Bool(true))).is_err());
         fs::remove_dir_all(path).unwrap();
     }
 }

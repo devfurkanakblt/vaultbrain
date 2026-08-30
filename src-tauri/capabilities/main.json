@@ -15,6 +15,10 @@
     "allow-search-notes",
     "allow-get-backlinks",
     "allow-get-knowledge-graph",
-    "allow-list-property-rows"
+    "allow-list-property-rows",
+    "allow-update-note-property",
+    "allow-list-saved-views",
+    "allow-save-saved-view",
+    "allow-delete-saved-view"
   ]
 }

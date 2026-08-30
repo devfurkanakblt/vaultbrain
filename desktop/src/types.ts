@@ -34,6 +34,8 @@ export interface GraphNode {
   path: string;
   tags: string[];
   degree: number;
+  /** Community index from the vault's link graph. 0 is always the largest. */
+  cluster: number;
 }
 
 export interface GraphEdge {
@@ -52,6 +54,21 @@ export interface PropertyRow {
   title: string;
   tags: string[];
   properties: Record<string, unknown>;
+  updatedAt: string;
+}
+
+export type SortDirection = "asc" | "desc";
+
+/** A stored property query. Lives encrypted in the vault, never in app settings. */
+export interface SavedView {
+  id: string;
+  name: string;
+  filter: string;
+  tags: string[];
+  sort: string;
+  direction: SortDirection;
+  columns: string[];
+  createdAt: string;
   updatedAt: string;
 }
 

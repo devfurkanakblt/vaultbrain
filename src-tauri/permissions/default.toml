@@ -51,3 +51,23 @@ commands.allow = ["get_knowledge_graph"]
 identifier = "allow-list-property-rows"
 description = "Allows reading typed properties for the unlocked vault's local table view."
 commands.allow = ["list_property_rows"]
+
+[[permission]]
+identifier = "allow-update-note-property"
+description = "Allows replacing or clearing one typed property on one referenced note in the unlocked vault."
+commands.allow = ["update_note_property"]
+
+[[permission]]
+identifier = "allow-list-saved-views"
+description = "Allows reading the encrypted saved property queries of the unlocked vault."
+commands.allow = ["list_saved_views"]
+
+[[permission]]
+identifier = "allow-save-saved-view"
+description = "Allows storing one saved property query in the unlocked vault."
+commands.allow = ["save_saved_view"]
+
+[[permission]]
+identifier = "allow-delete-saved-view"
+description = "Allows removing one saved property query from the unlocked vault."
+commands.allow = ["delete_saved_view"]

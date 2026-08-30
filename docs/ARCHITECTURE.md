@@ -42,11 +42,16 @@ vault/
   manifest.json              # format/KDF versions; no content
   objects/                   # encrypted notes and attachments
   index.db.enc               # encrypted derived search/link index
+  views.enc                  # encrypted saved property queries
   journal/                   # encrypted crash-recovery operations
   audit.log                  # value-free authenticated chain
   audit.meta.json            # public salt/version metadata
   catalog.json               # optional least-exposure AI catalog
 ```
+
+Saved property queries name columns and carry filter text the user typed about
+their own notes, so they get the same envelope as the index rather than a
+plaintext settings file. They are unreadable, and unlistable, while locked.
 
 Canonical notes contain an immutable ID, title, Markdown body, typed properties,
 tags, aliases, links, creation/update timestamps and revision number. User-facing
