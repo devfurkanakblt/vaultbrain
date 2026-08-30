@@ -31,6 +31,10 @@ const MAX_NOTE_BYTES: usize = 25 * 1024 * 1024;
 const SAVED_VIEWS_AAD: &str = "secondbrain-vault:saved-views:v1";
 const MAX_SAVED_VIEWS: usize = 200;
 const MAX_CLUSTER_ROUNDS: usize = 20;
+const WORKSPACE_AAD: &str = "secondbrain-vault:workspace:v1";
+const MAX_BOOKMARKS: usize = 500;
+const MAX_LAYOUTS: usize = 100;
+const MAX_MENTIONS: usize = 50;
 
 #[derive(Default)]
 struct AppState {
@@ -275,6 +279,66 @@ struct SavedViewFile {
     version: u8,
     #[serde(default)]
     views: Vec<SavedView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Bookmark {
+    id: String,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceLayout {
+    #[serde(default)]
+    id: String,
+    name: String,
+    #[serde(default)]
+    tabs: Vec<String>,
+    #[serde(default)]
+    active: Option<String>,
+    #[serde(default)]
+    secondary: Option<String>,
+    #[serde(default)]
+    view: String,
+    #[serde(default)]
+    created_at: String,
+    #[serde(default)]
+    updated_at: String,
+}
+
+/// Bookmarks and named layouts share one small encrypted file. Which notes a
+/// person pins, and what they called a layout, says as much about the vault as
+/// the notes do, so none of it belongs in plaintext app settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceState {
+    version: u8,
+    #[serde(default)]
+    bookmarks: Vec<Bookmark>,
+    #[serde(default)]
+    layouts: Vec<WorkspaceLayout>,
+}
+
+impl WorkspaceState {
+    fn empty() -> Self {
+        Self { version: 1, bookmarks: vec![], layouts: vec![] }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UnlinkedMention {
+    #[serde(flatten)]
+    note: NoteSummary,
+    /// Which title or alias actually appeared in the text.
+    name: String,
+    count: usize,
+    excerpt: String,
 }
 
 fn now() -> String {
@@ -600,6 +664,17 @@ fn store_note(session: &mut VaultSession, note: NoteDocument, archive: Option<No
     if note.title.trim().is_empty() || note.title.len() > 300 || note.title.chars().any(|character| character == '\0' || character == '\n' || character == '\r') {
         return Err("invalid note title".into());
     }
+    if note.aliases.len() > 64 || note.tags.len() > 64 {
+        return Err("a note may carry at most 64 tags and 64 aliases".into());
+    }
+    for value in note.aliases.iter().chain(note.tags.iter()) {
+        if value.trim().is_empty()
+            || value.chars().count() > 160
+            || value.chars().any(|character| character == '\0' || character == '\n' || character == '\r')
+        {
+            return Err("tags and aliases must be non-empty single-line values of at most 160 characters".into());
+        }
+    }
     if let Some(previous) = archive.as_ref() {
         archive_note(session, previous)?;
     }
@@ -879,6 +954,279 @@ fn set_property(session: &mut VaultSession, reference: &str, key: &str, value: O
     Ok(PropertyRow::from(&stored))
 }
 
+fn workspace_path(session: &VaultSession) -> PathBuf {
+    session.root_dir.join("workspace.enc")
+}
+
+fn load_workspace(session: &VaultSession) -> Result<WorkspaceState, String> {
+    let path = workspace_path(session);
+    if !path.exists() {
+        return Ok(WorkspaceState::empty());
+    }
+    reject_symlink(&path)?;
+    let payload: EncryptedPayload = serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?)
+        .map_err(|error| error.to_string())?;
+    let state: WorkspaceState = serde_json::from_slice(&decrypt(&payload, session.key.as_ref(), WORKSPACE_AAD)?)
+        .map_err(|error| error.to_string())?;
+    if state.version != 1 {
+        return Err("unsupported workspace file version".into());
+    }
+    Ok(state)
+}
+
+fn write_workspace(session: &VaultSession, state: &WorkspaceState) -> Result<(), String> {
+    let payload = encrypt(
+        &serde_json::to_vec(state).map_err(|error| error.to_string())?,
+        session.key.as_ref(),
+        WORKSPACE_AAD,
+    )?;
+    write_atomic(
+        &workspace_path(session),
+        &serde_json::to_vec(&payload).map_err(|error| error.to_string())?,
+    )
+}
+
+fn normalize_workspace(mut state: WorkspaceState, previous: &WorkspaceState) -> Result<WorkspaceState, String> {
+    state.version = 1;
+    if state.bookmarks.len() > MAX_BOOKMARKS {
+        return Err(format!("a vault may hold at most {MAX_BOOKMARKS} bookmarks"));
+    }
+    if state.layouts.len() > MAX_LAYOUTS {
+        return Err(format!("a vault may hold at most {MAX_LAYOUTS} workspaces"));
+    }
+    let timestamp = now();
+
+    let mut bookmarks: Vec<Bookmark> = vec![];
+    for mut bookmark in state.bookmarks {
+        bookmark.label = bookmark.label.trim().to_string();
+        if bookmark.id.trim().is_empty() || bookmark.id.chars().count() > 64 || bookmark.label.chars().count() > 300 {
+            return Err("invalid bookmark".into());
+        }
+        if bookmarks.iter().any(|existing| existing.id == bookmark.id) {
+            continue;
+        }
+        if bookmark.created_at.is_empty() {
+            bookmark.created_at = timestamp.clone();
+        }
+        bookmarks.push(bookmark);
+    }
+
+    let mut layouts: Vec<WorkspaceLayout> = vec![];
+    for mut layout in state.layouts {
+        layout.name = layout.name.trim().to_string();
+        if layout.name.is_empty() || layout.name.chars().count() > 120 {
+            return Err("a workspace needs a name of 1-120 characters".into());
+        }
+        if layout.id.chars().count() > 64 || layout.tabs.len() > 64 {
+            return Err("invalid workspace".into());
+        }
+        layout.created_at = previous
+            .layouts
+            .iter()
+            .find(|existing| existing.id == layout.id)
+            .map(|existing| existing.created_at.clone())
+            .unwrap_or_else(|| timestamp.clone());
+        layout.updated_at = timestamp.clone();
+        if layout.id.trim().is_empty() {
+            layout.id = Uuid::new_v4().to_string();
+        }
+        if layouts.iter().any(|existing| existing.id == layout.id) {
+            return Err("two workspaces cannot share an ID".into());
+        }
+        layouts.push(layout);
+    }
+    layouts.sort_by(|left, right| {
+        left.name.to_lowercase().cmp(&right.name.to_lowercase()).then_with(|| left.id.cmp(&right.id))
+    });
+
+    Ok(WorkspaceState { version: 1, bookmarks, layouts })
+}
+
+/// Every name a note answers to, longest first so "Least exposure" is matched
+/// before a shorter alias that happens to be a prefix of it.
+fn mention_names(note: &NoteDocument) -> Vec<String> {
+    let mut names: Vec<String> = vec![];
+    for candidate in std::iter::once(&note.title).chain(note.aliases.iter()) {
+        let value = candidate.trim();
+        if value.is_empty() {
+            continue;
+        }
+        let lowered = value.to_lowercase();
+        if !names.iter().any(|existing| existing.to_lowercase() == lowered) {
+            names.push(value.to_string());
+        }
+    }
+    names.sort_by(|left, right| right.chars().count().cmp(&left.chars().count()));
+    names
+}
+
+/// Character ranges already covered by a wikilink, so an existing link is never
+/// reported — or rewritten — as an unlinked mention.
+fn wikilink_spans(body: &[char]) -> Vec<(usize, usize)> {
+    let mut spans = vec![];
+    let mut index = 0;
+    while index + 1 < body.len() {
+        if body[index] == '[' && body[index + 1] == '[' {
+            let mut cursor = index + 2;
+            while cursor + 1 < body.len() && !(body[cursor] == ']' && body[cursor + 1] == ']') {
+                cursor += 1;
+            }
+            let end = if cursor + 1 < body.len() { cursor + 2 } else { body.len() };
+            spans.push((index, end));
+            index = end;
+        } else {
+            index += 1;
+        }
+    }
+    spans
+}
+
+fn is_word_char(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
+}
+
+/// Whole-word, case-insensitive occurrences of one name outside every wikilink.
+fn find_mentions(body: &[char], name: &[char], spans: &[(usize, usize)]) -> Vec<usize> {
+    let mut hits = vec![];
+    if name.is_empty() || name.len() > body.len() {
+        return hits;
+    }
+    let mut index = 0;
+    while index + name.len() <= body.len() {
+        if spans.iter().any(|(start, end)| index >= *start && index < *end) {
+            index += 1;
+            continue;
+        }
+        let after = index + name.len();
+        let matches = (index == 0 || !is_word_char(body[index - 1]))
+            && (after >= body.len() || !is_word_char(body[after]))
+            && name
+                .iter()
+                .zip(&body[index..after])
+                .all(|(left, right)| left.eq_ignore_ascii_case(right) || left.to_lowercase().eq(right.to_lowercase()));
+        if matches {
+            hits.push(index);
+            index = after;
+        } else {
+            index += 1;
+        }
+    }
+    hits
+}
+
+fn excerpt_around(body: &[char], start: usize, length: usize) -> String {
+    let from = start.saturating_sub(60);
+    let to = (start + length + 60).min(body.len());
+    let slice: String = body[from..to].iter().collect();
+    let trimmed = slice.split_whitespace().collect::<Vec<_>>().join(" ");
+    format!("{}{trimmed}{}", if from > 0 { "…" } else { "" }, if to < body.len() { "…" } else { "" })
+}
+
+/// Notes that name this one in plain text without linking it. Notes that already
+/// link here are backlinks, not mentions, so they are skipped.
+fn unlinked_mentions(index: &DocumentIndex, target_id: &str) -> Vec<UnlinkedMention> {
+    let Some(target) = index.notes.get(target_id) else {
+        return vec![];
+    };
+    let names = mention_names(&target.note);
+    let lowered: Vec<String> = names.iter().map(|name| name.to_lowercase()).collect();
+    let linked: HashSet<&str> = index
+        .backlinks
+        .get(target_id)
+        .into_iter()
+        .flatten()
+        .map(|source| source.as_str())
+        .collect();
+
+    let mut mentions = vec![];
+    for indexed in index.notes.values() {
+        let note = &indexed.note;
+        if note.id == target_id || linked.contains(note.id.as_str()) {
+            continue;
+        }
+        // Cheap rejection first: the character scan below only runs for bodies
+        // that contain the text at all.
+        let haystack = note.body.to_lowercase();
+        if !lowered.iter().any(|name| haystack.contains(name)) {
+            continue;
+        }
+        let body: Vec<char> = note.body.chars().collect();
+        let spans = wikilink_spans(&body);
+        for name in &names {
+            let needle: Vec<char> = name.chars().collect();
+            let hits = find_mentions(&body, &needle, &spans);
+            if hits.is_empty() {
+                continue;
+            }
+            mentions.push(UnlinkedMention {
+                note: NoteSummary::from(note),
+                name: name.clone(),
+                count: hits.len(),
+                excerpt: excerpt_around(&body, hits[0], needle.len()),
+            });
+            break;
+        }
+    }
+    mentions.sort_by(|left, right| left.note.path.cmp(&right.note.path));
+    mentions.truncate(MAX_MENTIONS);
+    mentions
+}
+
+/// Turn every unlinked mention of the target inside one source note into a
+/// wikilink. The surface text the writer chose is preserved with an alias link
+/// whenever it is not the target's title.
+fn link_mention(session: &mut VaultSession, source: &str, target: &str) -> Result<usize, String> {
+    let source_id = resolve_id(&session.index, source)?;
+    let target_id = resolve_id(&session.index, target)?;
+    if source_id == target_id {
+        return Err("a note cannot link to itself".into());
+    }
+    let target_note = session.index.notes.get(&target_id).ok_or("note not found")?.note.clone();
+    let existing = session.index.notes.get(&source_id).ok_or("note not found")?.note.clone();
+    let body: Vec<char> = existing.body.chars().collect();
+    let spans = wikilink_spans(&body);
+
+    let mut hits: Vec<(usize, usize)> = vec![];
+    for name in mention_names(&target_note) {
+        let needle: Vec<char> = name.chars().collect();
+        for start in find_mentions(&body, &needle, &spans) {
+            hits.push((start, needle.len()));
+        }
+    }
+    hits.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| right.1.cmp(&left.1)));
+    let mut chosen: Vec<(usize, usize)> = vec![];
+    for (start, length) in hits {
+        if chosen.last().is_some_and(|(previous, span)| start < previous + span) {
+            continue;
+        }
+        chosen.push((start, length));
+    }
+    if chosen.is_empty() {
+        return Err("no unlinked mention of that note remains".into());
+    }
+
+    let mut rebuilt = String::with_capacity(existing.body.len() + chosen.len() * 8);
+    let mut cursor = 0;
+    for (start, length) in &chosen {
+        rebuilt.extend(&body[cursor..*start]);
+        let surface: String = body[*start..*start + *length].iter().collect();
+        if surface == target_note.title {
+            rebuilt.push_str(&format!("[[{}]]", target_note.title));
+        } else {
+            rebuilt.push_str(&format!("[[{}|{surface}]]", target_note.title));
+        }
+        cursor = start + length;
+    }
+    rebuilt.extend(&body[cursor..]);
+
+    let mut note = existing.clone();
+    note.body = rebuilt;
+    note.updated_at = now();
+    note.revision = existing.revision + 1;
+    store_note(session, note, Some(existing))?;
+    Ok(chosen.len())
+}
+
 #[tauri::command(async)]
 fn unlock_vault(vault_path: String, passphrase: String, state: State<'_, AppState>) -> Result<VaultInfo, String> {
     let session = open_session(&vault_path, &passphrase)?;
@@ -1081,6 +1429,40 @@ fn delete_saved_view(id: String, state: State<'_, AppState>) -> Result<Vec<Saved
     Ok(views)
 }
 
+#[tauri::command(async)]
+fn get_workspace_state(state: State<'_, AppState>) -> Result<WorkspaceState, String> {
+    let guard = state.session.lock().map_err(|_| "vault session lock poisoned")?;
+    let session = guard.as_ref().ok_or("vault is locked")?;
+    load_workspace(session)
+}
+
+#[tauri::command(async)]
+fn save_workspace_state(workspace: WorkspaceState, state: State<'_, AppState>) -> Result<WorkspaceState, String> {
+    let guard = state.session.lock().map_err(|_| "vault session lock poisoned")?;
+    let session = guard.as_ref().ok_or("vault is locked")?;
+    let previous = load_workspace(session)?;
+    let normalized = normalize_workspace(workspace, &previous)?;
+    write_workspace(session, &normalized)?;
+    Ok(normalized)
+}
+
+#[tauri::command(async)]
+fn get_unlinked_mentions(reference: String, state: State<'_, AppState>) -> Result<Vec<UnlinkedMention>, String> {
+    let guard = state.session.lock().map_err(|_| "vault session lock poisoned")?;
+    let session = guard.as_ref().ok_or("vault is locked")?;
+    let id = resolve_id(&session.index, &reference)?;
+    Ok(unlinked_mentions(&session.index, &id))
+}
+
+#[tauri::command(async)]
+fn link_unlinked_mention(source: String, target: String, state: State<'_, AppState>) -> Result<Vec<UnlinkedMention>, String> {
+    let mut guard = state.session.lock().map_err(|_| "vault session lock poisoned")?;
+    let session = guard.as_mut().ok_or("vault is locked")?;
+    link_mention(session, &source, &target)?;
+    let id = resolve_id(&session.index, &target)?;
+    Ok(unlinked_mentions(&session.index, &id))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1100,6 +1482,10 @@ pub fn run() {
             list_saved_views,
             save_saved_view,
             delete_saved_view,
+            get_workspace_state,
+            save_workspace_state,
+            get_unlinked_mentions,
+            link_unlinked_mention,
         ])
         .run(tauri::generate_context!())
         .expect("error while running SecondBrain Vault");
@@ -1313,6 +1699,132 @@ mod tests {
         assert!(cleared.properties.get("status").is_none(), "passing no value deletes the property");
         assert!(set_property(&mut session, &note.id, "   ", Some(Value::Bool(true))).is_err());
         assert!(set_property(&mut session, "Atlas/Missing.md", "status", Some(Value::Bool(true))).is_err());
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    fn mention_vault(label: &str) -> (PathBuf, VaultSession, NoteDocument, NoteDocument) {
+        let path = temporary_vault(label);
+        let path_text = path.to_string_lossy().into_owned();
+        let mut session = open_session(&path_text, "mention passphrase").unwrap();
+
+        let mut target = seeded_note("Atlas/Least exposure.md", "Least exposure", "# Least exposure\n\nThe principle itself.");
+        target.aliases = vec!["Exposure".into()];
+        let mentioning = seeded_note(
+            "Atlas/Notes.md",
+            "Notes",
+            "Least exposure matters here. See also least exposure again later on.",
+        );
+        let partial = seeded_note("Atlas/Partial.md", "Partial", "Least exposures is a different word entirely.");
+        let linking = seeded_note("Atlas/Linked.md", "Linked", "Already points at [[Least exposure]] the proper way.");
+        for note in [&target, &mentioning, &partial, &linking] {
+            store_note(&mut session, note.clone(), None).unwrap();
+        }
+        (path, session, target, mentioning)
+    }
+
+    #[test]
+    fn unlinked_mentions_skip_links_backlinks_and_partial_words() {
+        let (path, session, target, _) = mention_vault("mentions");
+        let mentions = unlinked_mentions(&session.index, &target.id);
+
+        let titles: Vec<_> = mentions.iter().map(|mention| mention.note.title.as_str()).collect();
+        assert_eq!(titles, vec!["Notes"], "only the plain-text mention counts");
+        assert_eq!(mentions[0].name, "Least exposure", "the longest matching name wins");
+        assert_eq!(mentions[0].count, 2);
+        assert!(mentions[0].excerpt.contains("Least exposure matters here"));
+
+        drop(session);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn linking_a_mention_rewrites_the_text_and_keeps_the_writer_s_wording() {
+        let (path, mut session, target, mentioning) = mention_vault("link-mention");
+        assert_eq!(link_mention(&mut session, &mentioning.id, &target.id).unwrap(), 2);
+
+        let updated = load_note(&session, &mentioning.id).unwrap();
+        assert!(updated.body.contains("[[Least exposure]] matters here"));
+        assert!(updated.body.contains("[[Least exposure|least exposure]] again"), "lower-case wording survives as an alias link");
+        assert_eq!(updated.revision, 2);
+        assert!(session.root_dir.join("history").join(&mentioning.id).join("1.note.enc").is_file());
+        assert!(unlinked_mentions(&session.index, &target.id).is_empty(), "a linked note is a backlink, not a mention");
+        assert!(link_mention(&mut session, &mentioning.id, &target.id).is_err(), "nothing left to link");
+
+        drop(session);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn notes_reject_blank_or_multiline_aliases() {
+        let path = temporary_vault("aliases");
+        let path_text = path.to_string_lossy().into_owned();
+        let mut session = open_session(&path_text, "alias passphrase").unwrap();
+        let note = seeded_note("Atlas/Named.md", "Named", "# Named\n\nBody.");
+
+        for bad in ["   ", "line\nbreak", "line\rbreak"] {
+            let mut broken = note.clone();
+            broken.aliases = vec![bad.into()];
+            assert!(store_note(&mut session, broken, None).is_err(), "accepted bad alias: {bad:?}");
+        }
+        let mut tagged = note.clone();
+        tagged.tags = vec![" ".into()];
+        assert!(store_note(&mut session, tagged, None).is_err());
+
+        let mut good = note.clone();
+        good.aliases = vec!["North star".into()];
+        assert!(store_note(&mut session, good, None).is_ok());
+
+        drop(session);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn workspace_state_round_trips_encrypted_and_refuses_a_nameless_layout() {
+        let path = temporary_vault("workspace");
+        let path_text = path.to_string_lossy().into_owned();
+        let session = open_session(&path_text, "workspace passphrase").unwrap();
+        assert!(load_workspace(&session).unwrap().bookmarks.is_empty());
+
+        let state = normalize_workspace(
+            WorkspaceState {
+                version: 1,
+                bookmarks: vec![
+                    Bookmark { id: "note-a".into(), label: "  Principles  ".into(), created_at: String::new() },
+                    Bookmark { id: "note-a".into(), label: "Duplicate".into(), created_at: String::new() },
+                ],
+                layouts: vec![WorkspaceLayout {
+                    id: String::new(),
+                    name: "  Morning review  ".into(),
+                    tabs: vec!["note-a".into()],
+                    active: Some("note-a".into()),
+                    secondary: None,
+                    view: "notes".into(),
+                    created_at: String::new(),
+                    updated_at: String::new(),
+                }],
+            },
+            &WorkspaceState::empty(),
+        )
+        .unwrap();
+        assert_eq!(state.bookmarks.len(), 1, "a note is bookmarked once");
+        assert_eq!(state.bookmarks[0].label, "Principles");
+        assert_eq!(state.layouts[0].name, "Morning review");
+        assert!(!state.layouts[0].id.is_empty());
+
+        write_workspace(&session, &state).unwrap();
+        let raw = fs::read(workspace_path(&session)).unwrap();
+        assert!(!String::from_utf8_lossy(&raw).contains("Morning review"), "workspace names must not hit disk in the clear");
+        drop(session);
+
+        let reopened = open_session(&path_text, "workspace passphrase").unwrap();
+        let stored = load_workspace(&reopened).unwrap();
+        assert_eq!(stored.layouts.len(), 1);
+        assert_eq!(stored.layouts[0].tabs, vec!["note-a".to_string()]);
+
+        let mut nameless = stored.clone();
+        nameless.layouts[0].name = "  ".into();
+        assert!(normalize_workspace(nameless, &stored).is_err());
+
         fs::remove_dir_all(path).unwrap();
     }
 }

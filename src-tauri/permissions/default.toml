@@ -71,3 +71,23 @@ commands.allow = ["save_saved_view"]
 identifier = "allow-delete-saved-view"
 description = "Allows removing one saved property query from the unlocked vault."
 commands.allow = ["delete_saved_view"]
+
+[[permission]]
+identifier = "allow-get-workspace-state"
+description = "Allows reading the encrypted bookmarks and saved layouts of the unlocked vault."
+commands.allow = ["get_workspace_state"]
+
+[[permission]]
+identifier = "allow-save-workspace-state"
+description = "Allows storing bookmarks and saved layouts in the unlocked vault."
+commands.allow = ["save_workspace_state"]
+
+[[permission]]
+identifier = "allow-get-unlinked-mentions"
+description = "Allows listing notes that name one referenced note without linking it."
+commands.allow = ["get_unlinked_mentions"]
+
+[[permission]]
+identifier = "allow-link-unlinked-mention"
+description = "Allows rewriting one source note so its plain-text mentions become links."
+commands.allow = ["link_unlinked_mention"]

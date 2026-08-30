@@ -55,7 +55,7 @@ Each phase must ship a usable vertical slice and keep older vaults readable.
 - [ ] Canvas/whiteboard with encrypted assets
 - [x] Database-like property table with local filtering and column sorting
 - [x] Saved property queries and editable cells
-- [ ] Bookmarks, workspaces, aliases and unlinked mentions
+- [x] Bookmarks, workspaces, aliases and unlinked mentions
 - [ ] Optional on-device semantic recall
 
 ## Phase 5 — Controlled ecosystem and AI

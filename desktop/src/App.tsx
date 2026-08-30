@@ -15,8 +15,7 @@ import {
   FileText,
   Folder,
   FolderOpen,
-  Hash,
-  Link2,
+  LayoutGrid,
   LockKeyhole,
   Network,
   Palette,
@@ -25,18 +24,21 @@ import {
   Search,
   ShieldCheck,
   Sparkles,
+  Star,
   TableProperties,
   X,
 } from "lucide-react";
 import { vaultBridge } from "./bridge";
+import { ContextPanel } from "./ContextPanel";
 import { KnowledgeGraph } from "./KnowledgeGraph";
 import { PropertyTable } from "./PropertyTable";
 import { QuickSwitcher } from "./QuickSwitcher";
 import { clearOwnedClipboard, copyWithExpiry } from "./secure-clipboard";
 import { ThemeEditor } from "./ThemeEditor";
+import { WorkspacesDialog } from "./Workspaces";
 import { applyTheme, clearTheme, DEFAULT_THEME, loadTheme, saveTheme, type ThemeSettings } from "./theme";
 import { useVirtualWindow } from "./virtual";
-import type { Backlink, KnowledgeGraph as GraphData, NoteDocument, NoteSummary, PropertyRow, SavedView, SaveState, SearchHit, VaultInfo } from "./types";
+import type { Backlink, Bookmark, KnowledgeGraph as GraphData, NoteDocument, NoteSummary, PropertyRow, SavedView, SaveState, SearchHit, UnlinkedMention, VaultInfo, WorkspaceLayout, WorkspaceState } from "./types";
 
 const MarkdownEditor = lazy(() => import("./Editor").then((module) => ({ default: module.MarkdownEditor })));
 const MarkdownPreview = lazy(() => import("./Preview"));
@@ -155,6 +157,10 @@ export function App() {
   const [graph, setGraph] = useState<GraphData>({ nodes: [], edges: [] });
   const [propertyRows, setPropertyRows] = useState<PropertyRow[]>([]);
   const [savedViews, setSavedViews] = useState<SavedView[]>([]);
+  const [mentions, setMentions] = useState<UnlinkedMention[]>([]);
+  const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
+  const [layouts, setLayouts] = useState<WorkspaceLayout[]>([]);
+  const [workspacesOpen, setWorkspacesOpen] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [rightOpen, setRightOpen] = useState(true);
   const [expanded, setExpanded] = useState(new Set<string>());
@@ -214,6 +220,9 @@ export function App() {
     const listed = await vaultBridge.listNotes();
     setNotes(listed);
     setExpanded(new Set(listed.map((note) => note.path.split("/")[0])));
+    const workspace = await vaultBridge.workspaceState();
+    setBookmarks(workspace.bookmarks);
+    setLayouts(workspace.layouts);
     if (listed[0]) await openNote(listed[0].id);
   }
 
@@ -223,7 +232,9 @@ export function App() {
     setActive(note);
     rememberTab(note);
     setSaveState("saved");
-    setBacklinks(await vaultBridge.backlinks(note.id));
+    const [links, named] = await Promise.all([vaultBridge.backlinks(note.id), vaultBridge.unlinkedMentions(note.id)]);
+    setBacklinks(links);
+    setMentions(named);
   }, [active, persistActive, rememberTab]);
 
   const openInSplit = useCallback(async (reference: string) => {
@@ -282,7 +293,8 @@ export function App() {
     await clearOwnedClipboard();
     await vaultBridge.lock();
     setVault(undefined); setNotes([]); setActive(undefined); setSecondary(undefined); setOpenTabs([]);
-    setBacklinks([]); setQuery(""); setResults([]); setNotice("");
+    setBacklinks([]); setMentions([]); setBookmarks([]); setLayouts([]); setWorkspacesOpen(false);
+    setQuery(""); setResults([]); setNotice("");
     setSearchOpen(false); setPaletteOpen(false); setQuickOpen(false); setNewOpen(false); setThemeOpen(false);
     setWorkspaceView("notes"); setGraph({ nodes: [], edges: [] }); setPropertyRows([]); setSavedViews([]);
     setLockNotice(reason === "inactivity"
@@ -374,6 +386,73 @@ export function App() {
     await refreshList();
   }
 
+  // Bookmarks and layouts live in one encrypted file, so every change writes the
+  // whole small state back rather than needing a command per operation.
+  async function commitWorkspace(next: WorkspaceState) {
+    const stored = await vaultBridge.saveWorkspaceState(next);
+    setBookmarks(stored.bookmarks);
+    setLayouts(stored.layouts);
+    return stored;
+  }
+
+  async function toggleBookmark() {
+    if (!active) return;
+    const pinned = bookmarks.some((bookmark) => bookmark.id === active.id);
+    await commitWorkspace({
+      version: 1,
+      layouts,
+      bookmarks: pinned
+        ? bookmarks.filter((bookmark) => bookmark.id !== active.id)
+        : [...bookmarks, { id: active.id, label: active.title, createdAt: "" }],
+    });
+    setNotice(pinned ? `Removed ${active.title} from bookmarks.` : `Bookmarked ${active.title}.`);
+  }
+
+  async function saveLayout(name: string) {
+    const existing = layouts.find((layout) => layout.name.toLocaleLowerCase() === name.toLocaleLowerCase());
+    const layout: WorkspaceLayout = {
+      id: existing?.id ?? "",
+      name,
+      tabs: openTabs.map((tab) => tab.id),
+      active: active?.id ?? null,
+      secondary: secondary?.id ?? null,
+      view: workspaceView,
+      createdAt: existing?.createdAt ?? "",
+      updatedAt: "",
+    };
+    await commitWorkspace({
+      version: 1,
+      bookmarks,
+      layouts: existing ? layouts.map((item) => (item.id === existing.id ? layout : item)) : [...layouts, layout],
+    });
+    setNotice(`Saved the "${name}" workspace.`);
+  }
+
+  async function openLayout(layout: WorkspaceLayout) {
+    if (!(await persistActive())) return;
+    const known = new Map(notes.map((note) => [note.id, note]));
+    setOpenTabs(layout.tabs.flatMap((id) => { const note = known.get(id); return note ? [note] : []; }));
+    setSecondary(undefined);
+    if (layout.active && known.has(layout.active)) await openNote(layout.active);
+    if (layout.secondary && known.has(layout.secondary)) await openInSplit(layout.secondary);
+    setWorkspaceView("notes");
+    // Only the views this build knows about; a stored view name is not a cast.
+    if (layout.view === "graph" || layout.view === "properties") await showWorkspace(layout.view);
+    setWorkspacesOpen(false);
+    setNotice(`Opened the "${layout.name}" workspace.`);
+  }
+
+  async function deleteLayout(id: string) {
+    await commitWorkspace({ version: 1, bookmarks, layouts: layouts.filter((layout) => layout.id !== id) });
+  }
+
+  async function linkMention(sourceId: string) {
+    if (!active) return;
+    setMentions(await vaultBridge.linkMention(sourceId, active.id));
+    setBacklinks(await vaultBridge.backlinks(active.id));
+    await refreshList();
+  }
+
   function openFromKnowledge(id: string) {
     setWorkspaceView("notes");
     void openNote(id);
@@ -419,6 +498,14 @@ export function App() {
           <button className={workspaceView === "properties" ? "active" : ""} onClick={() => void showWorkspace("properties")}><TableProperties size={14} /><span>Data</span></button>
         </div>
         <button className="quick-find" onClick={() => setSearchOpen(true)}><Search size={15} /><span>Find anything…</span><kbd>⇧⌘F</kbd></button>
+        {bookmarks.length > 0 && <div className="bookmark-block">
+          <div className="nav-subheading"><span>BOOKMARKS</span><i>{bookmarks.length}</i></div>
+          <nav aria-label="Bookmarked notes">{bookmarks.map((bookmark) => <button
+            key={bookmark.id}
+            className={active?.id === bookmark.id && workspaceView === "notes" ? "bookmark-row active" : "bookmark-row"}
+            onClick={() => { setWorkspaceView("notes"); void openNote(bookmark.id); }}
+          ><Star size={12} />{bookmark.label || bookmark.id}</button>)}</nav>
+        </div>}
         <nav className="file-tree" aria-label="Vault notes" ref={tree.ref} onScroll={tree.onScroll}>
           <div style={{ height: tree.topPad }} aria-hidden="true" />
           {treeRows.slice(tree.start, tree.end).map((row) => row.kind === "folder"
@@ -466,6 +553,12 @@ export function App() {
                   <button className={mode === "read" ? "active" : ""} onClick={() => setMode("read")}>Read</button>
                 </div>
                 <div className="toolbar-actions">
+                  <button
+                    className={bookmarks.some((bookmark) => bookmark.id === active.id) ? "bookmarked" : ""}
+                    onClick={() => void toggleBookmark()}
+                    aria-pressed={bookmarks.some((bookmark) => bookmark.id === active.id)}
+                    title={bookmarks.some((bookmark) => bookmark.id === active.id) ? "Remove bookmark" : "Bookmark this note"}
+                  ><Star size={16} /></button>
                   <button onClick={() => void copyGuarded("Note", active.body)} title="Copy note to a self-clearing clipboard"><Copy size={16} /></button>
                   <button onClick={() => void openInSplit(active.id)} title="Open in split pane (Ctrl+\)"><Columns2 size={16} /></button>
                   <button className="context-toggle" onClick={() => setRightOpen((value) => !value)} title="Toggle context panel">
@@ -515,20 +608,15 @@ export function App() {
         onEditProperty={editProperty}
       />}
 
-      {workspaceView === "notes" && rightOpen && active && <aside className="context-panel">
-        <section><div className="context-heading"><span>PROPERTIES</span><i>{Object.keys(active.properties).length}</i></div>
-          <dl className="property-list">{Object.entries(active.properties).map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{String(value)}</dd>
-            <button className="property-copy" aria-label={`Copy ${key}`} title="Copy to a self-clearing clipboard" onClick={() => void copyGuarded(key, String(value))}><Copy size={11} /></button>
-          </div>)}</dl>
-          <div className="tag-list">{active.tags.map((tag) => <span key={tag}><Hash size={11} />{tag}</span>)}</div>
-        </section>
-        <section><div className="context-heading"><span>OUTLINE</span><i>{outline.length}</i></div>
-          <ol className="outline-list">{outline.map((item, index) => <li key={`${item.text}-${index}`} style={{ paddingLeft: `${(item.level - 1) * 12}px` }}>{item.text}</li>)}</ol>
-        </section>
-        <section><div className="context-heading"><span>BACKLINKS</span><i>{backlinks.length}</i></div>
-          <div className="backlink-list">{backlinks.length ? backlinks.map((note) => <button key={note.id} onClick={() => void openNote(note.id)}><Link2 size={13} /><span><b>{note.title}</b><small>{note.path}</small></span></button>) : <p>No notes point here yet.</p>}</div>
-        </section>
-      </aside>}
+      {workspaceView === "notes" && rightOpen && active && <ContextPanel
+        note={active}
+        outline={outline}
+        backlinks={backlinks}
+        mentions={mentions}
+        onOpen={(id) => void openNote(id)}
+        onCopy={(label, value) => void copyGuarded(label, value)}
+        onAliases={(aliases) => mutateActive({ aliases })}
+        onLink={linkMention} />}
 
       {notice && <div className="toast" role="status"><Check size={14} />{notice}</div>}
 
@@ -554,6 +642,7 @@ export function App() {
             { icon: Network, label: "Open local graph", keys: "", action: () => void showWorkspace("graph") },
             { icon: TableProperties, label: "Open property view", keys: "", action: () => void showWorkspace("properties") },
             { icon: BookOpen, label: mode === "write" ? "Switch to reading view" : "Switch to writing view", keys: "⌘ E", action: () => setMode(mode === "write" ? "read" : "write") },
+            { icon: LayoutGrid, label: "Workspaces and saved layouts", keys: "", action: () => setWorkspacesOpen(true) },
             { icon: Palette, label: "Customize theme", keys: "", action: () => setThemeOpen(true) },
             { icon: Clock, label: "Change auto-lock delay", keys: "", action: () => cycleIdleLock() },
             { icon: LockKeyhole, label: "Lock workspace", keys: "⌘ L", action: () => void lock() },
@@ -564,6 +653,13 @@ export function App() {
       {themeOpen && <ThemeEditor settings={theme} onChange={setTheme} onClose={() => setThemeOpen(false)} />}
 
       {newOpen && <NewNoteDialog onClose={() => setNewOpen(false)} onCreate={create} />}
+      {workspacesOpen && <WorkspacesDialog
+        layouts={layouts}
+        tabCount={openTabs.length}
+        onClose={() => setWorkspacesOpen(false)}
+        onSave={saveLayout}
+        onOpen={openLayout}
+        onDelete={deleteLayout} />}
     </main>
   );
 }

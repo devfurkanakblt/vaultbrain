@@ -57,6 +57,37 @@ export interface PropertyRow {
   updatedAt: string;
 }
 
+/** A note that names another in plain text without linking it. */
+export interface UnlinkedMention extends NoteSummary {
+  name: string;
+  count: number;
+  excerpt: string;
+}
+
+export interface Bookmark {
+  id: string;
+  label: string;
+  createdAt: string;
+}
+
+export interface WorkspaceLayout {
+  id: string;
+  name: string;
+  tabs: string[];
+  active: string | null;
+  secondary: string | null;
+  view: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Pinned notes and named layouts. Encrypted in the vault, never in settings. */
+export interface WorkspaceState {
+  version: 1;
+  bookmarks: Bookmark[];
+  layouts: WorkspaceLayout[];
+}
+
 export type SortDirection = "asc" | "desc";
 
 /** A stored property query. Lives encrypted in the vault, never in app settings. */

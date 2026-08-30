@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { FileText, Search, X } from "lucide-react";
+import { FileText, Search, Tag, X } from "lucide-react";
 import type { NoteSummary } from "./types";
 
 function score(note: NoteSummary, rawQuery: string) {
@@ -16,6 +16,14 @@ function score(note: NoteSummary, rawQuery: string) {
   let cursor = 0;
   for (const character of title) if (character === characters[cursor]) cursor += 1;
   return cursor === characters.length ? 10 : 0;
+}
+
+/** The alias that earned a note its place, so an alias hit is not a mystery. */
+function matchedAlias(note: NoteSummary, rawQuery: string) {
+  const query = rawQuery.trim().toLocaleLowerCase();
+  if (!query) return undefined;
+  if (note.title.toLocaleLowerCase().includes(query)) return undefined;
+  return note.aliases.find((alias) => alias.toLocaleLowerCase().includes(query));
 }
 
 export function QuickSwitcher({ notes, onClose, onOpen, onSplit }: {
@@ -50,7 +58,7 @@ export function QuickSwitcher({ notes, onClose, onOpen, onSplit }: {
       }} placeholder="Open a note by title, path, or alias…" /><button onClick={onClose} aria-label="Close quick switcher"><X size={16} /></button></div>
       <div className="quick-results" role="listbox" aria-label="Matching notes">
         {matches.map(({ note }, index) => <button key={note.id} className={selected === index ? "selected" : ""} role="option" aria-selected={selected === index} onMouseEnter={() => setSelected(index)} onClick={() => choose(index)}>
-          <FileText size={15} /><span><b>{note.title}</b><small>{note.path}</small></span><i>{note.tags.slice(0, 2).map((tag) => `#${tag}`).join(" ")}</i>
+          <FileText size={15} /><span><b>{note.title}</b><small>{matchedAlias(note, query) ? <><Tag size={9} /> {matchedAlias(note, query)}</> : note.path}</small></span><i>{note.tags.slice(0, 2).map((tag) => `#${tag}`).join(" ")}</i>
         </button>)}
         {!matches.length && <p>No note matches this name.</p>}
       </div>

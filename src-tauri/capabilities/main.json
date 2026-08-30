@@ -19,6 +19,10 @@
     "allow-update-note-property",
     "allow-list-saved-views",
     "allow-save-saved-view",
-    "allow-delete-saved-view"
+    "allow-delete-saved-view",
+    "allow-get-workspace-state",
+    "allow-save-workspace-state",
+    "allow-get-unlinked-mentions",
+    "allow-link-unlinked-mention"
   ]
 }

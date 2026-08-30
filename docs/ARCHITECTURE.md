@@ -43,6 +43,7 @@ vault/
   objects/                   # encrypted notes and attachments
   index.db.enc               # encrypted derived search/link index
   views.enc                  # encrypted saved property queries
+  workspace.enc              # encrypted bookmarks and named layouts
   journal/                   # encrypted crash-recovery operations
   audit.log                  # value-free authenticated chain
   audit.meta.json            # public salt/version metadata
@@ -51,7 +52,14 @@ vault/
 
 Saved property queries name columns and carry filter text the user typed about
 their own notes, so they get the same envelope as the index rather than a
-plaintext settings file. They are unreadable, and unlistable, while locked.
+plaintext settings file. They are unreadable, and unlistable, while locked. The
+same holds for bookmarks and named layouts: which notes someone pins, and what
+they called a workspace, is vault content by another name.
+
+A note answers to its title and to every alias, in search, link resolution and
+the quick switcher. Notes that name another in plain text without linking it are
+reported as unlinked mentions, computed from the decrypted index at read time
+rather than stored.
 
 Canonical notes contain an immutable ID, title, Markdown body, typed properties,
 tags, aliases, links, creation/update timestamps and revision number. User-facing

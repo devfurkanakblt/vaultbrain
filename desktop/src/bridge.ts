@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Backlink, KnowledgeGraph, NoteDocument, NoteSummary, PropertyRow, SavedView, SearchHit, VaultInfo } from "./types";
+import type { Backlink, Bookmark, KnowledgeGraph, NoteDocument, NoteSummary, PropertyRow, SavedView, SearchHit, UnlinkedMention, VaultInfo, WorkspaceState } from "./types";
 
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -47,6 +47,27 @@ let demoNotes: NoteDocument[] = [
 ];
 
 let demoViews: SavedView[] = [];
+let demoWorkspace: WorkspaceState = { version: 1, bookmarks: [], layouts: [] };
+
+const WIKILINK = /\[\[[^\]]*\]\]/gu;
+
+function mentionPattern(name: string) {
+  return new RegExp(`(?<![\\p{L}\\p{N}_])(${name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")})(?![\\p{L}\\p{N}_])`, "giu");
+}
+
+/** Demo-mode mirror of the Rust scan: whole words, never inside a wikilink. */
+function demoMentions(body: string, name: string) {
+  const masked = body.replace(WIKILINK, (match) => " ".repeat(match.length));
+  return [...masked.matchAll(mentionPattern(name))];
+}
+
+/** Rewrite only the text between wikilinks, so existing links stay untouched. */
+function outsideLinks(body: string, rewrite: (segment: string) => string) {
+  return body
+    .split(/(\[\[[^\]]*\]\])/gu)
+    .map((part, index) => (index % 2 === 1 ? part : rewrite(part)))
+    .join("");
+}
 
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   return invoke<T>(command, args);
@@ -205,6 +226,64 @@ export const vaultBridge = {
     if (isTauri) return call<SavedView[]>("delete_saved_view", { id });
     demoViews = demoViews.filter((view) => view.id !== id);
     return structuredClone(demoViews);
+  },
+  async workspaceState(): Promise<WorkspaceState> {
+    if (isTauri) return call<WorkspaceState>("get_workspace_state");
+    return structuredClone(demoWorkspace);
+  },
+  async saveWorkspaceState(state: WorkspaceState): Promise<WorkspaceState> {
+    if (isTauri) return call<WorkspaceState>("save_workspace_state", { workspace: state });
+    const stamp = new Date().toISOString();
+    const bookmarks: Bookmark[] = [];
+    for (const bookmark of state.bookmarks) {
+      if (!bookmarks.some((item) => item.id === bookmark.id)) bookmarks.push({ ...bookmark, createdAt: bookmark.createdAt || stamp });
+    }
+    demoWorkspace = {
+      version: 1,
+      bookmarks,
+      layouts: state.layouts
+        .map((layout) => ({ ...layout, id: layout.id || crypto.randomUUID(), createdAt: layout.createdAt || stamp, updatedAt: stamp }))
+        .sort((left, right) => left.name.localeCompare(right.name)),
+    };
+    return structuredClone(demoWorkspace);
+  },
+  async unlinkedMentions(reference: string): Promise<UnlinkedMention[]> {
+    if (isTauri) return call<UnlinkedMention[]>("get_unlinked_mentions", { reference });
+    const target = demoNotes.find((note) => note.id === reference || note.path === reference);
+    if (!target) return [];
+    const linked = new Set((await vaultBridge.backlinks(target.id)).map((note) => note.id));
+    const names = [target.title, ...target.aliases].filter(Boolean).sort((left, right) => right.length - left.length);
+    const mentions: UnlinkedMention[] = [];
+    for (const note of demoNotes) {
+      if (note.id === target.id || linked.has(note.id)) continue;
+      for (const name of names) {
+        const hits = demoMentions(note.body, name);
+        if (!hits.length) continue;
+        const at = hits[0].index ?? 0;
+        mentions.push({
+          id: note.id, path: note.path, title: note.title, aliases: note.aliases, tags: note.tags,
+          updatedAt: note.updatedAt, revision: note.revision,
+          name, count: hits.length, excerpt: note.body.slice(Math.max(0, at - 60), at + name.length + 60).replace(/\s+/gu, " ").trim(),
+        });
+        break;
+      }
+    }
+    return mentions.sort((left, right) => left.path.localeCompare(right.path));
+  },
+  async linkMention(source: string, target: string): Promise<UnlinkedMention[]> {
+    if (isTauri) return call<UnlinkedMention[]>("link_unlinked_mention", { source, target });
+    const from = demoNotes.find((note) => note.id === source);
+    const to = demoNotes.find((note) => note.id === target);
+    if (!from || !to) throw new Error("Note not found.");
+    let body = from.body;
+    for (const name of [to.title, ...to.aliases].filter(Boolean).sort((left, right) => right.length - left.length)) {
+      const pattern = mentionPattern(name);
+      body = outsideLinks(body, (segment) =>
+        segment.replace(pattern, (surface) => (surface === to.title ? `[[${to.title}]]` : `[[${to.title}|${surface}]]`)));
+    }
+    const next = { ...from, body, revision: from.revision + 1, updatedAt: new Date().toISOString() };
+    demoNotes = demoNotes.map((note) => (note.id === from.id ? next : note));
+    return vaultBridge.unlinkedMentions(target);
   },
 };
 

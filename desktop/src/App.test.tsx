@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { NoteDocument, PropertyRow, SavedView, SearchHit } from "./types";
+import type { NoteDocument, PropertyRow, SavedView, SearchHit, WorkspaceState } from "./types";
 import { DEFAULT_THEME, presetSettings, shade } from "./theme";
 
 const sampleNote: NoteDocument = {
@@ -29,6 +29,10 @@ const bridgeMock = vi.hoisted(() => ({
   graph: vi.fn(),
   propertyRows: vi.fn(),
   updateNoteProperty: vi.fn(),
+  unlinkedMentions: vi.fn(),
+  linkMention: vi.fn(),
+  workspaceState: vi.fn(),
+  saveWorkspaceState: vi.fn(),
   savedViews: vi.fn(),
   saveView: vi.fn(),
   deleteView: vi.fn(),
@@ -98,6 +102,13 @@ describe("desktop workspace", () => {
     bridgeMock.propertyRows.mockResolvedValue([{ id: sampleNote.id, path: sampleNote.path, title: sampleNote.title, tags: sampleNote.tags, properties: sampleNote.properties, updatedAt: sampleNote.updatedAt }]);
     bridgeMock.lock.mockResolvedValue(undefined);
     bridgeMock.savedViews.mockResolvedValue([]);
+    bridgeMock.unlinkedMentions.mockResolvedValue([]);
+    bridgeMock.linkMention.mockResolvedValue([]);
+    bridgeMock.workspaceState.mockResolvedValue({ version: 1, bookmarks: [], layouts: [] });
+    bridgeMock.saveWorkspaceState.mockImplementation(async (state: WorkspaceState) => ({
+      ...state,
+      layouts: state.layouts.map((layout, index) => ({ ...layout, id: layout.id || `layout-${index}` })),
+    }));
     bridgeMock.deleteView.mockResolvedValue([]);
     bridgeMock.saveView.mockImplementation(async (view: SavedView) => [
       { ...view, id: view.id || "view-1", createdAt: sampleNote.createdAt, updatedAt: sampleNote.updatedAt },
@@ -215,6 +226,45 @@ describe("desktop workspace", () => {
 
     await waitFor(() => expect(bridgeMock.updateNoteProperty).toHaveBeenCalledWith(sampleNote.id, "status", "archived"));
     expect(await within(table).findByText("archived")).toBeInTheDocument();
+  });
+
+  it("pins the open note to the sidebar and unpins it again", async () => {
+    await unlockWorkspace();
+    expect(screen.queryByRole("navigation", { name: "Bookmarked notes" })).toBeNull();
+
+    fireEvent.click(screen.getByTitle("Bookmark this note"));
+    await waitFor(() => expect(bridgeMock.saveWorkspaceState).toHaveBeenCalledWith(expect.objectContaining({
+      bookmarks: [expect.objectContaining({ id: sampleNote.id, label: sampleNote.title })],
+    })));
+
+    const pinned = await screen.findByRole("navigation", { name: "Bookmarked notes" });
+    expect(within(pinned).getByRole("button", { name: "Product principles" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle("Remove bookmark"));
+    await waitFor(() => expect(screen.queryByRole("navigation", { name: "Bookmarked notes" })).toBeNull());
+  });
+
+  it("saves the open tabs as a named workspace and reopens it", async () => {
+    withTwoNotes();
+    await unlockWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "Least exposure" }));
+    await screen.findByDisplayValue("Least exposure");
+
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    const palette = await screen.findByRole("dialog", { name: "Command palette" });
+    fireEvent.click(within(palette).getByRole("button", { name: "Workspaces and saved layouts" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Workspaces" });
+    fireEvent.change(within(dialog).getByLabelText("Workspace name"), { target: { value: "Morning review" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: /save 2 open tabs/iu }));
+
+    await waitFor(() => expect(bridgeMock.saveWorkspaceState).toHaveBeenCalledWith(expect.objectContaining({
+      layouts: [expect.objectContaining({ name: "Morning review", tabs: [sampleNote.id, secondNote.id], active: secondNote.id })],
+    })));
+    expect(await within(dialog).findByRole("button", { name: "Open Morning review" })).toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Open Morning review" }));
+    expect(await screen.findByText(/opened the "morning review" workspace/iu)).toBeInTheDocument();
   });
 
   it("keeps opened notes in tabs and closes the active one back to its neighbour", async () => {
