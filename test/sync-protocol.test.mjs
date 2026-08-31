@@ -122,7 +122,7 @@ test("v1 protocol freezes admission limits and graph errors", () => {
   );
   const accepted = change({ ...golden.body, parents });
   assert.equal(validateSyncChangeBody(accepted).parents.length, parents.length);
-  assert.throws(
+  throwsError(
     () => validateSyncChangeBody(change({ ...golden.body, parents: [...parents, "f".repeat(64)] })),
     /at most 256 parents/u,
   );
@@ -136,7 +136,7 @@ test("v1 protocol freezes admission limits and graph errors", () => {
     ).mutation.objectId.length,
     160,
   );
-  assert.throws(
+  throwsError(
     () =>
       validateSyncChangeBody(
         change({ ...golden.body, mutation: { ...golden.body.mutation, objectId: `a${"x".repeat(160)}` } }),
@@ -155,20 +155,20 @@ test("v1 protocol freezes admission limits and graph errors", () => {
     }),
   };
   assert.deepEqual(verifySyncChanges([base, child]), { changes: 2, devices: 1, heads: [child.id] });
-  assert.throws(
+  throwsError(
     () => verifySyncChanges([{ ...base, parents: ["c".repeat(64)] }]),
     new RegExp(adversarial.errorPatterns.missingParent, "u"),
   );
-  assert.throws(() => verifySyncChanges([{ ...base, parents: [base.id] }]), /cannot parent itself/u);
-  assert.throws(
+  throwsError(() => verifySyncChanges([{ ...base, parents: [base.id] }]), /cannot parent itself/u);
+  throwsError(
     () => verifySyncChanges([base, child, { ...child, id: "c".repeat(64) }]),
     new RegExp(adversarial.errorPatterns.fork, "u"),
   );
-  assert.throws(
+  throwsError(
     () => verifySyncChanges([{ ...base, parents: [child.id] }, child]),
     new RegExp(adversarial.errorPatterns.cycle, "u"),
   );
-  assert.throws(
+  throwsError(
     () => verifySyncChanges([base, { ...child, mutation: { ...child.mutation, baseRevision: 2, revision: 3 } }]),
     new RegExp(adversarial.errorPatterns.revisionJump, "u"),
   );
