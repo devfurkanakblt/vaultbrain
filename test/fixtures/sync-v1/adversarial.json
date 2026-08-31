@@ -1,0 +1,24 @@
+{
+  "invalidChangeIds": ["ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef0123456789", "abc"],
+  "unsafeKeys": ["__proto__", "prototype", "constructor"],
+  "malformedBase64": ["not-base64", "YQ=", "YQ"],
+  "limitBoundaries": {
+    "parentsAccepted": 256,
+    "parentsRejected": 257,
+    "objectIdAcceptedLength": 160,
+    "objectIdRejectedLength": 161
+  },
+  "errorPatterns": {
+    "wrongKey": "Unsupported state or unable to authenticate data",
+    "tamper": "Unsupported state or unable to authenticate data",
+    "noncanonicalPlaintext": "canonically encoded",
+    "unsafeKey": "Unsafe sync change key",
+    "surrogate": "unpaired surrogate",
+    "malformedId": "Invalid encrypted sync change ID",
+    "duplicateParents": "parents must be unique",
+    "missingParent": "Missing sync parent",
+    "cycle": "graph contains a cycle",
+    "fork": "Device chain fork",
+    "revisionJump": "advance the causal object revision"
+  }
+}

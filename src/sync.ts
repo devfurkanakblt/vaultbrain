@@ -20,6 +20,20 @@ import {
   type NoteInput,
   type NoteSummary,
 } from "./documents.js";
+import {
+  canonicalSyncJson as canonicalProtocolJson,
+  openSyncChange as openProtocolChange,
+  sealSyncChange as sealProtocolChange,
+  validateEncryptedSyncChange,
+  validateSyncChangeBody as validateProtocolBody,
+} from "./sync/protocol.js";
+import {
+  SyncChangeLog as ProtocolSyncChangeLog,
+  resolveSyncObject as resolveProtocolObject,
+  verifySyncChanges as verifyProtocolChanges,
+} from "./sync/change-log.js";
+
+export { SyncChangeLog } from "./sync/change-log.js";
 
 const CHANGE_ID_CONTEXT = "secondbrain-vault:sync-change-id:v1";
 const CHANGE_KEY_CONTEXT = "secondbrain-vault:sync-change-key:v1";
@@ -176,16 +190,15 @@ function validateJson(value: unknown, depth = 0, counter = { nodes: 0 }): assert
 
 /** RFC 8785-compatible canonical JSON for the JSON subset accepted above. */
 export function canonicalSyncJson(value: SyncJson): string {
-  validateJson(value);
-  return canonicalJsonUnchecked(value);
+  return canonicalProtocolJson(value);
 }
 
-function canonicalJsonUnchecked(value: SyncJson): string {
+function _canonicalJsonUnchecked(value: SyncJson): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalJsonUnchecked).join(",")}]`;
+  if (Array.isArray(value)) return `[${value.map(_canonicalJsonUnchecked).join(",")}]`;
   const entries = Object.keys(value)
     .sort()
-    .map((key) => `${JSON.stringify(key)}:${canonicalJsonUnchecked(value[key])}`);
+    .map((key) => `${JSON.stringify(key)}:${_canonicalJsonUnchecked(value[key])}`);
   return `{${entries.join(",")}}`;
 }
 
@@ -233,7 +246,9 @@ function validateMutation(value: unknown): SyncMutation {
 }
 
 export function validateSyncChangeBody(value: unknown): SyncChangeBody {
-  const body = value as SyncChangeBody | undefined;
+  return validateProtocolBody(value) as SyncChangeBody;
+  /* c8 ignore next -- retained below until the compatibility barrel is fully minimized. */
+  const body = value as SyncChangeBody;
   if (!body || typeof body !== "object" || Array.isArray(body) || body.version !== 1) {
     throw new Error("Unsupported or invalid sync change.");
   }
@@ -241,10 +256,10 @@ export function validateSyncChangeBody(value: unknown): SyncChangeBody {
     throw new Error("Sync device ID must be a lowercase UUID.");
   }
   const sequence = integer(body.sequence, 1, "Sync device sequence");
-  const previousDeviceChange = body.previousDeviceChange;
+  const previousDeviceChange = body.previousDeviceChange as string | null;
   if (
     previousDeviceChange !== null &&
-    (typeof previousDeviceChange !== "string" || !CHANGE_ID.test(previousDeviceChange))
+    (typeof previousDeviceChange !== "string" || !CHANGE_ID.test(previousDeviceChange!))
   ) {
     throw new Error("Invalid previous device change ID.");
   }
@@ -259,7 +274,7 @@ export function validateSyncChangeBody(value: unknown): SyncChangeBody {
   if ((sequence === 1) !== (previousDeviceChange === null)) {
     throw new Error("Only the first device change may omit its previous device change.");
   }
-  if (previousDeviceChange && !parents.includes(previousDeviceChange)) {
+  if (previousDeviceChange && !parents.includes(previousDeviceChange!)) {
     throw new Error("The previous device change must also be a causal parent.");
   }
   const timestamp = typeof body.createdAt === "string" ? Date.parse(body.createdAt) : Number.NaN;
@@ -294,6 +309,8 @@ function changeEncryptionKey(key: Buffer, id: string): Buffer {
 }
 
 export function sealSyncChange(body: SyncChangeBody, key: Buffer): EncryptedSyncChange {
+  return sealProtocolChange(body, key) as EncryptedSyncChange;
+  /* c8 ignore next -- retained below until the compatibility barrel is fully minimized. */
   const normalized = validateSyncChangeBody(body);
   const canonical = canonicalSyncJson(normalized as unknown as SyncJson);
   const id = changeId(normalized, key);
@@ -322,14 +339,16 @@ function canonicalBase64(value: unknown, expectedBytes: number | undefined, labe
 }
 
 function validateEnvelope(value: unknown): EncryptedSyncChange {
-  const envelope = value as EncryptedSyncChange | undefined;
+  return validateEncryptedSyncChange(value) as EncryptedSyncChange;
+  /* c8 ignore next -- retained below until the compatibility barrel is fully minimized. */
+  const envelope = value as EncryptedSyncChange;
   if (!envelope || typeof envelope !== "object" || Array.isArray(envelope) || envelope.version !== 1) {
     throw new Error("Unsupported or invalid encrypted sync envelope.");
   }
   if (typeof envelope.id !== "string" || !CHANGE_ID.test(envelope.id)) {
     throw new Error("Invalid encrypted sync change ID.");
   }
-  const payload = envelope.payload as DocumentPayload | undefined;
+  const payload = envelope.payload as DocumentPayload;
   if (
     !payload ||
     payload.version !== 1 ||
@@ -345,6 +364,8 @@ function validateEnvelope(value: unknown): EncryptedSyncChange {
 }
 
 export function openSyncChange(value: unknown, key: Buffer): SyncChange {
+  return openProtocolChange(value, key) as SyncChange;
+  /* c8 ignore next -- retained below until the compatibility barrel is fully minimized. */
   const envelope = validateEnvelope(value);
   const envelopeKey = changeEncryptionKey(key, envelope.id);
   let plaintext: string;
@@ -553,7 +574,7 @@ function validateChangeSet(changes: readonly SyncChange[]): SyncVerification {
 }
 
 export function verifySyncChanges(changes: readonly SyncChange[]): SyncVerification {
-  return validateChangeSet(changes);
+  return verifyProtocolChanges(changes) as SyncVerification;
 }
 
 export function resolveSyncObject(
@@ -561,6 +582,8 @@ export function resolveSyncObject(
   objectType: SyncObjectType,
   objectId: string,
 ): SyncResolution {
+  return resolveProtocolObject(changes, objectType, objectId) as SyncResolution;
+  /* c8 ignore next -- retained below until the compatibility barrel is fully minimized. */
   validateChangeSet(changes);
   const relevant = changes.filter(
     (change) => change.mutation.objectType === objectType && change.mutation.objectId === objectId,
@@ -603,7 +626,7 @@ function changeFilename(id: string): string {
   return `${id}.change.enc`;
 }
 
-export class SyncChangeLog {
+class _LegacySyncChangeLog {
   private readonly session: DocumentKeySession;
   private readonly changesDir: string;
   private readonly appliedPath: string;
@@ -812,7 +835,7 @@ export class SyncChangeLog {
  * a change never manufactures a second local change.
  */
 export class SyncedDocumentVault extends DocumentVault {
-  readonly changeLog: SyncChangeLog;
+  readonly changeLog: ProtocolSyncChangeLog;
   private syncClosed = false;
 
   constructor(
@@ -825,7 +848,7 @@ export class SyncedDocumentVault extends DocumentVault {
       super.lock();
       throw new Error("Sync device ID must be a lowercase UUID.");
     }
-    this.changeLog = new SyncChangeLog(syncVaultDir, passphrase);
+    this.changeLog = new ProtocolSyncChangeLog(syncVaultDir, passphrase);
   }
 
   override lock(): void {

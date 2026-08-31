@@ -125,6 +125,10 @@ Golden and adversarial fixtures are normative. Both TypeScript and Rust must
 produce byte-for-byte equal canonical bodies and IDs and must agree on opening,
 rejection, and conflict outcomes.
 
+The checked-in v1 golden body uses the fixed test key and freezes change ID
+`d423164f3e5feb9a758024dd3f0dcec080e78acea28d88b465ca44c32300f4d9`;
+random envelope nonces are deliberately excluded from that comparison.
+
 ## Local capture transaction
 
 Every synchronized mutation starts with a preflight that validates an unlocked

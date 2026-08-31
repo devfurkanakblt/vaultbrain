@@ -1,0 +1,28 @@
+{
+  "keyHex": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+  "body": {
+    "version": 1,
+    "deviceId": "11111111-1111-4111-8111-111111111111",
+    "sequence": 1,
+    "previousDeviceChange": null,
+    "parents": [],
+    "createdAt": "2026-08-31T08:30:00.000Z",
+    "mutation": {
+      "objectType": "note",
+      "objectId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "operation": "put",
+      "baseRevision": null,
+      "revision": 1,
+      "value": {
+        "z": 1,
+        "nested": {
+          "b": true,
+          "a": "x"
+        },
+        "list": [3, null]
+      }
+    }
+  },
+  "canonical": "{\"createdAt\":\"2026-08-31T08:30:00.000Z\",\"deviceId\":\"11111111-1111-4111-8111-111111111111\",\"mutation\":{\"baseRevision\":null,\"objectId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"objectType\":\"note\",\"operation\":\"put\",\"revision\":1,\"value\":{\"list\":[3,null],\"nested\":{\"a\":\"x\",\"b\":true},\"z\":1}},\"parents\":[],\"previousDeviceChange\":null,\"sequence\":1,\"version\":1}",
+  "id": "d423164f3e5feb9a758024dd3f0dcec080e78acea28d88b465ca44c32300f4d9"
+}
