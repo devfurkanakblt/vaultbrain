@@ -5,6 +5,17 @@ Versioning once the encrypted storage format reaches 1.0.
 
 ## Unreleased
 
+- Added synchronized document sessions that automatically capture note, canvas
+  and attachment puts/deletes, keep an encrypted per-object application cursor,
+  and idempotently apply conflict-free remote histories to the live vault.
+- Added optimistic revision checks to TypeScript note writes, matching canvas
+  writes and preventing a stale synced edit from silently overwriting a note.
+- Started Phase 6 with a transport-independent encrypted immutable change log:
+  keyed content IDs, per-device chains, causal DAG validation, fail-closed
+  imports, deterministic conflict inspection, and CLI import/export tooling.
+- Kept the Rust desktop and TypeScript CLI on the same derived index layout,
+  including Unicode-normalized note lookup maps and canvas text-link refreshes,
+  so a desktop write no longer forces a full CLI index rebuild.
 - Added the capability manifest and sandboxed plugin runtime: plugins are stored
   encrypted in the vault, run in a network-less worker without `eval`, and reach
   only the host methods their manifest declared.

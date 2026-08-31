@@ -514,6 +514,46 @@ agent browse "what did I note about health in August" using only that
 timestamp, with zero decryption — the note-taking equivalent of Obsidian's
 daily-notes view, but without reading your notes to build it.
 
+## Encrypted sync protocol — Phase 6 foundation
+
+Sync remains transport-independent: an append-only encrypted change log with
+per-device chains, causal parents and explicit conflict inspection. Exported
+JSON contains only keyed opaque IDs and AES-GCM ciphertext, suitable for copying
+between trusted devices or storing on an untrusted relay in a later slice.
+
+Pass `--sync-device <uuid>` to a document command to capture its note, canvas or
+attachment mutation automatically. A synchronized session also records an
+encrypted per-object application cursor, so conflict-free remote changes can be
+replayed into the real vault exactly once.
+
+```bash
+# Generate and persist this ID in your device configuration.
+sbrain sync device-id
+
+# Record revision 1 of one logical object.
+sbrain sync append <device-id> note <note-id> put \
+  --revision 1 --value '{"title":"Plan","body":"private"}'
+
+# Exchange opaque envelopes through files/stdout.
+sbrain sync export > changes.json
+sbrain sync import changes.json
+
+# Validate the complete DAG, inspect concurrent heads, then apply a clean one.
+sbrain sync verify
+sbrain sync resolve note <note-id>
+sbrain sync apply note <note-id>
+
+# Example automatically captured edit.
+sbrain --sync-device <device-id> docs put Plans/Launch.md --body "Ready"
+```
+
+Unresolved heads fail before live storage is touched. Synchronized attachment
+snapshots currently share the 8 MiB change limit (about 6 MiB of raw bytes);
+larger blob transport, plugin capture, device enrollment and key rotation,
+relay transport and mobile clients remain Phase 6 work. See the
+[sync protocol design](docs/superpowers/specs/2026-08-31-encrypted-sync-change-protocol-design.md)
+for the format and conflict rules.
+
 ## The "fast find" layer
 
 `sbrain index` rebuilds `schema.json` — key names + descriptions, no values —
@@ -546,11 +586,10 @@ cost scales with the number of *keys*, not the size of your notes.
 
 ## Roadmap
 
-- [ ] Structured (non-scalar) values — dates ranges, lists — without breaking the "one key, one fact" model
-- [ ] `age`/SOPS-compatible encryption backend as an alternative to built-in AES-GCM
-- [ ] Local embedding-based `find_key` (currently substring/token match) for better recall on natural-language queries
-- [ ] `sbrain revoke` — per-agent scoped access tokens instead of one shared passphrase
-- [ ] Host-side redaction support for MCP clients that implement it, to move Mode 2 closer to Mode 1's guarantees
+Phases 0–5 are implemented. Phase 6 now has the encrypted immutable change log
+and live note/canvas/attachment capture and application; plugin capture,
+enrollment/key rotation, relay transport, multi-device desktop and mobile remain. The maintained checklist is
+in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## License
 

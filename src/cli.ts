@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { Command } from "commander";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -36,6 +37,15 @@ import { OllamaLocalModelAdapter } from "./semantic.js";
 import { importObsidianVault } from "./obsidian-import.js";
 import { writeFileAtomic } from "./fs-safe.js";
 import {
+  SyncChangeLog,
+  SyncedDocumentVault,
+  type EncryptedSyncChange,
+  type SyncJson,
+  type SyncMutation,
+  type SyncObjectType,
+  type SyncOperation,
+} from "./sync.js";
+import {
   createFromTemplate,
   openDailyNote,
   parseLocalDate,
@@ -44,12 +54,20 @@ import {
 
 const program = new Command();
 
+function openDocumentVault(vaultDir: string, passphrase: string): DocumentVault {
+  const deviceId = program.opts().syncDevice as string | undefined;
+  return deviceId
+    ? new SyncedDocumentVault(vaultDir, passphrase, deviceId)
+    : new DocumentVault(vaultDir, passphrase);
+}
+
 program
   .name("sbrain")
   .description(
     "secondbrain-vault — an .env-style, least-exposure personal data store for the AI age."
   )
-  .option("--vault <dir>", "vault directory", DEFAULT_VAULT_DIR);
+  .option("--vault <dir>", "vault directory", DEFAULT_VAULT_DIR)
+  .option("--sync-device <uuid>", "automatically capture document writes for this sync device");
 
 program
   .command("init")
@@ -205,7 +223,7 @@ docs
       }
       properties = parsed as Record<string, PropertyValue>;
     }
-    const note = new DocumentVault(dir, passphrase).put({
+    const note = openDocumentVault(dir, passphrase).put({
       path: notePath,
       title: opts.title,
       body: opts.body,
@@ -318,7 +336,7 @@ docs
   .action(async (reference, newPath, opts) => {
     const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
     const dir = program.opts().vault;
-    const note = new DocumentVault(dir, passphrase).rename(reference, newPath, opts.title);
+    const note = openDocumentVault(dir, passphrase).rename(reference, newPath, opts.title);
     appendAudit(dir, { actor: "cli-direct-write", file: "documents", key: note.id }, passphrase);
     console.log(`Renamed to ${note.path} (${note.id}, revision ${note.revision}).`);
   });
@@ -354,7 +372,7 @@ docs
   .action(async (reference, number) => {
     const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
     const dir = program.opts().vault;
-    const note = new DocumentVault(dir, passphrase).restore(
+    const note = openDocumentVault(dir, passphrase).restore(
       reference,
       Number.parseInt(number, 10)
     );
@@ -368,7 +386,7 @@ docs
   .action(async (notePath, source) => {
     const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
     const dir = program.opts().vault;
-    const note = new DocumentVault(dir, passphrase).importMarkdown(
+    const note = openDocumentVault(dir, passphrase).importMarkdown(
       notePath,
       fs.readFileSync(source, "utf8")
     );
@@ -435,7 +453,7 @@ docs
   .action(async (reference) => {
     const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
     const dir = program.opts().vault;
-    const removed = new DocumentVault(dir, passphrase).remove(reference);
+    const removed = openDocumentVault(dir, passphrase).remove(reference);
     appendAudit(dir, { actor: "cli-direct-write", file: "documents", key: removed.id }, passphrase);
     console.log(`Removed ${removed.path} (${removed.id}).`);
   });
@@ -448,7 +466,7 @@ docs
   .action(async (source, opts) => {
     const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
     const dir = program.opts().vault;
-    const info = new DocumentVault(dir, passphrase).putAttachment(
+    const info = openDocumentVault(dir, passphrase).putAttachment(
       fs.readFileSync(source),
       opts.name ?? path.basename(source),
       opts.mime
@@ -486,7 +504,7 @@ docs
   .action(async (id) => {
     const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
     const dir = program.opts().vault;
-    const info = new DocumentVault(dir, passphrase).removeAttachment(id);
+    const info = openDocumentVault(dir, passphrase).removeAttachment(id);
     appendAudit(dir, { actor: "cli-direct-write", file: "attachments", key: id }, passphrase);
     console.log(`Removed ${info.filename} (${id}).`);
   });
@@ -497,7 +515,7 @@ docs
   .action(async (canvasPath, source) => {
     const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
     const dir = program.opts().vault;
-    const canvas = new DocumentVault(dir, passphrase).importCanvas(
+    const canvas = openDocumentVault(dir, passphrase).importCanvas(
       canvasPath,
       fs.readFileSync(source, "utf8")
     );
@@ -565,7 +583,7 @@ docs
   .action(async (reference) => {
     const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
     const dir = program.opts().vault;
-    const canvas = new DocumentVault(dir, passphrase).removeCanvas(reference);
+    const canvas = openDocumentVault(dir, passphrase).removeCanvas(reference);
     appendAudit(dir, { actor: "cli-direct-write", file: "canvases", key: canvas.id }, passphrase);
     console.log(`Removed ${canvas.path} (${canvas.id}).`);
   });
@@ -576,7 +594,7 @@ docs
   .action(async (reference, newPath) => {
     const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
     const dir = program.opts().vault;
-    const canvas = new DocumentVault(dir, passphrase).renameCanvas(reference, newPath);
+    const canvas = openDocumentVault(dir, passphrase).renameCanvas(reference, newPath);
     appendAudit(dir, { actor: "cli-direct-write", file: "canvases", key: canvas.id }, passphrase);
     console.log(`Renamed to ${canvas.path} (${canvas.id}, revision ${canvas.revision}).`);
   });
@@ -612,7 +630,7 @@ docs
   .action(async (reference, number) => {
     const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
     const dir = program.opts().vault;
-    const canvas = new DocumentVault(dir, passphrase).restoreCanvas(
+    const canvas = openDocumentVault(dir, passphrase).restoreCanvas(
       reference,
       Number.parseInt(number, 10)
     );
@@ -658,7 +676,7 @@ docs
     }
     const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
     const dir = program.opts().vault;
-    const note = createFromTemplate(new DocumentVault(dir, passphrase), template, notePath, {
+    const note = createFromTemplate(openDocumentVault(dir, passphrase), template, notePath, {
       title: opts.title,
       date: opts.date ? parseLocalDate(opts.date) : new Date(),
       variables,
@@ -678,7 +696,7 @@ docs
   .action(async (date, opts) => {
     const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
     const dir = program.opts().vault;
-    const result = openDailyNote(new DocumentVault(dir, passphrase), parseLocalDate(date), {
+    const result = openDailyNote(openDocumentVault(dir, passphrase), parseLocalDate(date), {
       folder: opts.folder,
       filenameFormat: opts.format,
       template: opts.template,
@@ -692,6 +710,149 @@ docs
       );
     }
     console.log(`${result.created ? "Created" : "Opened"} ${result.note.path} (${result.note.id}).`);
+  });
+
+const sync = program
+  .command("sync")
+  .description("encrypted immutable change log and deterministic conflict inspection");
+
+sync
+  .command("device-id")
+  .description("generate a new local device identity (enrollment is added in the next slice)")
+  .action(() => console.log(crypto.randomUUID()));
+
+sync
+  .command("append <device-id> <object-type> <object-id> <operation>")
+  .description("append one encrypted causal change to the local immutable log")
+  .requiredOption("--revision <number>", "new logical object revision")
+  .option("--base <number>", "base logical revision; omit when creating revision 1")
+  .option("--value <json>", "JSON snapshot for a put; omit for delete")
+  .action(async (deviceId, objectType, objectId, operation, opts) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const revision = Number(opts.revision);
+    const baseRevision = opts.base === undefined ? null : Number(opts.base);
+    let value: SyncJson = null;
+    if (opts.value !== undefined) value = JSON.parse(opts.value) as SyncJson;
+    const mutation: SyncMutation = {
+      objectType: objectType as SyncObjectType,
+      objectId,
+      operation: operation as SyncOperation,
+      baseRevision,
+      revision,
+      value,
+    };
+    const log = new SyncChangeLog(dir, passphrase);
+    try {
+      const change = log.append(deviceId, mutation);
+      console.log(`${change.id}  ${change.deviceId}#${change.sequence}  ${objectType}:${objectId}@${revision}`);
+    } finally {
+      log.close();
+    }
+  });
+
+sync
+  .command("list")
+  .description("list decrypted change metadata without printing snapshot values")
+  .action(async () => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const log = new SyncChangeLog(dir, passphrase);
+    try {
+      for (const change of log.changes()) {
+        const mutation = change.mutation;
+        console.log(
+          `${change.id}  ${change.deviceId}#${change.sequence}  ${mutation.operation} ${mutation.objectType}:${mutation.objectId}@${mutation.revision}`
+        );
+      }
+    } finally {
+      log.close();
+    }
+  });
+
+sync
+  .command("export")
+  .description("write relay-safe opaque encrypted envelopes as JSON to stdout")
+  .action(async () => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const log = new SyncChangeLog(dir, passphrase);
+    try {
+      process.stdout.write(`${JSON.stringify(log.envelopes(), null, 2)}\n`);
+    } finally {
+      log.close();
+    }
+  });
+
+sync
+  .command("import <source>")
+  .description("verify a complete batch, then idempotently admit encrypted envelopes from another device")
+  .action(async (source) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const parsed: unknown = JSON.parse(fs.readFileSync(path.resolve(source), "utf8"));
+    if (!Array.isArray(parsed)) throw new Error("Sync import must contain a JSON array of envelopes.");
+    const log = new SyncChangeLog(dir, passphrase);
+    try {
+      const result = log.import(parsed as EncryptedSyncChange[]);
+      console.log(`Imported ${result.imported}; already present ${result.existing}.`);
+    } finally {
+      log.close();
+    }
+  });
+
+sync
+  .command("verify")
+  .description("verify encryption, content IDs, device chains, causal parents and object revisions")
+  .action(async () => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const log = new SyncChangeLog(dir, passphrase);
+    try {
+      const report = log.verify();
+      console.log(`Verified ${report.changes} changes from ${report.devices} devices; ${report.heads.length} causal heads.`);
+    } finally {
+      log.close();
+    }
+  });
+
+sync
+  .command("resolve <object-type> <object-id>")
+  .description("show the deterministic winner and every preserved concurrent branch")
+  .action(async (objectType, objectId) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const log = new SyncChangeLog(dir, passphrase);
+    try {
+      console.log(JSON.stringify(log.resolve(objectType as SyncObjectType, objectId), null, 2));
+    } finally {
+      log.close();
+    }
+  });
+
+sync
+  .command("apply <object-type> <object-id>")
+  .description("apply one conflict-free note, canvas or attachment history to live vault storage")
+  .action(async (objectType, objectId) => {
+    if (objectType !== "note" && objectType !== "canvas" && objectType !== "attachment") {
+      throw new Error("Sync apply supports note, canvas and attachment objects only.");
+    }
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const vault = new SyncedDocumentVault(dir, passphrase);
+    try {
+      const result = vault.applyResolved(
+        objectType,
+        objectId,
+      );
+      console.log(
+        result.alreadyApplied
+          ? `Already applied ${objectType}:${objectId}@${result.revision}.`
+          : `Applied ${result.applied} change(s); ${objectType}:${objectId}@${result.revision} is current.`,
+      );
+    } finally {
+      vault.lock();
+    }
   });
 
 /**

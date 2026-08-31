@@ -57,6 +57,11 @@ test("document vault provides encrypted notes, stable revisions, search and back
   assert.equal(updated.id, alpha.id);
   assert.equal(updated.revision, 2);
   assert.equal(vault.get("Project Alpha").properties.priority, 2);
+  assert.throws(
+    () => vault.put({ id: alpha.id, path: alpha.path, body: "stale overwrite", baseRevision: 1 }),
+    /note revision conflict/iu,
+  );
+  assert.match(vault.get(alpha.id).body, /updated/u);
 
   const search = vault.search('"launch plan" tag:project/active');
   assert.equal(search.length, 1);

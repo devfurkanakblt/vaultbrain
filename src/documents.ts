@@ -1648,6 +1648,17 @@ export class DocumentVault {
     const id = existing?.id ?? input.id ?? crypto.randomUUID();
     if (!/^[a-f0-9-]{36}$/u.test(id)) throw new Error("Invalid note ID.");
     if (!existing && (index.notes[id] || index.canvases[id])) throw new Error(`Document ID already exists: ${id}`);
+    if (existing && input.baseRevision !== undefined && input.baseRevision !== existing.revision) {
+      throw new Error(
+        `Note revision conflict: expected revision ${input.baseRevision}, current revision ${existing.revision}.`
+      );
+    }
+    const archivedBase = existing ? 0 : Math.max(0, ...this.archivedRevisionNumbers(id));
+    if (!existing && input.baseRevision !== undefined && input.baseRevision !== archivedBase) {
+      throw new Error(
+        `Note revision conflict: expected revision ${input.baseRevision}, archived revision ${archivedBase}.`
+      );
+    }
 
     const oldLabels = existing ? this.identityLabels(existing) : [];
     const existingObject = existing ? this.loadById(existing.id) : undefined;
@@ -1670,7 +1681,7 @@ export class DocumentVault {
       properties: normalizeProperties(input.properties),
       createdAt: existing?.createdAt ?? input.createdAt ?? now,
       updatedAt: now,
-      revision: existing ? existing.revision + 1 : (input.baseRevision ?? 0) + 1,
+      revision: existing ? existing.revision + 1 : (input.baseRevision ?? archivedBase) + 1,
     };
     const frontmatterSource = input.frontmatterSource ?? existing?.frontmatterSource;
     if (frontmatterSource) note.frontmatterSource = frontmatterSource;

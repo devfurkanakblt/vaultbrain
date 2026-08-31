@@ -211,14 +211,14 @@ note's revision, and the filter loop allocates no per-note closures. Those
 normalized fields are deliberately **not** written to disk — a second copy of
 every body would double what unlock has to decrypt.
 
-The on-disk index therefore stays at version 2, the layout the Rust desktop
-core also reads and writes. The lookup maps are additive fields that the
-desktop core ignores, and a `derived` marker records that they are present; an
-index written without them (an older build, or the desktop app) is rebuilt from
-the note objects rather than trusted. The consequence is honest and worth
-knowing: a vault last written by the desktop app pays one index rebuild the
-next time the CLI opens it. Teaching the Rust core to maintain the same lookups
-would remove that, and is the natural follow-up.
+The on-disk index therefore stays at version 2, the layout both application
+cores read and write. A `derived` marker records that the reverse lookup maps
+are present. Both the TypeScript CLI and Rust desktop core now maintain
+`pathOwners`, `nameOwners` and `basenameOwners` with the same NFKC
+normalization rules. The Rust core also re-derives canvas text-link references
+when note identities change. An index written by an older build is rebuilt
+from the encrypted note and canvas objects once, then saved in the shared
+layout on the next write.
 
 ### Measured at 100,000 notes
 
@@ -245,6 +245,50 @@ misleading:
   encrypted object, fsynced before it is renamed into place. That cost is the
   crash-safety guarantee, not an accident, and it is paid by bulk imports
   rather than by ordinary editing.
+
+## Encrypted sync change protocol
+
+Phase 6 begins with a transport-independent append-only log under
+`documents/sync/changes/`. Each change contains a device sequence, the prior
+change from that device, causal parents, one logical object mutation and its
+base/new revision. The complete body is canonical JSON, encrypted with the
+vault document key, and authenticated against its keyed content ID. The relay
+surface therefore consists only of random-looking IDs and AES-GCM envelopes;
+object types, IDs, timestamps, device identities and values remain encrypted.
+
+Change IDs are HMAC-SHA256 values with a sync-specific domain separator. This
+prevents offline guessing from the filename while making retries idempotent.
+Each ID derives a separate envelope subkey, isolating AES-GCM nonce domains
+across changes and devices that share the vault key.
+Envelope files are installed with an exclusive hard link from a fully written,
+fsynced sibling temporary file, so an existing change is never overwritten and
+a crash cannot publish a half-written final object.
+
+Every import is validated as a set before anything is written: content IDs,
+device sequence forks, missing parents, cycles and causal object revision jumps
+all fail closed. Concurrent object heads remain in the log. Resolution chooses
+a deterministic display winner by revision, tombstone precedence and keyed
+change ID, while returning every other head as a conflict. A later change that
+parents all heads records an explicit causal merge and removes the conflict.
+
+The second slice adds `SyncedDocumentVault`, a write session that mirrors
+successful note, canvas and attachment puts/deletes into the causal log while
+holding the same cross-process vault lock as the underlying storage operation.
+Existing objects receive a revision-1 sync baseline before their first captured
+edit, so enabling sync on a mature vault does not lose its pre-sync state.
+
+Conflict-free imported histories can be applied to the real encrypted object,
+attachment and derived-index storage. Application walks the winning causal
+history in revision order and advances an encrypted per-object cursor only
+after each storage transaction succeeds. Repeating an application is therefore
+idempotent, and unresolved heads fail before touching live storage. Attachment
+bytes are carried inside v1 snapshots and consequently share the 8 MiB change
+limit; larger-attachment blob transport remains a later slice.
+
+Plugin transaction capture, enrollment and rotation, relay transport and
+compaction checkpoints remain later Phase 6 slices. The format contract and
+threat analysis are recorded in
+`docs/superpowers/specs/2026-08-31-encrypted-sync-change-protocol-design.md`.
 
 ## Durability and session lifecycle
 
