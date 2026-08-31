@@ -26,24 +26,39 @@ function withoutCode(markdown: string): string {
     .replace(/`[^`\n]*`/gu, " ");
 }
 
-export function normalizeNotePath(input: string): string {
+/**
+ * The one rule for every user-facing path label in the vault. Notes and
+ * canvases differ only by extension, so they share this rather than drift:
+ * a path is a mutable label, never identity, and it must never be able to
+ * escape the logical tree it names.
+ */
+export function normalizeVaultPath(input: string, extension: string, kind: string): string {
   let value = input.trim().replace(/\\/gu, "/");
-  if (!value.toLowerCase().endsWith(".md")) value += ".md";
+  if (!value) throw new Error(`Invalid ${kind.toLowerCase()} path.`);
+  if (value.toLowerCase().endsWith(extension)) {
+    value = `${value.slice(0, -extension.length)}${extension}`;
+  } else {
+    value += extension;
+  }
   if (
-    !value ||
+    value === extension ||
     value.length > 512 ||
     value.startsWith("/") ||
     /^[a-z]:\//iu.test(value) ||
     value.includes("\0") ||
     /[\u0000-\u001f\u007f]/u.test(value)
   ) {
-    throw new Error("Invalid note path.");
+    throw new Error(`Invalid ${kind.toLowerCase()} path.`);
   }
   const parts = value.split("/");
   if (parts.some((part) => !part || part === "." || part === "..")) {
-    throw new Error("Note paths cannot contain empty, '.' or '..' segments.");
+    throw new Error(`${kind} paths cannot contain empty, '.' or '..' segments.`);
   }
   return parts.join("/");
+}
+
+export function normalizeNotePath(input: string): string {
+  return normalizeVaultPath(input, ".md", "Note");
 }
 
 export function normalizeLinkTarget(input: string): string {

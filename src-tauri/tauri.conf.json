@@ -26,12 +26,16 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' asset: data:; font-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http://ipc.localhost",
+      "csp": "default-src 'self'; img-src 'self' asset: data: blob:; media-src 'self' blob:; font-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:; frame-src 'self' blob:; connect-src ipc: http://ipc.localhost",
       "capabilities": ["main"]
     }
   },
   "bundle": {
-    "active": false,
-    "targets": "all"
+    "active": true,
+    "targets": ["msi", "nsis"],
+    "category": "Productivity",
+    "shortDescription": "Local-first encrypted knowledge workspace",
+    "longDescription": "A local-first encrypted Markdown knowledge workspace with narrow, auditable AI access.",
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"]
   }
 }

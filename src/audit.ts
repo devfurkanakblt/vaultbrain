@@ -8,6 +8,14 @@ export interface AuditEntry {
   actor: "cli-direct" | "mcp-agent" | "cli-direct-write" | "mcp-agent-write";
   file: string;
   key: string;
+  /** Which agent identity asked, when a grant policy governs the vault. */
+  agent?: string;
+  /** The grant that allowed it, so a later revocation has something to point at. */
+  grant?: string;
+  /** How much of the value the caller actually received. */
+  redaction?: "none" | "partial" | "full";
+  /** A denial and a held-back resolution are recorded, not only successes. */
+  outcome?: "allowed" | "denied" | "pending";
   prevHash?: string;
   hash?: string;
 }
@@ -80,12 +88,21 @@ function auditKey(vaultDir: string, passphrase: string, meta: AuditMeta): Buffer
   return derived;
 }
 
+/**
+ * The grant fields are folded in only when an entry carries them, so a log
+ * written before this build hashes byte-for-byte as it did and keeps verifying,
+ * while everything new — including who asked and how much they got — is signed.
+ */
 function signedPayload(entry: Omit<AuditEntry, "hash"> & { prevHash: string }): string {
   return JSON.stringify({
     timestamp: entry.timestamp,
     actor: entry.actor,
     file: entry.file,
     key: entry.key,
+    ...(entry.agent === undefined ? {} : { agent: entry.agent }),
+    ...(entry.grant === undefined ? {} : { grant: entry.grant }),
+    ...(entry.redaction === undefined ? {} : { redaction: entry.redaction }),
+    ...(entry.outcome === undefined ? {} : { outcome: entry.outcome }),
     prevHash: entry.prevHash,
   });
 }

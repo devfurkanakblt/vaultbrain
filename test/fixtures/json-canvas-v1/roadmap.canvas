@@ -1,0 +1,35 @@
+{
+  "nodes": [
+    {
+      "id": "note",
+      "type": "file",
+      "file": "Notes/Golden.md",
+      "subpath": "#Golden",
+      "x": 0,
+      "y": 0,
+      "width": 320,
+      "height": 200,
+      "color": "2"
+    },
+    {
+      "id": "link",
+      "type": "link",
+      "url": "https://example.com/reference",
+      "x": 400,
+      "y": 0,
+      "width": 320,
+      "height": 200
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge",
+      "fromNode": "note",
+      "fromSide": "right",
+      "toNode": "link",
+      "toSide": "left",
+      "toEnd": "arrow",
+      "label": "Reference"
+    }
+  ]
+}

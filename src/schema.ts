@@ -1,5 +1,4 @@
 import fs from "node:fs";
-import path from "node:path";
 import { listVaultFiles, loadVaultFile } from "./store.js";
 import { assertNotSymlink, writeFileAtomic } from "./fs-safe.js";
 import { resolveInside } from "./safety.js";

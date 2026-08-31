@@ -96,6 +96,19 @@ test("a checked-in document vault from the current format still opens and resolv
   assert.throws(() => new DocumentVault(vaultDir, "wrong passphrase"), /wrong passphrase/u);
 });
 
+test("a checked-in canvas vault keeps encrypted boards and stable references readable", () => {
+  const vaultDir = copyFixture("documents-canvas-v1");
+  const vault = new DocumentVault(vaultDir, FIXTURE_PASSPHRASE);
+  const [canvas] = vault.listCanvases();
+  assert.equal(canvas.title, "Frozen roadmap");
+  assert.equal(canvas.nodeCount, 2);
+  assert.equal(canvas.edgeCount, 1);
+  const document = vault.getCanvas(canvas.id);
+  const note = vault.get("Atlas/Canvas contract");
+  assert.equal(document.nodes[0].noteId, note.id);
+  assert.deepEqual(vault.canvasesReferencing(note.id).map((item) => item.id), [canvas.id]);
+});
+
 test("an interrupted write is replayed from its journal on the next unlock", () => {
   const live = tempDir("crash");
   const vault = new DocumentVault(live, PASSPHRASE);

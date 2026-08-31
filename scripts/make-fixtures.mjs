@@ -21,6 +21,52 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const fixtures = path.resolve(here, "..", "test", "fixtures");
 export const FIXTURE_PASSPHRASE = "fixture-only-passphrase";
 
+function writeCanvasFixture() {
+  const canvasDir = path.join(fixtures, "documents-canvas-v1");
+  fs.rmSync(canvasDir, { recursive: true, force: true });
+  fs.mkdirSync(canvasDir, { recursive: true });
+  const canvasVault = new DocumentVault(canvasDir, FIXTURE_PASSPHRASE);
+  const note = canvasVault.put({
+    path: "Atlas/Canvas contract.md",
+    title: "Canvas contract",
+    body: "# Canvas contract\n\nThe encrypted board beside this note must stay readable. #fixture",
+    properties: { status: "frozen" },
+  });
+  canvasVault.putCanvas({
+    path: "Boards/Frozen roadmap.canvas",
+    title: "Frozen roadmap",
+    nodes: [
+      {
+        id: "contract",
+        type: "file",
+        noteId: note.id,
+        file: note.path,
+        x: 0,
+        y: 0,
+        width: 320,
+        height: 200,
+      },
+      {
+        id: "text",
+        type: "text",
+        text: "This fixture links to [[Atlas/Canvas contract]].",
+        x: 400,
+        y: 0,
+        width: 320,
+        height: 200,
+      },
+    ],
+    edges: [{ id: "edge", fromNode: "contract", toNode: "text", toEnd: "arrow" }],
+  });
+  fs.rmSync(path.join(canvasDir, ".sbrain.lock"), { force: true });
+}
+
+if (process.argv.includes("--canvas-only")) {
+  writeCanvasFixture();
+  console.log(`Canvas fixture written to ${path.join(fixtures, "documents-canvas-v1")}`);
+  process.exit(0);
+}
+
 /** The pre-versioning envelope, reproduced exactly as v0 wrote it. */
 function encryptLegacy(plaintext, passphrase) {
   const salt = crypto.randomBytes(16);
@@ -73,6 +119,38 @@ vault.putMany([
   },
 ]);
 
+/**
+ * Attachments written by the TypeScript core, opened by the Rust desktop core's
+ * own test suite. Content addressing only holds if both implementations derive
+ * the same attachment ID and authenticate the same associated data, so this
+ * fixture is the gate that catches either one drifting.
+ */
+const attachmentDir = path.join(fixtures, "documents-attachments-v1");
+fs.rmSync(attachmentDir, { recursive: true, force: true });
+fs.mkdirSync(attachmentDir, { recursive: true });
+const attachmentVault = new DocumentVault(attachmentDir, FIXTURE_PASSPHRASE);
+attachmentVault.putMany([
+  {
+    path: "Atlas/Attachment contract.md",
+    title: "Attachment contract",
+    body: "# Attachment contract\n\nThe attachments beside this note must stay readable. #fixture",
+    properties: { status: "frozen" },
+  },
+]);
+attachmentVault.putAttachment(
+  Buffer.from("This attachment was written by the TypeScript core and must stay readable.\n", "utf8"),
+  "frozen-note.txt",
+  "text/plain"
+);
+attachmentVault.putAttachment(
+  Buffer.from(Array.from({ length: 4096 }, (_value, index) => index % 256)),
+  "frozen-payload.bin",
+  "application/octet-stream"
+);
+fs.rmSync(path.join(attachmentDir, ".sbrain.lock"), { force: true });
+
+writeCanvasFixture();
+
 fs.writeFileSync(
   path.join(fixtures, "README.md"),
   `# Format fixtures
@@ -88,6 +166,8 @@ They contain dummy data only. Never point a fixture at a real vault.
 |---|---|---|
 | \`kv-envelope-v0/\` | key-value envelope, pre-versioning | Unversioned \`{salt,iv,authTag,ciphertext}\` files still decrypt, and \`sbrain migrate\` upgrades them in place |
 | \`documents-v1/\` | document vault manifest v1, index v2 | An encrypted note vault written by the current format still opens, searches and resolves links |
+| \`documents-attachments-v1/\` | document vault with chunk-encrypted attachments | Content-addressed attachments written by the TypeScript core still open in the Rust desktop core |
+| \`documents-canvas-v1/\` | document vault with encrypted canvas objects | Canvas objects, identities, references and AAD written by the TypeScript core stay readable |
 
 Regenerate deliberately (see \`scripts/make-fixtures.mjs\`) — overwriting a
 fixture throws away the evidence it was there to provide. To cover a new
