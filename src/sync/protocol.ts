@@ -86,7 +86,8 @@ export function assertSyncJson(value: unknown, depth = 0, counter = { nodes: 0 }
   if (prototype !== Object.prototype && prototype !== null) throw new Error("Sync change JSON must use plain objects.");
   for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
     assertUnicode(key, "Sync change key");
-    if (key === "__proto__" || key === "prototype" || key === "constructor") throw new Error(`Unsafe sync change key: ${key}`);
+    if (key === "__proto__" || key === "prototype" || key === "constructor")
+      throw new Error(`Unsafe sync change key: ${key}`);
     assertSyncJson(item, depth + 1, counter);
   }
 }
@@ -107,47 +108,85 @@ function canonicalJsonUnchecked(value: SyncJson): string {
 }
 
 function integer(value: unknown, minimum: number, label: string): number {
-  if (!Number.isSafeInteger(value) || (value as number) < minimum) throw new Error(`${label} must be a safe integer of at least ${minimum}.`);
+  if (!Number.isSafeInteger(value) || (value as number) < minimum)
+    throw new Error(`${label} must be a safe integer of at least ${minimum}.`);
   return value as number;
 }
 
 function validateMutation(value: unknown): SyncMutation {
   const mutation = value as SyncMutation | undefined;
-  if (!mutation || typeof mutation !== "object" || Array.isArray(mutation)) throw new Error("Sync change mutation must be an object.");
-  if (!["note", "canvas", "attachment", "plugin", "vault"].includes(mutation.objectType)) throw new Error("Unsupported sync object type.");
-  if (typeof mutation.objectId !== "string" || !OBJECT_ID.test(mutation.objectId)) throw new Error("Invalid sync object ID.");
+  if (!mutation || typeof mutation !== "object" || Array.isArray(mutation))
+    throw new Error("Sync change mutation must be an object.");
+  if (!["note", "canvas", "attachment", "plugin", "vault"].includes(mutation.objectType))
+    throw new Error("Unsupported sync object type.");
+  if (typeof mutation.objectId !== "string" || !OBJECT_ID.test(mutation.objectId))
+    throw new Error("Invalid sync object ID.");
   if (mutation.operation !== "put" && mutation.operation !== "delete") throw new Error("Unsupported sync operation.");
   const revision = integer(mutation.revision, 1, "Sync revision");
   const baseRevision = mutation.baseRevision === null ? null : integer(mutation.baseRevision, 0, "Sync base revision");
-  if ((baseRevision === null && revision !== 1) || (baseRevision !== null && revision !== baseRevision + 1)) throw new Error("A sync revision must advance exactly one step from its base revision.");
+  if ((baseRevision === null && revision !== 1) || (baseRevision !== null && revision !== baseRevision + 1))
+    throw new Error("A sync revision must advance exactly one step from its base revision.");
   assertSyncJson(mutation.value);
-  if (mutation.operation === "delete" && mutation.value !== null) throw new Error("A delete sync change cannot carry a value.");
+  if (mutation.operation === "delete" && mutation.value !== null)
+    throw new Error("A delete sync change cannot carry a value.");
   if (mutation.operation === "put" && mutation.value === null) throw new Error("A put sync change must carry a value.");
-  return { objectType: mutation.objectType, objectId: mutation.objectId, operation: mutation.operation, baseRevision, revision, value: structuredClone(mutation.value) };
+  return {
+    objectType: mutation.objectType,
+    objectId: mutation.objectId,
+    operation: mutation.operation,
+    baseRevision,
+    revision,
+    value: structuredClone(mutation.value),
+  };
 }
 
 export function validateSyncChangeBody(value: unknown): SyncChangeBody {
   const body = value as SyncChangeBody | undefined;
-  if (!body || typeof body !== "object" || Array.isArray(body) || body.version !== 1) throw new Error("Unsupported or invalid sync change.");
-  if (typeof body.deviceId !== "string" || !DEVICE_ID.test(body.deviceId)) throw new Error("Sync device ID must be a lowercase UUID.");
+  if (!body || typeof body !== "object" || Array.isArray(body) || body.version !== 1)
+    throw new Error("Unsupported or invalid sync change.");
+  if (typeof body.deviceId !== "string" || !DEVICE_ID.test(body.deviceId))
+    throw new Error("Sync device ID must be a lowercase UUID.");
   const sequence = integer(body.sequence, 1, "Sync device sequence");
   const previousDeviceChange = body.previousDeviceChange;
-  if (previousDeviceChange !== null && (typeof previousDeviceChange !== "string" || !CHANGE_ID.test(previousDeviceChange))) throw new Error("Invalid previous device change ID.");
-  if (!Array.isArray(body.parents) || body.parents.length > MAX_PARENTS) throw new Error(`A sync change may have at most ${MAX_PARENTS} parents.`);
+  if (
+    previousDeviceChange !== null &&
+    (typeof previousDeviceChange !== "string" || !CHANGE_ID.test(previousDeviceChange))
+  )
+    throw new Error("Invalid previous device change ID.");
+  if (!Array.isArray(body.parents) || body.parents.length > MAX_PARENTS)
+    throw new Error(`A sync change may have at most ${MAX_PARENTS} parents.`);
   const parents = [...new Set(body.parents)];
-  if (parents.length !== body.parents.length || parents.some((id) => typeof id !== "string" || !CHANGE_ID.test(id))) throw new Error("Sync parents must be unique change IDs.");
+  if (parents.length !== body.parents.length || parents.some((id) => typeof id !== "string" || !CHANGE_ID.test(id)))
+    throw new Error("Sync parents must be unique change IDs.");
   parents.sort();
-  if ((sequence === 1) !== (previousDeviceChange === null)) throw new Error("Only the first device change may omit its previous device change.");
-  if (previousDeviceChange && !parents.includes(previousDeviceChange)) throw new Error("The previous device change must also be a causal parent.");
+  if ((sequence === 1) !== (previousDeviceChange === null))
+    throw new Error("Only the first device change may omit its previous device change.");
+  if (previousDeviceChange && !parents.includes(previousDeviceChange))
+    throw new Error("The previous device change must also be a causal parent.");
   const timestamp = typeof body.createdAt === "string" ? Date.parse(body.createdAt) : Number.NaN;
-  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString() !== body.createdAt) throw new Error("Sync change timestamp must be a canonical ISO timestamp.");
-  const normalized: SyncChangeBody = { version: 1, deviceId: body.deviceId, sequence, previousDeviceChange, parents, createdAt: body.createdAt, mutation: validateMutation(body.mutation) };
-  if (Buffer.byteLength(canonicalSyncJson(normalized as unknown as SyncJson), "utf8") > MAX_CHANGE_BYTES) throw new Error("Sync change exceeds 8 MiB.");
+  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString() !== body.createdAt)
+    throw new Error("Sync change timestamp must be a canonical ISO timestamp.");
+  const normalized: SyncChangeBody = {
+    version: 1,
+    deviceId: body.deviceId,
+    sequence,
+    previousDeviceChange,
+    parents,
+    createdAt: body.createdAt,
+    mutation: validateMutation(body.mutation),
+  };
+  if (Buffer.byteLength(canonicalSyncJson(normalized as unknown as SyncJson), "utf8") > MAX_CHANGE_BYTES)
+    throw new Error("Sync change exceeds 8 MiB.");
   return normalized;
 }
 
 function changeId(body: SyncChangeBody, key: Buffer): string {
-  return crypto.createHmac("sha256", key).update(CHANGE_ID_CONTEXT).update("\0").update(canonicalSyncJson(body as unknown as SyncJson)).digest("hex");
+  return crypto
+    .createHmac("sha256", key)
+    .update(CHANGE_ID_CONTEXT)
+    .update("\0")
+    .update(canonicalSyncJson(body as unknown as SyncJson))
+    .digest("hex");
 }
 
 function changeEncryptionKey(key: Buffer, id: string): Buffer {
@@ -167,19 +206,29 @@ export function sealSyncChange(body: SyncChangeBody, key: Buffer): EncryptedSync
 }
 
 function canonicalBase64(value: unknown, expectedBytes: number | undefined, label: string): string {
-  if (typeof value !== "string" || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value)) throw new Error(`Encrypted sync payload has malformed ${label}.`);
+  if (typeof value !== "string" || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value))
+    throw new Error(`Encrypted sync payload has malformed ${label}.`);
   const decoded = Buffer.from(value, "base64");
-  if (expectedBytes !== undefined && decoded.length !== expectedBytes) throw new Error(`Encrypted sync payload has invalid ${label} length.`);
+  if (expectedBytes !== undefined && decoded.length !== expectedBytes)
+    throw new Error(`Encrypted sync payload has invalid ${label} length.`);
   if (decoded.toString("base64") !== value) throw new Error(`Encrypted sync payload has non-canonical ${label}.`);
   return value;
 }
 
 export function validateEncryptedSyncChange(value: unknown): EncryptedSyncChange {
   const envelope = value as EncryptedSyncChange | undefined;
-  if (!envelope || typeof envelope !== "object" || Array.isArray(envelope) || envelope.version !== 1) throw new Error("Unsupported or invalid encrypted sync envelope.");
-  if (typeof envelope.id !== "string" || !CHANGE_ID.test(envelope.id)) throw new Error("Invalid encrypted sync change ID.");
+  if (!envelope || typeof envelope !== "object" || Array.isArray(envelope) || envelope.version !== 1)
+    throw new Error("Unsupported or invalid encrypted sync envelope.");
+  if (typeof envelope.id !== "string" || !CHANGE_ID.test(envelope.id))
+    throw new Error("Invalid encrypted sync change ID.");
   const payload = envelope.payload as DocumentPayload | undefined;
-  if (!payload || payload.version !== 1 || typeof payload.ciphertext !== "string" || payload.ciphertext.length > Math.ceil((MAX_CHANGE_BYTES * 4) / 3) + 16) throw new Error("Invalid encrypted sync payload.");
+  if (
+    !payload ||
+    payload.version !== 1 ||
+    typeof payload.ciphertext !== "string" ||
+    payload.ciphertext.length > Math.ceil((MAX_CHANGE_BYTES * 4) / 3) + 16
+  )
+    throw new Error("Invalid encrypted sync payload.");
   canonicalBase64(payload.iv, 12, "nonce");
   canonicalBase64(payload.authTag, 16, "authentication tag");
   canonicalBase64(payload.ciphertext, undefined, "ciphertext");
@@ -200,6 +249,7 @@ export function openSyncChange(value: unknown, key: Buffer): SyncChange {
   const actual = Buffer.from(changeId(body, key), "hex");
   const expected = Buffer.from(envelope.id, "hex");
   if (!crypto.timingSafeEqual(actual, expected)) throw new Error("Sync change ID does not match its content.");
-  if (plaintext !== canonicalSyncJson(body as unknown as SyncJson)) throw new Error("Sync change plaintext is not canonically encoded.");
+  if (plaintext !== canonicalSyncJson(body as unknown as SyncJson))
+    throw new Error("Sync change plaintext is not canonically encoded.");
   return { id: envelope.id, ...body };
 }

@@ -53,7 +53,13 @@ export function noteSnapshot(note: NoteDocument): NoteSyncSnapshot {
 }
 
 export function canvasSnapshot(canvas: CanvasDocument): CanvasSyncSnapshot {
-  return structuredClone({ path: canvas.path, title: canvas.title, nodes: canvas.nodes, edges: canvas.edges, createdAt: canvas.createdAt });
+  return structuredClone({
+    path: canvas.path,
+    title: canvas.title,
+    nodes: canvas.nodes,
+    edges: canvas.edges,
+    createdAt: canvas.createdAt,
+  });
 }
 
 export function attachmentSnapshot(data: Buffer, info: AttachmentInfo): AttachmentSyncSnapshot {
@@ -61,7 +67,8 @@ export function attachmentSnapshot(data: Buffer, info: AttachmentInfo): Attachme
 }
 
 function recordValue(value: SyncJson, label: string): Record<string, SyncJson> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} sync snapshot must be an object.`);
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error(`${label} sync snapshot must be an object.`);
   return value;
 }
 
@@ -75,9 +82,12 @@ export function parseNoteSnapshot(value: SyncJson): NoteSyncSnapshot {
   const aliases = raw.aliases;
   const tags = raw.tags;
   const properties = raw.properties;
-  if (!Array.isArray(aliases) || aliases.some((item) => typeof item !== "string")) throw new Error("Note sync aliases must be strings.");
-  if (!Array.isArray(tags) || tags.some((item) => typeof item !== "string")) throw new Error("Note sync tags must be strings.");
-  if (!properties || typeof properties !== "object" || Array.isArray(properties)) throw new Error("Note sync properties must be an object.");
+  if (!Array.isArray(aliases) || aliases.some((item) => typeof item !== "string"))
+    throw new Error("Note sync aliases must be strings.");
+  if (!Array.isArray(tags) || tags.some((item) => typeof item !== "string"))
+    throw new Error("Note sync tags must be strings.");
+  if (!properties || typeof properties !== "object" || Array.isArray(properties))
+    throw new Error("Note sync properties must be an object.");
   const createdAt = requiredString(raw.createdAt, "Note sync createdAt");
   if (!Number.isFinite(Date.parse(createdAt))) throw new Error("Note sync createdAt must be an ISO timestamp.");
   const snapshot: NoteSyncSnapshot = {
@@ -89,13 +99,15 @@ export function parseNoteSnapshot(value: SyncJson): NoteSyncSnapshot {
     properties: properties as NoteDocument["properties"],
     createdAt,
   };
-  if (raw.frontmatterSource !== undefined) snapshot.frontmatterSource = requiredString(raw.frontmatterSource, "Note sync frontmatterSource");
+  if (raw.frontmatterSource !== undefined)
+    snapshot.frontmatterSource = requiredString(raw.frontmatterSource, "Note sync frontmatterSource");
   return structuredClone(snapshot);
 }
 
 export function parseCanvasSnapshot(value: SyncJson): CanvasSyncSnapshot {
   const raw = recordValue(value, "Canvas");
-  if (!Array.isArray(raw.nodes) || !Array.isArray(raw.edges)) throw new Error("Canvas sync snapshot needs node and edge arrays.");
+  if (!Array.isArray(raw.nodes) || !Array.isArray(raw.edges))
+    throw new Error("Canvas sync snapshot needs node and edge arrays.");
   const createdAt = requiredString(raw.createdAt, "Canvas sync createdAt");
   if (!Number.isFinite(Date.parse(createdAt))) throw new Error("Canvas sync createdAt must be an ISO timestamp.");
   return structuredClone({
@@ -110,7 +122,13 @@ export function parseCanvasSnapshot(value: SyncJson): CanvasSyncSnapshot {
 export function parseAttachmentSnapshot(value: SyncJson): AttachmentSyncSnapshot {
   const raw = recordValue(value, "Attachment");
   const data = requiredString(raw.data, "Attachment sync data");
-  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(data)) throw new Error("Attachment sync data must be canonical base64.");
-  if (Buffer.from(data, "base64").toString("base64") !== data) throw new Error("Attachment sync data must be canonical base64.");
-  return { filename: requiredString(raw.filename, "Attachment sync filename"), mime: requiredString(raw.mime, "Attachment sync MIME type"), data };
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(data))
+    throw new Error("Attachment sync data must be canonical base64.");
+  if (Buffer.from(data, "base64").toString("base64") !== data)
+    throw new Error("Attachment sync data must be canonical base64.");
+  return {
+    filename: requiredString(raw.filename, "Attachment sync filename"),
+    mime: requiredString(raw.mime, "Attachment sync MIME type"),
+    data,
+  };
 }

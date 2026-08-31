@@ -1,15 +1,13 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import {
-  canonicalSyncJson,
-  openSyncChange,
-  sealSyncChange,
-  validateSyncChangeBody,
-} from "../dist/sync/protocol.js";
+import { canonicalSyncJson, openSyncChange, sealSyncChange, validateSyncChangeBody } from "../dist/sync/protocol.js";
 import { verifySyncChanges } from "../dist/sync/change-log.js";
+import { encryptDocument } from "../dist/document-crypto.js";
 import * as syncCompatibility from "../dist/sync.js";
 
 const fixtures = path.join(import.meta.dirname, "fixtures", "sync-v1");
@@ -25,6 +23,14 @@ function replacementId(id) {
   return `${id.slice(0, -1)}${id.endsWith("0") ? "1" : "0"}`;
 }
 
+function throwsError(action, pattern) {
+  assert.throws(action, (error) => error instanceof Error && pattern.test(error.message));
+}
+
+function tempVault(label) {
+  return fs.mkdtempSync(path.join(os.tmpdir(), `secondbrain-sync-protocol-${label}-`));
+}
+
 test("v1 golden body, keyed ID, opened result, and compatibility barrel are frozen", () => {
   assert.equal(canonicalSyncJson(golden.body), golden.canonical);
   const envelope = sealSyncChange(golden.body, key);
@@ -33,51 +39,137 @@ test("v1 golden body, keyed ID, opened result, and compatibility barrel are froz
   assert.equal(syncCompatibility.canonicalSyncJson(golden.body), golden.canonical);
   assert.equal(syncCompatibility.sealSyncChange(golden.body, key).id, golden.id);
   assert.deepEqual(syncCompatibility.openSyncChange(envelope, key), { id: golden.id, ...golden.body });
-  assert.deepEqual(syncCompatibility.verifySyncChanges([{ id: golden.id, ...golden.body }]), { changes: 1, devices: 1, heads: [golden.id] });
-  assert.equal(typeof syncCompatibility.SyncChangeLog, "function");
-  assert.equal(typeof syncCompatibility.SyncedDocumentVault, "function");
+  assert.deepEqual(syncCompatibility.validateSyncChangeBody(golden.body), golden.body);
+  assert.deepEqual(syncCompatibility.verifySyncChanges([{ id: golden.id, ...golden.body }]), {
+    changes: 1,
+    devices: 1,
+    heads: [golden.id],
+  });
+  assert.deepEqual(
+    syncCompatibility.resolveSyncObject([{ id: golden.id, ...golden.body }], "note", golden.body.mutation.objectId)
+      .heads,
+    [golden.id],
+  );
+  assert.equal(syncCompatibility.MAX_SYNC_ATTACHMENT_BYTES, 6242304);
+  const vaultDir = tempVault("barrel");
+  const log = new syncCompatibility.SyncChangeLog(vaultDir, "barrel-passphrase");
+  const appended = log.append(golden.body.deviceId, golden.body.mutation, golden.body.createdAt);
+  assert.equal(log.verify().heads[0], appended.id);
+  log.close();
+  const vault = new syncCompatibility.SyncedDocumentVault(vaultDir, "barrel-passphrase", golden.body.deviceId);
+  const note = vault.put({ path: "Fixture.md", body: "fixture" });
+  assert.equal(vault.changeLog.resolve("note", note.id).winner?.mutation.revision, 1);
+  vault.lock();
+  fs.rmSync(vaultDir, { recursive: true, force: true });
 });
 
 test("v1 protocol rejects deterministic adversarial inputs", () => {
   const envelope = sealSyncChange(golden.body, key);
-  assert.throws(() => openSyncChange(envelope, Buffer.alloc(32, 7)), new RegExp(adversarial.errorPatterns.wrongKey, "u"));
-  assert.throws(
-    () => openSyncChange({ ...envelope, payload: { ...envelope.payload, authTag: `${envelope.payload.authTag.startsWith("A") ? "B" : "A"}${envelope.payload.authTag.slice(1)}` } }, key),
+  throwsError(() => openSyncChange(envelope, Buffer.alloc(32, 7)), new RegExp(adversarial.errorPatterns.wrongKey, "u"));
+  throwsError(
+    () =>
+      openSyncChange(
+        {
+          ...envelope,
+          payload: {
+            ...envelope.payload,
+            authTag: `${envelope.payload.authTag.startsWith("A") ? "B" : "A"}${envelope.payload.authTag.slice(1)}`,
+          },
+        },
+        key,
+      ),
     new RegExp(adversarial.errorPatterns.tamper, "u"),
   );
-  assert.throws(() => openSyncChange({ ...envelope, id: replacementId(envelope.id) }, key), /authenticate|does not match/u);
-  assert.throws(
-    () => openSyncChange({ ...envelope, payload: { ...envelope.payload, iv: adversarial.malformedBase64[0] } }, key),
-    /malformed nonce/u,
+  throwsError(
+    () => openSyncChange({ ...envelope, id: replacementId(envelope.id) }, key),
+    /authenticate|does not match/u,
+  );
+  for (const value of adversarial.malformedBase64)
+    throwsError(
+      () => openSyncChange({ ...envelope, payload: { ...envelope.payload, iv: value } }, key),
+      /malformed nonce/u,
+    );
+  const envelopeKey = crypto
+    .createHmac("sha256", key)
+    .update("secondbrain-vault:sync-change-key:v1")
+    .update("\0")
+    .update(envelope.id)
+    .digest();
+  const noncanonical = {
+    ...envelope,
+    payload: encryptDocument(`${golden.canonical}\n`, envelopeKey, `secondbrain-vault:sync-change:v1:${envelope.id}`),
+  };
+  envelopeKey.fill(0);
+  throwsError(
+    () => openSyncChange(noncanonical, key),
+    new RegExp(adversarial.errorPatterns.noncanonicalPlaintext, "u"),
   );
   for (const unsafeKey of adversarial.unsafeKeys) {
-    assert.throws(() => canonicalSyncJson(JSON.parse(`{\"${unsafeKey}\":1}`)), new RegExp(adversarial.errorPatterns.unsafeKey, "u"));
+    throwsError(
+      () => canonicalSyncJson(JSON.parse(`{\"${unsafeKey}\":1}`)),
+      new RegExp(adversarial.errorPatterns.unsafeKey, "u"),
+    );
   }
-  assert.throws(() => canonicalSyncJson("\ud800"), new RegExp(adversarial.errorPatterns.surrogate, "u"));
+  throwsError(() => canonicalSyncJson("\ud800"), new RegExp(adversarial.errorPatterns.surrogate, "u"));
   for (const id of adversarial.invalidChangeIds) {
-    assert.throws(() => openSyncChange({ ...envelope, id }, key), new RegExp(adversarial.errorPatterns.malformedId, "u"));
+    throwsError(() => openSyncChange({ ...envelope, id }, key), new RegExp(adversarial.errorPatterns.malformedId, "u"));
   }
 });
 
 test("v1 protocol freezes admission limits and graph errors", () => {
-  const parents = Array.from({ length: adversarial.limitBoundaries.parentsAccepted }, (_, index) => index.toString(16).padStart(64, "0"));
+  const parents = Array.from({ length: adversarial.limitBoundaries.parentsAccepted }, (_, index) =>
+    index.toString(16).padStart(64, "0"),
+  );
   const accepted = change({ ...golden.body, parents });
   assert.equal(validateSyncChangeBody(accepted).parents.length, parents.length);
   assert.throws(
     () => validateSyncChangeBody(change({ ...golden.body, parents: [...parents, "f".repeat(64)] })),
     /at most 256 parents/u,
   );
-  assert.equal(validateSyncChangeBody(change({ ...golden.body, mutation: { ...golden.body.mutation, objectId: `a${"x".repeat(159)}` } })).mutation.objectId.length, 160);
+  throwsError(
+    () => validateSyncChangeBody(change({ ...golden.body, parents: ["a".repeat(64), "a".repeat(64)] })),
+    new RegExp(adversarial.errorPatterns.duplicateParents, "u"),
+  );
+  assert.equal(
+    validateSyncChangeBody(
+      change({ ...golden.body, mutation: { ...golden.body.mutation, objectId: `a${"x".repeat(159)}` } }),
+    ).mutation.objectId.length,
+    160,
+  );
   assert.throws(
-    () => validateSyncChangeBody(change({ ...golden.body, mutation: { ...golden.body.mutation, objectId: `a${"x".repeat(160)}` } })),
+    () =>
+      validateSyncChangeBody(
+        change({ ...golden.body, mutation: { ...golden.body.mutation, objectId: `a${"x".repeat(160)}` } }),
+      ),
     /Invalid sync object ID/u,
   );
   const base = { id: "a".repeat(64), ...golden.body };
-  const child = { id: "b".repeat(64), ...change({ ...golden.body, sequence: 2, previousDeviceChange: base.id, parents: [base.id], mutation: { ...golden.body.mutation, baseRevision: 1, revision: 2 } }) };
+  const child = {
+    id: "b".repeat(64),
+    ...change({
+      ...golden.body,
+      sequence: 2,
+      previousDeviceChange: base.id,
+      parents: [base.id],
+      mutation: { ...golden.body.mutation, baseRevision: 1, revision: 2 },
+    }),
+  };
   assert.deepEqual(verifySyncChanges([base, child]), { changes: 2, devices: 1, heads: [child.id] });
-  assert.throws(() => verifySyncChanges([{ ...base, parents: ["c".repeat(64)] }]), new RegExp(adversarial.errorPatterns.missingParent, "u"));
+  assert.throws(
+    () => verifySyncChanges([{ ...base, parents: ["c".repeat(64)] }]),
+    new RegExp(adversarial.errorPatterns.missingParent, "u"),
+  );
   assert.throws(() => verifySyncChanges([{ ...base, parents: [base.id] }]), /cannot parent itself/u);
-  assert.throws(() => verifySyncChanges([base, child, { ...child, id: "c".repeat(64) }]), new RegExp(adversarial.errorPatterns.fork, "u"));
-  assert.throws(() => verifySyncChanges([{ ...base, parents: [child.id] }, child]), new RegExp(adversarial.errorPatterns.cycle, "u"));
-  assert.throws(() => verifySyncChanges([base, { ...child, mutation: { ...child.mutation, baseRevision: 2, revision: 3 } }]), new RegExp(adversarial.errorPatterns.revisionJump, "u"));
+  assert.throws(
+    () => verifySyncChanges([base, child, { ...child, id: "c".repeat(64) }]),
+    new RegExp(adversarial.errorPatterns.fork, "u"),
+  );
+  assert.throws(
+    () => verifySyncChanges([{ ...base, parents: [child.id] }, child]),
+    new RegExp(adversarial.errorPatterns.cycle, "u"),
+  );
+  assert.throws(
+    () => verifySyncChanges([base, { ...child, mutation: { ...child.mutation, baseRevision: 2, revision: 3 } }]),
+    new RegExp(adversarial.errorPatterns.revisionJump, "u"),
+  );
 });

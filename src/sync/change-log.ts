@@ -2,7 +2,13 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { decryptDocument, encryptDocument, openDocumentKey, type DocumentKeySession, type DocumentPayload } from "../document-crypto.js";
+import {
+  decryptDocument,
+  encryptDocument,
+  openDocumentKey,
+  type DocumentKeySession,
+  type DocumentPayload,
+} from "../document-crypto.js";
 import { assertNoSymlinkComponents, assertNotSymlink, writeFileAtomic } from "../fs-safe.js";
 import { resolveInside } from "../safety.js";
 import { withVaultLock } from "../vault-lock.js";
@@ -73,7 +79,8 @@ function validateChangeSet(changes: readonly SyncChange[]): SyncVerification {
     }
     if (change.sequence > 1) {
       const previous = byId.get(change.previousDeviceChange!);
-      if (!previous || previous.deviceId !== change.deviceId || previous.sequence !== change.sequence - 1) throw new Error(`Broken device chain before ${change.id}.`);
+      if (!previous || previous.deviceId !== change.deviceId || previous.sequence !== change.sequence - 1)
+        throw new Error(`Broken device chain before ${change.id}.`);
     }
   }
   const visiting = new Set<string>();
@@ -101,8 +108,10 @@ function validateChangeSet(changes: readonly SyncChange[]): SyncVerification {
   for (const objectChanges of grouped.values()) {
     for (const change of objectChanges) {
       const ancestors = objectChanges.filter((candidate) => isAncestor(candidate.id, change.id));
-      const expectedBase = ancestors.length === 0 ? null : Math.max(...ancestors.map((candidate) => candidate.mutation.revision));
-      if (change.mutation.baseRevision !== expectedBase) throw new Error(`Sync change ${change.id} does not advance the causal object revision.`);
+      const expectedBase =
+        ancestors.length === 0 ? null : Math.max(...ancestors.map((candidate) => candidate.mutation.revision));
+      if (change.mutation.baseRevision !== expectedBase)
+        throw new Error(`Sync change ${change.id} does not advance the causal object revision.`);
     }
   }
   const parentIds = new Set(changes.flatMap((change) => change.parents));
@@ -115,9 +124,15 @@ export function verifySyncChanges(changes: readonly SyncChange[]): SyncVerificat
   return validateChangeSet(changes);
 }
 
-export function resolveSyncObject(changes: readonly SyncChange[], objectType: SyncObjectType, objectId: string): SyncResolution {
+export function resolveSyncObject(
+  changes: readonly SyncChange[],
+  objectType: SyncObjectType,
+  objectId: string,
+): SyncResolution {
   validateChangeSet(changes);
-  const relevant = changes.filter((change) => change.mutation.objectType === objectType && change.mutation.objectId === objectId);
+  const relevant = changes.filter(
+    (change) => change.mutation.objectType === objectType && change.mutation.objectId === objectId,
+  );
   if (relevant.length === 0) return { objectType, objectId, status: "missing", conflicts: [], heads: [] };
   const byId = new Map(changes.map((change) => [change.id, change]));
   const isAncestor = (ancestor: string, descendant: string): boolean => {
@@ -132,14 +147,23 @@ export function resolveSyncObject(changes: readonly SyncChange[], objectType: Sy
     }
     return false;
   };
-  const heads = relevant.filter((candidate) => !relevant.some((other) => candidate.id !== other.id && isAncestor(candidate.id, other.id)));
+  const heads = relevant.filter(
+    (candidate) => !relevant.some((other) => candidate.id !== other.id && isAncestor(candidate.id, other.id)),
+  );
   heads.sort((left, right) => {
     const revision = right.mutation.revision - left.mutation.revision;
     if (revision !== 0) return revision;
     if (left.mutation.operation !== right.mutation.operation) return left.mutation.operation === "delete" ? -1 : 1;
     return left.id === right.id ? 0 : left.id < right.id ? 1 : -1;
   });
-  return { objectType, objectId, status: heads.length === 1 ? "clean" : "conflict", winner: heads[0], conflicts: heads.slice(1), heads: heads.map((change) => change.id).sort() };
+  return {
+    objectType,
+    objectId,
+    status: heads.length === 1 ? "clean" : "conflict",
+    winner: heads[0],
+    conflicts: heads.slice(1),
+    heads: heads.map((change) => change.id).sort(),
+  };
 }
 
 function changeFilename(id: string): string {
@@ -153,7 +177,10 @@ export class SyncChangeLog {
   private readonly appliedPath: string;
   private closed = false;
 
-  constructor(private readonly vaultDir: string, passphrase: string) {
+  constructor(
+    private readonly vaultDir: string,
+    passphrase: string,
+  ) {
     this.session = openDocumentKey(vaultDir, passphrase);
     this.changesDir = resolveInside(this.session.rootDir, path.join("sync", "changes"));
     this.appliedPath = resolveInside(this.session.rootDir, path.join("sync", "applied.enc"));
@@ -178,9 +205,18 @@ export class SyncChangeLog {
     assertNotSymlink(this.appliedPath);
     const payload = JSON.parse(fs.readFileSync(this.appliedPath, "utf8")) as DocumentPayload;
     const parsed = JSON.parse(decryptDocument(payload, this.key(), APPLIED_AAD)) as SyncAppliedState;
-    if (parsed?.version !== 1 || !parsed.objects || typeof parsed.objects !== "object") throw new Error("Unsupported or invalid sync application state.");
+    if (parsed?.version !== 1 || !parsed.objects || typeof parsed.objects !== "object")
+      throw new Error("Unsupported or invalid sync application state.");
     for (const [key, entry] of Object.entries(parsed.objects)) {
-      if (!key.includes("\0") || !entry || !CHANGE_ID.test(entry.changeId) || !Number.isSafeInteger(entry.revision) || entry.revision < 1 || (entry.operation !== "put" && entry.operation !== "delete")) throw new Error("Unsupported or invalid sync application state.");
+      if (
+        !key.includes("\0") ||
+        !entry ||
+        !CHANGE_ID.test(entry.changeId) ||
+        !Number.isSafeInteger(entry.revision) ||
+        entry.revision < 1 ||
+        (entry.operation !== "put" && entry.operation !== "delete")
+      )
+        throw new Error("Unsupported or invalid sync application state.");
     }
     return parsed;
   }
@@ -199,23 +235,31 @@ export class SyncChangeLog {
     const known = this.changes().find((candidate) => candidate.id === change.id);
     if (!known) throw new Error(`Cannot mark an unknown sync change as applied: ${change.id}`);
     const state = this.readAppliedState();
-    state.objects[objectKey(known)] = { changeId: known.id, revision: known.mutation.revision, operation: known.mutation.operation };
+    state.objects[objectKey(known)] = {
+      changeId: known.id,
+      revision: known.mutation.revision,
+      operation: known.mutation.operation,
+    };
     this.saveAppliedState(state);
   }
 
   private readEnvelopes(): EncryptedSyncChange[] {
     this.key();
     assertNoSymlinkComponents(this.session.rootDir, this.changesDir);
-    return fs.readdirSync(this.changesDir).filter((name) => name.endsWith(".change.enc")).sort().map((name) => {
-      const id = name.slice(0, -".change.enc".length);
-      if (!CHANGE_ID.test(id)) throw new Error(`Invalid sync change filename: ${name}`);
-      const filePath = resolveInside(this.changesDir, name);
-      assertNotSymlink(filePath);
-      if (fs.statSync(filePath).size > MAX_ENVELOPE_BYTES) throw new Error(`Sync envelope is too large: ${id}`);
-      const envelope = validateEncryptedSyncChange(JSON.parse(fs.readFileSync(filePath, "utf8")));
-      if (envelope.id !== id) throw new Error(`Sync change filename does not match its envelope: ${id}`);
-      return envelope;
-    });
+    return fs
+      .readdirSync(this.changesDir)
+      .filter((name) => name.endsWith(".change.enc"))
+      .sort()
+      .map((name) => {
+        const id = name.slice(0, -".change.enc".length);
+        if (!CHANGE_ID.test(id)) throw new Error(`Invalid sync change filename: ${name}`);
+        const filePath = resolveInside(this.changesDir, name);
+        assertNotSymlink(filePath);
+        if (fs.statSync(filePath).size > MAX_ENVELOPE_BYTES) throw new Error(`Sync envelope is too large: ${id}`);
+        const envelope = validateEncryptedSyncChange(JSON.parse(fs.readFileSync(filePath, "utf8")));
+        if (envelope.id !== id) throw new Error(`Sync change filename does not match its envelope: ${id}`);
+        return envelope;
+      });
   }
 
   envelopes(): EncryptedSyncChange[] {
@@ -227,7 +271,9 @@ export class SyncChangeLog {
   changes(): SyncChange[] {
     const changes = this.readEnvelopes().map((envelope) => openSyncChange(envelope, this.key()));
     validateChangeSet(changes);
-    return changes.sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+    return changes.sort(
+      (left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
+    );
   }
 
   verify(): SyncVerification {
@@ -266,10 +312,20 @@ export class SyncChangeLog {
     return withVaultLock(this.vaultDir, () => {
       const current = this.changes();
       const verification = validateChangeSet(current);
-      const deviceChanges = current.filter((change) => change.deviceId === deviceId).sort((left, right) => left.sequence - right.sequence);
+      const deviceChanges = current
+        .filter((change) => change.deviceId === deviceId)
+        .sort((left, right) => left.sequence - right.sequence);
       const previous = deviceChanges.at(-1);
       const parents = [...new Set([...verification.heads, ...(previous ? [previous.id] : [])])].sort();
-      const body = validateSyncChangeBody({ version: 1, deviceId, sequence: (previous?.sequence ?? 0) + 1, previousDeviceChange: previous?.id ?? null, parents, createdAt, mutation });
+      const body = validateSyncChangeBody({
+        version: 1,
+        deviceId,
+        sequence: (previous?.sequence ?? 0) + 1,
+        previousDeviceChange: previous?.id ?? null,
+        parents,
+        createdAt,
+        mutation,
+      });
       const envelope = sealSyncChange(body, this.key());
       const change = openSyncChange(envelope, this.key());
       validateChangeSet([...current, change]);
