@@ -18,6 +18,7 @@ use sha2::{Digest, Sha256};
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 use std::{
+    cmp::Reverse,
     collections::{HashMap, HashSet},
     fs::{self, OpenOptions},
     io::Write,
@@ -3182,7 +3183,7 @@ fn list_note_revisions(
             current: true,
         });
     }
-    revisions.sort_by(|left, right| right.revision.cmp(&left.revision));
+    revisions.sort_by_key(|revision| Reverse(revision.revision));
     Ok(revisions)
 }
 
