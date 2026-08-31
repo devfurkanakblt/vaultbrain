@@ -31,7 +31,7 @@
     "prepack": "npm run build",
     "dev": "tsx src/cli.ts",
     "start": "node dist/cli.js",
-    "test": "npm run build && node --test test/core.test.mjs test/documents.test.mjs test/workflows.test.mjs test/durability.test.mjs test/canvas.test.mjs test/grants.test.mjs test/plugins.test.mjs test/obsidian-import.test.mjs test/semantic.test.mjs test/sync.test.mjs test/sync-protocol.test.mjs",
+    "test": "npm run build && node --test test/core.test.mjs test/documents.test.mjs test/workflows.test.mjs test/durability.test.mjs test/canvas.test.mjs test/grants.test.mjs test/plugins.test.mjs test/obsidian-import.test.mjs test/semantic.test.mjs test/sync.test.mjs test/sync-protocol.test.mjs test/sync-transaction.test.mjs",
     "benchmark": "npm run build && node scripts/benchmark.mjs --notes 1000 --assert",
     "benchmark:10k": "npm run build && node scripts/benchmark.mjs --notes 10000 --assert",
     "benchmark:100k": "npm run build && node scripts/benchmark.mjs --notes 100000 --assert",

@@ -243,6 +243,66 @@ export class SyncChangeLog {
     this.saveAppliedState(state);
   }
 
+  /** @internal Pre-plan a stable encrypted local chain without installing it. */
+  prepareLocalChanges(
+    deviceId: string,
+    mutations: readonly SyncMutation[],
+    createdAt = new Date().toISOString(),
+  ): EncryptedSyncChange[] {
+    return withVaultLock(this.vaultDir, () => {
+      let current = this.changes();
+      const prepared: EncryptedSyncChange[] = [];
+      for (const [mutationIndex, mutation] of mutations.entries()) {
+        const verification = validateChangeSet(current);
+        const deviceChanges = current
+          .filter((change) => change.deviceId === deviceId)
+          .sort((left, right) => left.sequence - right.sequence);
+        const previous = deviceChanges.at(-1);
+        const parents = [...new Set([...verification.heads, ...(previous ? [previous.id] : [])])].sort();
+        const body = validateSyncChangeBody({
+          version: 1,
+          deviceId,
+          sequence: (previous?.sequence ?? 0) + 1,
+          previousDeviceChange: previous?.id ?? null,
+          parents,
+          createdAt: new Date(Date.parse(createdAt) + mutationIndex).toISOString(),
+          mutation,
+        });
+        const envelope = sealSyncChange(body, this.key());
+        const change = openSyncChange(envelope, this.key());
+        validateChangeSet([...current, change]);
+        prepared.push(envelope);
+        current = [...current, change];
+      }
+      return structuredClone(prepared);
+    });
+  }
+
+  /** @internal Idempotently install a chain that was frozen in a pending intent. */
+  installPreparedLocalChanges(envelopes: readonly EncryptedSyncChange[]): void {
+    this.import(envelopes);
+  }
+
+  /** @internal Atomically move every affected object cursor to the prepared chain's final member. */
+  markPreparedLocalChangesApplied(envelopes: readonly EncryptedSyncChange[]): void {
+    withVaultLock(this.vaultDir, () => {
+      const prepared = envelopes.map((envelope) => openSyncChange(envelope, this.key()));
+      const known = new Map(this.changes().map((change) => [change.id, change]));
+      for (const change of prepared) {
+        if (!known.has(change.id)) throw new Error(`Cannot mark an unknown sync change as applied: ${change.id}`);
+      }
+      const state = this.readAppliedState();
+      for (const change of prepared) {
+        state.objects[objectKey(change)] = {
+          changeId: change.id,
+          revision: change.mutation.revision,
+          operation: change.mutation.operation,
+        };
+      }
+      this.saveAppliedState(state);
+    });
+  }
+
   private readEnvelopes(): EncryptedSyncChange[] {
     this.key();
     assertNoSymlinkComponents(this.session.rootDir, this.changesDir);
