@@ -18,6 +18,7 @@ const sampleNote: NoteDocument = {
 };
 
 const bridgeMock = vi.hoisted(() => ({
+  pickVaultDirectory: vi.fn(),
   unlock: vi.fn(),
   lock: vi.fn(),
   listNotes: vi.fn(),
@@ -212,6 +213,23 @@ describe("desktop workspace", () => {
     expect(bridgeMock.unlock).toHaveBeenCalledWith("./vault/personal", "safe passphrase");
     expect(screen.getByRole("navigation", { name: "Vault notes" })).toBeInTheDocument();
     expect(screen.getByText("Encrypted & saved")).toBeInTheDocument();
+  });
+
+  it("fills the vault path from the native folder chooser", async () => {
+    bridgeMock.pickVaultDirectory.mockResolvedValue("D:/Vaults/Field notes");
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose a vault folder" }));
+    await waitFor(() => expect(screen.getByLabelText("Vault location")).toHaveValue("D:/Vaults/Field notes"));
+  });
+
+  it("leaves the vault path alone when the folder chooser is dismissed", async () => {
+    bridgeMock.pickVaultDirectory.mockResolvedValue(null);
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose a vault folder" }));
+    await waitFor(() => expect(bridgeMock.pickVaultDirectory).toHaveBeenCalled());
+    expect(screen.getByLabelText("Vault location")).toHaveValue("./vault/personal");
   });
 
   it("remembers unlocked vault paths and flags one this device has not opened", async () => {

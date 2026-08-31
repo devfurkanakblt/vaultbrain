@@ -136,6 +136,7 @@ function LockScreen({ notice, onUnlock }: { notice: string; onUnlock: (path: str
   const [path, setPath] = useState(() => history[0] ?? DEFAULT_VAULT_PATH);
   const [passphrase, setPassphrase] = useState("");
   const [busy, setBusy] = useState(false);
+  const [choosing, setChoosing] = useState(false);
   const [error, setError] = useState("");
   const target = path.trim();
   // The core creates a vault at any path it cannot open, so a typo reads as an
@@ -145,6 +146,19 @@ function LockScreen({ notice, onUnlock }: { notice: string; onUnlock: (path: str
   // The field already shows where it points, so the list only earns its space
   // by offering somewhere else to go.
   const elsewhere = history.filter((entry) => entry !== target);
+
+  async function chooseFolder() {
+    setChoosing(true);
+    setError("");
+    try {
+      const picked = await vaultBridge.pickVaultDirectory();
+      if (picked) setPath(picked);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setChoosing(false);
+    }
+  }
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -175,17 +189,29 @@ function LockScreen({ notice, onUnlock }: { notice: string; onUnlock: (path: str
         <p className="unlock-copy">A fast workspace that stays yours. Unlocking happens on this device; the key never enters the interface.</p>
         {notice && <p className="lock-notice" role="status"><ShieldCheck size={14} />{notice}</p>}
         <form onSubmit={submit}>
-          <label>
-            <span>Vault location</span>
-            <input
-              value={path}
-              onChange={(event) => setPath(event.target.value)}
-              spellCheck={false}
-              autoCapitalize="off"
-              className={unfamiliar ? "is-flagged" : undefined}
-              aria-describedby={unfamiliar ? "vault-unfamiliar" : undefined}
-            />
-          </label>
+          <div className="field-with-action">
+            <label>
+              <span>Vault location</span>
+              <input
+                value={path}
+                onChange={(event) => setPath(event.target.value)}
+                spellCheck={false}
+                autoCapitalize="off"
+                className={unfamiliar ? "is-flagged" : undefined}
+                aria-describedby={unfamiliar ? "vault-unfamiliar" : undefined}
+              />
+            </label>
+            <button
+              type="button"
+              className="input-action"
+              onClick={chooseFolder}
+              disabled={choosing}
+              title="Choose a folder on this computer"
+              aria-label="Choose a vault folder"
+            >
+              {choosing ? <CircleDot className="spin" size={15} /> : <Folder size={15} />}
+            </button>
+          </div>
           <div className={`vault-hint-slot ${unfamiliar ? "is-open" : ""}`} aria-hidden={!unfamiliar}>
             <span className="vault-hint-link" aria-hidden="true" />
             <div className="vault-hint-clip">
