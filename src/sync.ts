@@ -20,13 +20,13 @@ import {
 } from "./sync/protocol.js";
 import {
   asSyncJson,
-  assertSyncSnapshotSize,
   attachmentSnapshot,
   canvasSnapshot,
   noteSnapshot,
   parseAttachmentSnapshot,
   parseCanvasSnapshot,
   parseNoteSnapshot,
+  prevalidateLocalCaptureSnapshot,
 } from "./sync/snapshots.js";
 import {
   SyncLocalTransaction,
@@ -234,8 +234,7 @@ export class SyncedDocumentVault extends DocumentVault {
   }
 
   private noteOperation(document: NoteDocument, before: NoteDocument | undefined): SyncLocalStorageOperation {
-    const targetValue = asSyncJson(noteSnapshot(document));
-    assertSyncSnapshotSize(targetValue, "Note snapshot");
+    const targetValue = prevalidateLocalCaptureSnapshot(noteSnapshot(document), "Note snapshot");
     return {
       objectType: "note",
       objectId: document.id,
@@ -243,14 +242,13 @@ export class SyncedDocumentVault extends DocumentVault {
       input: targetValue,
       beforeStorageRevision: before?.revision ?? null,
       targetStorageRevision: document.revision,
-      beforeValue: before ? asSyncJson(noteSnapshot(before)) : null,
+      beforeValue: before ? prevalidateLocalCaptureSnapshot(noteSnapshot(before), "Note snapshot") : null,
       targetValue,
     };
   }
 
   private canvasOperation(document: CanvasDocument, before: CanvasDocument | undefined): SyncLocalStorageOperation {
-    const targetValue = asSyncJson(canvasSnapshot(document));
-    assertSyncSnapshotSize(targetValue, "Canvas snapshot");
+    const targetValue = prevalidateLocalCaptureSnapshot(canvasSnapshot(document), "Canvas snapshot");
     return {
       objectType: "canvas",
       objectId: document.id,
@@ -258,7 +256,7 @@ export class SyncedDocumentVault extends DocumentVault {
       input: targetValue,
       beforeStorageRevision: before?.revision ?? null,
       targetStorageRevision: document.revision,
-      beforeValue: before ? asSyncJson(canvasSnapshot(before)) : null,
+      beforeValue: before ? prevalidateLocalCaptureSnapshot(canvasSnapshot(before), "Canvas snapshot") : null,
       targetValue,
     };
   }
@@ -407,7 +405,7 @@ export class SyncedDocumentVault extends DocumentVault {
     const deviceId = this.localDeviceId();
     return withVaultLock(this.syncVaultDir, () => {
       const current = super.get(reference);
-      const beforeValue = asSyncJson(noteSnapshot(current));
+      const beforeValue = prevalidateLocalCaptureSnapshot(noteSnapshot(current), "Note snapshot");
       const operation: SyncLocalStorageOperation = {
         objectType: "note",
         objectId: current.id,
@@ -437,7 +435,7 @@ export class SyncedDocumentVault extends DocumentVault {
     const deviceId = this.localDeviceId();
     return withVaultLock(this.syncVaultDir, () => {
       const current = super.getCanvas(reference);
-      const beforeValue = asSyncJson(canvasSnapshot(current));
+      const beforeValue = prevalidateLocalCaptureSnapshot(canvasSnapshot(current), "Canvas snapshot");
       const operation: SyncLocalStorageOperation = {
         objectType: "canvas",
         objectId: current.id,
@@ -463,8 +461,10 @@ export class SyncedDocumentVault extends DocumentVault {
     return withVaultLock(this.syncVaultDir, () => {
       const prepared = this.prepareAttachmentPut(data, filename, mime);
       const before = prepared.existed ? super.getAttachment(prepared.info.id) : undefined;
-      const targetValue = asSyncJson(attachmentSnapshot(prepared.data, prepared.info));
-      assertSyncSnapshotSize(targetValue, "Attachment snapshot");
+      const targetValue = prevalidateLocalCaptureSnapshot(
+        attachmentSnapshot(prepared.data, prepared.info),
+        "Attachment snapshot",
+      );
       const resolution = this.changeLog.resolve("attachment", prepared.info.id);
       if (prepared.existed && resolution.status === "clean" && resolution.winner?.mutation.operation === "put") {
         return prepared.info;
@@ -476,7 +476,9 @@ export class SyncedDocumentVault extends DocumentVault {
         input: targetValue,
         beforeStorageRevision: null,
         targetStorageRevision: null,
-        beforeValue: before ? asSyncJson(attachmentSnapshot(before.data, before.info)) : null,
+        beforeValue: before
+          ? prevalidateLocalCaptureSnapshot(attachmentSnapshot(before.data, before.info), "Attachment snapshot")
+          : null,
         targetValue,
       };
       this.runLocalTransaction(deviceId, [operation]);
@@ -488,8 +490,10 @@ export class SyncedDocumentVault extends DocumentVault {
     const deviceId = this.localDeviceId();
     return withVaultLock(this.syncVaultDir, () => {
       const attachment = super.getAttachment(id);
-      const beforeValue = asSyncJson(attachmentSnapshot(attachment.data, attachment.info));
-      assertSyncSnapshotSize(beforeValue, "Attachment snapshot");
+      const beforeValue = prevalidateLocalCaptureSnapshot(
+        attachmentSnapshot(attachment.data, attachment.info),
+        "Attachment snapshot",
+      );
       const operation: SyncLocalStorageOperation = {
         objectType: "attachment",
         objectId: id,

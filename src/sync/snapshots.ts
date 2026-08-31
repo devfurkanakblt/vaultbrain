@@ -38,6 +38,17 @@ export function assertSyncSnapshotSize(value: unknown, label: string): void {
   if (bytes > MAX_CHANGE_BYTES - 64 * 1024) throw new Error(`${label} is too large for an 8 MiB sync change.`);
 }
 
+/**
+ * Normalize and size-check a snapshot before local capture starts its
+ * transaction. Keeping this composition here makes the capture schema
+ * boundary explicit while leaving remote application on the protocol parsers.
+ */
+export function prevalidateLocalCaptureSnapshot(value: unknown, label: string): SyncJson {
+  const snapshot = asSyncJson(value);
+  assertSyncSnapshotSize(snapshot, label);
+  return snapshot;
+}
+
 export function noteSnapshot(note: NoteDocument): NoteSyncSnapshot {
   const snapshot: NoteSyncSnapshot = {
     path: note.path,
