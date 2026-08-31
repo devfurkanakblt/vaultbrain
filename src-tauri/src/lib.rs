@@ -27,11 +27,13 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::State;
+use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
 type HmacSha256 = Hmac<Sha256>;
 const INDEX_AAD: &str = "secondbrain-vault:document-index:v1";
+const DERIVED_LAYOUT: u8 = 5;
 const KEY_CHECK_CONTEXT: &str = "secondbrain-vault:document-key:v1";
 const MAX_NOTE_BYTES: usize = 25 * 1024 * 1024;
 const SAVED_VIEWS_AAD: &str = "secondbrain-vault:saved-views:v1";
@@ -366,6 +368,8 @@ struct Heading {
 #[serde(rename_all = "camelCase")]
 struct DocumentIndex {
     version: u8,
+    #[serde(default)]
+    derived: u8,
     generated_at: String,
     #[serde(default)]
     notes: HashMap<String, IndexedNote>,
@@ -377,21 +381,40 @@ struct DocumentIndex {
     unresolved: HashMap<String, Vec<WikiLink>>,
     #[serde(default)]
     link_sources: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    path_owners: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    name_owners: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    basename_owners: HashMap<String, Vec<String>>,
     #[serde(flatten)]
     extra: serde_json::Map<String, Value>,
 }
 
 impl DocumentIndex {
     fn empty() -> Self {
+        let mut extra = serde_json::Map::new();
+        for field in [
+            "canvases",
+            "canvasRefs",
+            "canvasAttachmentRefs",
+            "canvasPathOwners",
+        ] {
+            extra.insert(field.into(), Value::Object(serde_json::Map::new()));
+        }
         Self {
             version: 2,
+            derived: DERIVED_LAYOUT,
             generated_at: now(),
             notes: HashMap::new(),
             backlinks: HashMap::new(),
             resolved_links: HashMap::new(),
             unresolved: HashMap::new(),
             link_sources: HashMap::new(),
-            extra: serde_json::Map::new(),
+            path_owners: HashMap::new(),
+            name_owners: HashMap::new(),
+            basename_owners: HashMap::new(),
+            extra,
         }
     }
 }
@@ -915,7 +938,7 @@ fn read_index(session: &VaultSession) -> Result<DocumentIndex, String> {
     let mut index: DocumentIndex =
         serde_json::from_slice(&decrypt(&payload, session.key.as_ref(), INDEX_AAD)?)
             .map_err(|error| error.to_string())?;
-    if index.version != 2 {
+    if index.version != 2 || index.derived != DERIVED_LAYOUT {
         index.version = 2;
         rebuild_derived(&mut index);
     }
@@ -1001,6 +1024,7 @@ fn recover_pending_journal(session: &mut VaultSession) -> Result<(), String> {
         }
     }
     rebuild_derived(&mut session.index);
+    recover_canvas_index(session)?;
     save_index(session)?;
     end_journal(session)
 }
@@ -1029,6 +1053,9 @@ fn recover_plugin_index(session: &mut VaultSession) -> Result<(), String> {
 
 fn refresh_session_index(session: &mut VaultSession) -> Result<(), String> {
     session.index = read_index(session)?;
+    if session.index.derived != DERIVED_LAYOUT {
+        recover_canvas_index(session)?;
+    }
     recover_pending_journal(session)
 }
 
@@ -1043,13 +1070,8 @@ fn with_vault_write<T>(
 
 fn save_index(session: &mut VaultSession) -> Result<(), String> {
     session.index.version = 2;
+    session.index.derived = DERIVED_LAYOUT;
     session.index.generated_at = now();
-    // The TypeScript core rebuilds its O(1) lookup maps whenever `derived` is
-    // absent. Rust does not maintain those maps yet, so never preserve a stale
-    // marker after a desktop write. Unknown canvas fields stay round-trippable.
-    for field in ["derived", "pathOwners", "nameOwners", "basenameOwners"] {
-        session.index.extra.remove(field);
-    }
     let payload = encrypt(
         &serde_json::to_vec(&session.index).map_err(|error| error.to_string())?,
         session.key.as_ref(),
@@ -1082,13 +1104,17 @@ fn archive_note(session: &VaultSession, note: &NoteDocument) -> Result<(), Strin
 }
 
 fn analyze_markdown(body: &str) -> Result<(Vec<WikiLink>, Vec<Heading>), String> {
+    let fenced_code = Regex::new(r"(?s)```.*?```|~~~.*?~~~").map_err(|error| error.to_string())?;
+    let inline_code = Regex::new(r"`[^`\n]*`").map_err(|error| error.to_string())?;
+    let visible = fenced_code.replace_all(body, " ");
+    let visible = inline_code.replace_all(&visible, " ");
     let link_re =
         Regex::new(r"(!)?\[\[([^\]|#^]+)(?:#([^\]|^]+))?(?:\^([^\]|]+))?(?:\|([^\]]+))?\]\]")
             .map_err(|error| error.to_string())?;
     let heading_re =
         Regex::new(r"(?m)^(#{1,6})\s+(.+?)\s*#*$").map_err(|error| error.to_string())?;
     let links = link_re
-        .captures_iter(body)
+        .captures_iter(&visible)
         .map(|capture| WikiLink {
             raw: capture
                 .get(0)
@@ -1113,7 +1139,7 @@ fn analyze_markdown(body: &str) -> Result<(Vec<WikiLink>, Vec<Heading>), String>
         })
         .collect();
     let headings = heading_re
-        .captures_iter(body)
+        .captures_iter(&visible)
         .map(|capture| {
             let text = capture
                 .get(2)
@@ -1125,14 +1151,15 @@ fn analyze_markdown(body: &str) -> Result<(Vec<WikiLink>, Vec<Heading>), String>
                     .get(1)
                     .map(|value| value.as_str().len())
                     .unwrap_or(1),
-                slug: text
-                    .to_lowercase()
+                slug: normalized_text(&text)
                     .chars()
-                    .map(|character| {
+                    .filter_map(|character| {
                         if character.is_alphanumeric() {
-                            character
+                            Some(character)
+                        } else if character.is_whitespace() || character == '-' {
+                            Some('-')
                         } else {
-                            '-'
+                            None
                         }
                     })
                     .collect::<String>()
@@ -1147,34 +1174,53 @@ fn analyze_markdown(body: &str) -> Result<(Vec<WikiLink>, Vec<Heading>), String>
     Ok((links, headings))
 }
 
+fn normalized_text(value: &str) -> String {
+    value.nfkc().flat_map(char::to_lowercase).collect()
+}
+
+fn without_markdown_extension(value: &str) -> &str {
+    if value
+        .get(value.len().saturating_sub(3)..)
+        .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".md"))
+    {
+        &value[..value.len() - 3]
+    } else {
+        value
+    }
+}
+
 fn normalized(value: &str) -> String {
-    value.trim().trim_end_matches(".md").to_lowercase()
+    let replaced = value.trim().replace('\\', "/");
+    normalized_text(without_markdown_extension(&replaced))
+}
+
+fn add_owner(map: &mut HashMap<String, Vec<String>>, label: String, id: &str) {
+    let owners = map.entry(label).or_default();
+    if !owners.iter().any(|owner| owner == id) {
+        owners.push(id.to_string());
+    }
 }
 
 fn resolve_link(index: &DocumentIndex, link: &WikiLink) -> Option<String> {
     let target = normalized(&link.target);
-    if let Some(note) = index
-        .notes
-        .values()
-        .find(|note| normalized(&note.note.path) == target)
+    if let Some(id) = index
+        .path_owners
+        .get(&target)
+        .and_then(|owners| owners.first())
+        .filter(|id| index.notes.contains_key(*id))
     {
-        return Some(note.note.id.clone());
+        return Some(id.clone());
     }
-    let candidates: Vec<_> = index
-        .notes
-        .values()
-        .filter(|note| {
-            let basename = note.note.path.rsplit('/').next().unwrap_or(&note.note.path);
-            normalized(&note.note.title) == target
-                || normalized(basename) == target
-                || note
-                    .note
-                    .aliases
-                    .iter()
-                    .any(|alias| normalized(alias) == target)
-        })
+    let candidates: HashSet<_> = index
+        .name_owners
+        .get(&target)
+        .into_iter()
+        .chain(index.basename_owners.get(&target))
+        .flatten()
+        .filter(|id| index.notes.contains_key(*id))
+        .cloned()
         .collect();
-    (candidates.len() == 1).then(|| candidates[0].note.id.clone())
+    (candidates.len() == 1).then(|| candidates.into_iter().next().unwrap())
 }
 
 fn rebuild_derived(index: &mut DocumentIndex) {
@@ -1182,19 +1228,44 @@ fn rebuild_derived(index: &mut DocumentIndex) {
     index.resolved_links.clear();
     index.unresolved.clear();
     index.link_sources.clear();
+    index.path_owners.clear();
+    index.name_owners.clear();
+    index.basename_owners.clear();
     let ids: Vec<String> = index.notes.keys().cloned().collect();
     for id in &ids {
-        if let Some(note) = index.notes.get(id) {
-            for link in &note.links {
-                let sources = index
-                    .link_sources
-                    .entry(normalized(&link.target))
-                    .or_default();
+        if let Some((path, basename, names, link_targets)) = index.notes.get(id).map(|note| {
+            let path = normalized(&note.note.path);
+            let basename = note.note.path.rsplit('/').next().unwrap_or(&note.note.path);
+            let mut names = vec![normalized_text(&note.note.title)];
+            names.extend(note.note.aliases.iter().map(|alias| normalized_text(alias)));
+            let link_targets = note
+                .links
+                .iter()
+                .map(|link| normalized(&link.target))
+                .collect::<Vec<_>>();
+            (path, normalized(basename), names, link_targets)
+        }) {
+            add_owner(&mut index.path_owners, path, id);
+            add_owner(&mut index.basename_owners, basename, id);
+            for name in names {
+                add_owner(&mut index.name_owners, name, id);
+            }
+            for target in link_targets {
+                let sources = index.link_sources.entry(target).or_default();
                 if !sources.contains(id) {
                     sources.push(id.clone());
                 }
             }
         }
+    }
+    for owners in index
+        .path_owners
+        .values_mut()
+        .chain(index.name_owners.values_mut())
+        .chain(index.basename_owners.values_mut())
+    {
+        owners.sort();
+        owners.dedup();
     }
     for id in ids {
         let links = index
@@ -1229,26 +1300,30 @@ fn resolve_id(index: &DocumentIndex, reference: &str) -> Result<String, String> 
     if index.notes.contains_key(reference) {
         return Ok(reference.to_string());
     }
-    let reference_path = validate_note_path(reference).ok();
-    let target = normalized(reference);
-    let matches: Vec<_> = index
-        .notes
-        .values()
-        .filter(|note| {
-            reference_path
-                .as_ref()
-                .is_some_and(|path| normalized(&note.note.path) == normalized(path))
-                || normalized(&note.note.title) == target
-                || note
-                    .note
-                    .aliases
+    let mut matches = HashSet::new();
+    if let Ok(path) = validate_note_path(reference) {
+        if let Some(owners) = index.path_owners.get(&normalized(&path)) {
+            matches.extend(
+                owners
                     .iter()
-                    .any(|alias| normalized(alias) == target)
-        })
-        .collect();
+                    .filter(|id| index.notes.contains_key(*id))
+                    .cloned(),
+            );
+        }
+    }
+    let target = normalized_text(without_markdown_extension(reference));
+    if let Some(owners) = index.name_owners.get(&target) {
+        matches.extend(
+            owners
+                .iter()
+                .filter(|id| index.notes.contains_key(*id))
+                .cloned(),
+        );
+    }
+    let matches: Vec<_> = matches.into_iter().collect();
     match matches.as_slice() {
         [] => Err(format!("note not found: {reference}")),
-        [note] => Ok(note.note.id.clone()),
+        [id] => Ok(id.clone()),
         _ => Err(format!("ambiguous note reference: {reference}")),
     }
 }
@@ -1287,6 +1362,11 @@ fn store_note(
             );
         }
     }
+    let mut identity_labels = archive
+        .as_ref()
+        .map(note_identity_labels)
+        .unwrap_or_default();
+    identity_labels.extend(note_identity_labels(&note));
     begin_note_journal(session, std::slice::from_ref(&note.id))?;
     if let Some(previous) = archive.as_ref() {
         archive_note(session, previous)?;
@@ -1311,6 +1391,7 @@ fn store_note(
         },
     );
     rebuild_derived(&mut session.index);
+    refresh_canvases_for_note_change(session, &note.id, &identity_labels)?;
     save_index(session)?;
     end_journal(session)?;
     Ok(note)
@@ -1783,6 +1864,7 @@ fn rename_note_in(
 fn remove_note_in(session: &mut VaultSession, reference: &str) -> Result<NoteSummary, String> {
     let id = resolve_id(&session.index, reference)?;
     let note = load_note(session, &id)?;
+    let identity_labels = note_identity_labels(&note);
     begin_note_journal(session, std::slice::from_ref(&id))?;
     archive_note(session, &note)?;
     let object = note_path(&session.root_dir, &id)?;
@@ -1792,6 +1874,7 @@ fn remove_note_in(session: &mut VaultSession, reference: &str) -> Result<NoteSum
     }
     session.index.notes.remove(&id);
     rebuild_derived(&mut session.index);
+    refresh_canvases_for_note_change(session, &id, &identity_labels)?;
     save_index(session)?;
     end_journal(session)?;
     Ok(NoteSummary::from(&note))
@@ -3837,9 +3920,10 @@ fn indexed_canvases(session: &VaultSession) -> Result<HashMap<String, IndexedCan
     }
 }
 
-fn index_canvas(canvas: &CanvasDocument) -> IndexedCanvas {
+fn index_canvas(index: &DocumentIndex, canvas: &CanvasDocument) -> Result<IndexedCanvas, String> {
     let mut note_refs = HashSet::new();
     let mut attachment_refs = HashSet::new();
+    let mut unresolved = Vec::new();
     for node in &canvas.nodes {
         if let Some(id) = node.get("noteId").and_then(Value::as_str) {
             note_refs.insert(id.to_string());
@@ -3847,12 +3931,23 @@ fn index_canvas(canvas: &CanvasDocument) -> IndexedCanvas {
         if let Some(id) = node.get("attachmentId").and_then(Value::as_str) {
             attachment_refs.insert(id.to_string());
         }
+        if node.get("type").and_then(Value::as_str) == Some("text") {
+            if let Some(text) = node.get("text").and_then(Value::as_str) {
+                for link in analyze_markdown(text)?.0 {
+                    if let Some(id) = resolve_link(index, &link) {
+                        note_refs.insert(id);
+                    } else {
+                        unresolved.push(link);
+                    }
+                }
+            }
+        }
     }
     let mut note_refs: Vec<_> = note_refs.into_iter().collect();
     let mut attachment_refs: Vec<_> = attachment_refs.into_iter().collect();
     note_refs.sort();
     attachment_refs.sort();
-    IndexedCanvas {
+    Ok(IndexedCanvas {
         id: canvas.id.clone(),
         path: canvas.path.clone(),
         title: canvas.title.clone(),
@@ -3862,8 +3957,72 @@ fn index_canvas(canvas: &CanvasDocument) -> IndexedCanvas {
         edge_count: canvas.edges.len(),
         note_refs,
         attachment_refs,
-        unresolved: Vec::new(),
+        unresolved,
+    })
+}
+
+fn note_identity_labels(note: &NoteDocument) -> HashSet<String> {
+    let basename = note.path.rsplit('/').next().unwrap_or(&note.path);
+    std::iter::once(normalized(&note.path))
+        .chain(std::iter::once(normalized(basename)))
+        .chain(std::iter::once(normalized(&note.title)))
+        .chain(note.aliases.iter().map(|alias| normalized(alias)))
+        .collect()
+}
+
+fn refresh_canvases_for_note_change(
+    session: &mut VaultSession,
+    note_id: &str,
+    identity_labels: &HashSet<String>,
+) -> Result<(), String> {
+    let mut canvases = indexed_canvases(session)?;
+    if canvases.is_empty() {
+        return Ok(());
     }
+    let canvas_refs: HashMap<String, Vec<String>> = session
+        .index
+        .extra
+        .get("canvasRefs")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .unwrap_or_default();
+    let mut candidates: HashSet<String> = canvas_refs
+        .get(note_id)
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect();
+    for label in identity_labels {
+        for owner in session
+            .index
+            .path_owners
+            .get(label)
+            .into_iter()
+            .chain(session.index.name_owners.get(label))
+            .chain(session.index.basename_owners.get(label))
+            .flatten()
+        {
+            if let Some(refs) = canvas_refs.get(owner) {
+                candidates.extend(refs.iter().cloned());
+            }
+        }
+    }
+    for canvas in canvases.values() {
+        if canvas
+            .unresolved
+            .iter()
+            .any(|link| identity_labels.contains(&normalized(&link.target)))
+        {
+            candidates.insert(canvas.id.clone());
+        }
+    }
+    for id in candidates {
+        let canvas = load_canvas(session, &id)?;
+        canvases.insert(id, index_canvas(&session.index, &canvas)?);
+    }
+    store_canvas_index(session, &canvases)
 }
 
 fn store_canvas_index(
@@ -3895,7 +4054,7 @@ fn store_canvas_index(
             .unwrap_or(&canvas.path);
         for label in [&canvas.path, &canvas.title, basename] {
             path_owners
-                .entry(label.to_lowercase())
+                .entry(normalized_text(label))
                 .or_default()
                 .push(canvas.id.clone());
         }
@@ -3944,7 +4103,7 @@ fn recover_canvas_index(session: &mut VaultSession) -> Result<(), String> {
             };
             if Uuid::parse_str(id).is_ok() {
                 let canvas = load_canvas(session, id)?;
-                canvases.insert(id.to_string(), index_canvas(&canvas));
+                canvases.insert(id.to_string(), index_canvas(&session.index, &canvas)?);
             }
         }
     }
@@ -4092,7 +4251,7 @@ fn put_canvas(session: &mut VaultSession, input: CanvasInput) -> Result<CanvasDo
         &canvas_object_path(&session.root_dir, &id)?,
         &serde_json::to_vec(&payload).map_err(|error| error.to_string())?,
     )?;
-    canvases.insert(id, index_canvas(&canvas));
+    canvases.insert(id, index_canvas(&session.index, &canvas)?);
     store_canvas_index(session, &canvases)?;
     save_index(session)?;
     end_journal(session)?;
@@ -4557,6 +4716,22 @@ mod tests {
     }
 
     #[test]
+    fn rust_and_typescript_derive_the_same_visible_markdown_structure() {
+        let markdown = "# Crème_ Brûlée -- Test!\n\n`[[Inline]]`\n\n```md\n[[Fence]]\n# Hidden\n```\n\n[[Visible]]";
+        let (links, headings) = analyze_markdown(markdown).unwrap();
+        assert_eq!(
+            links
+                .iter()
+                .map(|link| link.target.as_str())
+                .collect::<Vec<_>>(),
+            ["Visible"]
+        );
+        assert_eq!(headings.len(), 1);
+        assert_eq!(headings[0].text, "Crème_ Brûlée -- Test!");
+        assert_eq!(headings[0].slug, "crème-brûlée-test");
+    }
+
+    #[test]
     fn vault_reopens_and_rejects_the_wrong_passphrase() {
         let path = temporary_vault("unlock");
         let path_text = path.to_string_lossy().into_owned();
@@ -4701,6 +4876,105 @@ mod tests {
             .join(&id)
             .join("1.note.enc")
             .is_file());
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn desktop_writes_the_shared_lookup_layout_without_forcing_a_cli_rebuild() {
+        let path = temporary_vault("lookup-layout");
+        let path_text = path.to_string_lossy().into_owned();
+        let mut session = open_session(&path_text, "lookup passphrase").unwrap();
+        let mut note = seeded_note(
+            "Projects/Ｒoadmap.md",
+            "North Ｓtar",
+            "# Direction\n\nSee [[Exposure]].",
+        );
+        note.aliases = vec!["Exposure".into()];
+        store_note(&mut session, note.clone(), None).unwrap();
+
+        assert_eq!(session.index.derived, DERIVED_LAYOUT);
+        assert_eq!(
+            session.index.path_owners["projects/roadmap"],
+            [note.id.clone()]
+        );
+        assert_eq!(session.index.basename_owners["roadmap"], [note.id.clone()]);
+        assert_eq!(session.index.name_owners["north star"], [note.id.clone()]);
+        assert_eq!(session.index.name_owners["exposure"], [note.id.clone()]);
+        assert_eq!(resolve_id(&session.index, "North Star").unwrap(), note.id);
+
+        let payload: EncryptedPayload =
+            serde_json::from_slice(&fs::read(session.root_dir.join("index.enc")).unwrap()).unwrap();
+        let stored: Value =
+            serde_json::from_slice(&decrypt(&payload, session.key.as_ref(), INDEX_AAD).unwrap())
+                .unwrap();
+        assert_eq!(stored["derived"], DERIVED_LAYOUT);
+        assert_eq!(stored["pathOwners"]["projects/roadmap"][0], note.id);
+        for field in [
+            "canvases",
+            "canvasRefs",
+            "canvasAttachmentRefs",
+            "canvasPathOwners",
+        ] {
+            assert!(stored[field].is_object(), "missing shared field: {field}");
+        }
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn canvas_text_links_follow_note_identity_changes_in_the_shared_index() {
+        let path = temporary_vault("canvas-link-index");
+        let path_text = path.to_string_lossy().into_owned();
+        let mut session = open_session(&path_text, "canvas link passphrase").unwrap();
+        let original = seeded_note("Notes/Target.md", "Target", "# Target");
+        store_note(&mut session, original.clone(), None).unwrap();
+        let canvas = put_canvas(
+            &mut session,
+            CanvasInput {
+                id: None,
+                path: "Boards/Links".into(),
+                title: None,
+                nodes: vec![serde_json::json!({
+                    "id": "text-1",
+                    "type": "text",
+                    "text": "[[Target]] and [[Missing]]",
+                    "x": 0,
+                    "y": 0,
+                    "width": 240,
+                    "height": 120
+                })],
+                edges: vec![],
+                created_at: None,
+                base_revision: None,
+            },
+        )
+        .unwrap();
+
+        let refs: HashMap<String, Vec<String>> =
+            serde_json::from_value(session.index.extra["canvasRefs"].clone()).unwrap();
+        assert_eq!(
+            refs[&original.id].as_slice(),
+            std::slice::from_ref(&canvas.id)
+        );
+        let canvases = indexed_canvases(&session).unwrap();
+        assert_eq!(canvases[&canvas.id].unresolved[0].target, "Missing");
+
+        let mut renamed = original.clone();
+        renamed.path = "Notes/Renamed.md".into();
+        renamed.title = "Renamed".into();
+        renamed.revision = 2;
+        renamed.updated_at = now();
+        store_note(&mut session, renamed, Some(original.clone())).unwrap();
+
+        let refs: HashMap<String, Vec<String>> =
+            serde_json::from_value(session.index.extra["canvasRefs"].clone()).unwrap();
+        assert!(!refs.contains_key(&original.id));
+        let canvases = indexed_canvases(&session).unwrap();
+        let unresolved: HashSet<_> = canvases[&canvas.id]
+            .unresolved
+            .iter()
+            .map(|link| link.target.as_str())
+            .collect();
+        assert_eq!(unresolved, HashSet::from(["Target", "Missing"]));
         fs::remove_dir_all(path).unwrap();
     }
 
