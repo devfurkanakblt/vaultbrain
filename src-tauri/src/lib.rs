@@ -26,7 +26,8 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tauri::State;
+use tauri::{AppHandle, State};
+use tauri_plugin_dialog::DialogExt;
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -4616,11 +4617,30 @@ fn delete_attachment(id: String, state: State<'_, AppState>) -> Result<Attachmen
     with_vault_write(session, |session| remove_attachment(session, &id))
 }
 
+/// Opens the operating system's folder chooser and reports back only the path
+/// the person selected, or `None` when they dismissed it. Typing a path by hand
+/// stays supported; this exists so a vault does not have to be spelled out.
+#[tauri::command(async)]
+fn pick_vault_directory(app: AppHandle) -> Result<Option<String>, String> {
+    let chosen = app
+        .dialog()
+        .file()
+        .set_title("Choose a vault folder")
+        .blocking_pick_folder();
+    let Some(chosen) = chosen else {
+        return Ok(None);
+    };
+    let path = chosen.into_path().map_err(|error| error.to_string())?;
+    Ok(Some(path.to_string_lossy().into_owned()))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
+            pick_vault_directory,
             unlock_vault,
             lock_vault,
             list_notes,

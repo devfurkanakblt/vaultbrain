@@ -39,6 +39,7 @@ import { AttachmentLibrary } from "./AttachmentLibrary";
 import { vaultBridge } from "./bridge";
 import { CanvasBoard } from "./CanvasBoard";
 import { ContextPanel } from "./ContextPanel";
+import type { OutlineItem } from "./ContextPanel";
 import { KnowledgeGraph } from "./KnowledgeGraph";
 import { HistoryDialog, RenameDialog, TemplateDialog, TrashDialog } from "./NoteLifecycle";
 import { PluginManager } from "./PluginManager";
@@ -98,20 +99,76 @@ function folders(notes: NoteSummary[]) {
   return [...grouped.entries()].sort(([a], [b]) => a.localeCompare(b));
 }
 
+const DEFAULT_VAULT_PATH = "./vault/personal";
+const VAULT_HISTORY_KEY = "sbrain:vaults";
+const LEGACY_VAULT_KEY = "sbrain:last-vault";
+const VAULT_HISTORY_LIMIT = 5;
+
+/**
+ * The vault paths this device has unlocked before, most recent first. Only
+ * paths are kept, never a passphrase, and the list stays on this device: it is
+ * a convenience for the person at the keyboard, not vault content.
+ */
+function readVaultHistory(): string[] {
+  try {
+    const stored = localStorage.getItem(VAULT_HISTORY_KEY);
+    const parsed: unknown = stored ? JSON.parse(stored) : [];
+    const paths = Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === "string") : [];
+    const legacy = localStorage.getItem(LEGACY_VAULT_KEY);
+    if (legacy && !paths.includes(legacy)) paths.push(legacy);
+    return paths.slice(0, VAULT_HISTORY_LIMIT);
+  } catch {
+    return [];
+  }
+}
+
+function rememberVault(path: string) {
+  try {
+    const next = [path, ...readVaultHistory().filter((entry) => entry !== path)].slice(0, VAULT_HISTORY_LIMIT);
+    localStorage.setItem(VAULT_HISTORY_KEY, JSON.stringify(next));
+    localStorage.setItem(LEGACY_VAULT_KEY, path);
+  } catch {
+    /* a device that refuses storage still unlocks for this session */
+  }
+}
+
 function LockScreen({ notice, onUnlock }: { notice: string; onUnlock: (path: string, passphrase: string) => Promise<void> }) {
-  const [path, setPath] = useState(localStorage.getItem("sbrain:last-vault") ?? "./vault/personal");
+  const history = useMemo(readVaultHistory, []);
+  const [path, setPath] = useState(() => history[0] ?? DEFAULT_VAULT_PATH);
   const [passphrase, setPassphrase] = useState("");
   const [busy, setBusy] = useState(false);
+  const [choosing, setChoosing] = useState(false);
   const [error, setError] = useState("");
+  const target = path.trim();
+  // The core creates a vault at any path it cannot open, so a typo reads as an
+  // empty vault rather than an error. This device cannot tell the two apart
+  // without unlocking, so it says plainly which paths it has seen before.
+  const unfamiliar = target.length > 0 && !history.includes(target);
+  // The field already shows where it points, so the list only earns its space
+  // by offering somewhere else to go.
+  const elsewhere = history.filter((entry) => entry !== target);
+
+  async function chooseFolder() {
+    setChoosing(true);
+    setError("");
+    try {
+      const picked = await vaultBridge.pickVaultDirectory();
+      if (picked) setPath(picked);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setChoosing(false);
+    }
+  }
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     setBusy(true);
     setError("");
     try {
-      await onUnlock(path, passphrase);
+      await onUnlock(target, passphrase);
       setPassphrase("");
-      localStorage.setItem("sbrain:last-vault", path);
+      rememberVault(target);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -133,10 +190,54 @@ function LockScreen({ notice, onUnlock }: { notice: string; onUnlock: (path: str
         <p className="unlock-copy">A fast workspace that stays yours. Unlocking happens on this device; the key never enters the interface.</p>
         {notice && <p className="lock-notice" role="status"><ShieldCheck size={14} />{notice}</p>}
         <form onSubmit={submit}>
-          <label>
-            <span>Vault location</span>
-            <input value={path} onChange={(event) => setPath(event.target.value)} spellCheck={false} autoCapitalize="off" />
-          </label>
+          <div className="field-with-action">
+            <label>
+              <span>Vault location</span>
+              <input
+                value={path}
+                onChange={(event) => setPath(event.target.value)}
+                spellCheck={false}
+                autoCapitalize="off"
+                className={unfamiliar ? "is-flagged" : undefined}
+                aria-describedby={unfamiliar ? "vault-unfamiliar" : undefined}
+              />
+            </label>
+            <button
+              type="button"
+              className="input-action"
+              onClick={chooseFolder}
+              disabled={choosing}
+              title="Choose a folder on this computer"
+              aria-label="Choose a vault folder"
+            >
+              {choosing ? <CircleDot className="spin" size={15} /> : <Folder size={15} />}
+            </button>
+          </div>
+          <div className={`vault-hint-slot ${unfamiliar ? "is-open" : ""}`} aria-hidden={!unfamiliar}>
+            <span className="vault-hint-link" aria-hidden="true" />
+            <div className="vault-hint-clip">
+              <p className="vault-hint" id="vault-unfamiliar">
+                <FilePlus2 size={13} />
+                <span>
+                  This device has not opened <b>{target}</b> before. If a vault already lives there, your passphrase opens it. If not,
+                  a new empty vault is created and sealed with the passphrase you type — so check the path before continuing.
+                </span>
+              </p>
+            </div>
+          </div>
+          {elsewhere.length > 0 && (
+            <div className="vault-recents">
+              <span className="vault-recents-label">Switch to</span>
+              <div className="vault-recent-list">
+                {elsewhere.map((entry) => (
+                  <button key={entry} type="button" className="vault-recent" onClick={() => setPath(entry)} title={entry}>
+                    <FolderOpen size={12} />
+                    <span>{entry}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           <label>
             <span>Passphrase</span>
             <input type="password" value={passphrase} onChange={(event) => setPassphrase(event.target.value)} autoFocus autoComplete="current-password" />
@@ -149,11 +250,6 @@ function LockScreen({ notice, onUnlock }: { notice: string; onUnlock: (path: str
         </form>
         <div className="trust-line"><span /> AES-256-GCM · LOCAL ONLY · AUDITED ACCESS</div>
       </section>
-      <aside className="lock-manifesto">
-        <span className="manifesto-index">02</span>
-        <blockquote>“Faster to recall.<br />Safer to trust.”</blockquote>
-        <p>Nothing is uploaded to unlock this vault.</p>
-      </aside>
     </main>
   );
 }
@@ -196,6 +292,9 @@ export function App() {
   const [pluginCommands, setPluginCommands] = useState<RegisteredCommand[]>([]);
   const [pluginPanels, setPluginPanels] = useState<PluginPanel[]>([]);
   const pluginHost = useRef<PluginHost>(undefined);
+  const [reveal, setReveal] = useState<{ line: number; token: number }>();
+  const revealToken = useRef(0);
+  const documentBody = useRef<HTMLDivElement>(null);
   const [notice, setNotice] = useState("");
   const [lockNotice, setLockNotice] = useState("");
   const [idleMinutes, setIdleMinutes] = useState(readIdlePreference);
@@ -490,10 +589,32 @@ export function App() {
     return () => window.clearTimeout(timer);
   }, [query]);
 
-  const outline = useMemo(() => active?.body.split(/\r?\n/gu).flatMap((line) => {
-    const match = /^(#{1,4})\s+(.+)/u.exec(line);
-    return match ? [{ level: match[1].length, text: match[2] }] : [];
-  }) ?? [], [active?.body]);
+  // Fenced blocks are skipped so a shell comment inside one is not mistaken for
+  // a heading, which would both pad the outline and misalign reading-view jumps.
+  const outline = useMemo<OutlineItem[]>(() => {
+    const items: OutlineItem[] = [];
+    let fenced = false;
+    (active?.body.split(/\r?\n/gu) ?? []).forEach((line, index) => {
+      if (/^\s*(?:```|~~~)/u.test(line)) {
+        fenced = !fenced;
+        return;
+      }
+      if (fenced) return;
+      const match = /^(#{1,4})\s+(.+)/u.exec(line);
+      if (match) items.push({ level: match[1].length, text: match[2], line: index });
+    });
+    return items;
+  }, [active?.body]);
+
+  /** Reveal a heading in whichever view is showing the note. */
+  const revealHeading = useCallback((item: OutlineItem, index: number) => {
+    if (mode === "write") {
+      revealToken.current += 1;
+      setReveal({ line: item.line, token: revealToken.current });
+      return;
+    }
+    documentBody.current?.querySelectorAll("h1, h2, h3, h4").item(index)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [mode]);
 
   async function create(path: string, title: string) {
     const note = await vaultBridge.createNote(path, title);
@@ -815,18 +936,15 @@ export function App() {
                   <button onClick={() => void deleteActive()} title="Delete this note"><Trash2 size={16} /></button>
                   <button onClick={() => void copyGuarded("Note", active.body)} title="Copy note to a self-clearing clipboard"><Copy size={16} /></button>
                   <button onClick={() => void openInSplit(active.id)} title="Open in split pane (Ctrl+\)"><Columns2 size={16} /></button>
-                  <button className="context-toggle" onClick={() => setRightOpen((value) => !value)} title="Toggle context panel">
-                    {rightOpen ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}
-                  </button>
                 </div>
               </div>
               <div className="document-title-wrap">
                 <input className="document-title" value={active.title} onChange={(event) => mutateActive({ title: event.target.value })} aria-label="Note title" />
                 <div className="document-meta"><span>REV {String(active.revision).padStart(2, "0")}</span><i /> <span>{active.body.trim().split(/\s+/u).length} WORDS</span><i /> <span>UPDATED {relativeTime(active.updatedAt).toUpperCase()}</span></div>
               </div>
-              <div className="document-body">
+              <div className="document-body" ref={documentBody}>
                 <Suspense fallback={<div className="document-loading">Preparing document…</div>}>
-                  {mode === "write" ? <MarkdownEditor value={active.body} onChange={(body) => mutateActive({ body })} /> :
+                  {mode === "write" ? <MarkdownEditor value={active.body} onChange={(body) => mutateActive({ body })} reveal={reveal} /> :
                     <MarkdownPreview body={active.body} />}
                 </Suspense>
               </div>
@@ -896,8 +1014,17 @@ export function App() {
         onOpen={(id) => void openNote(id)}
         onCopy={(label, value) => void copyGuarded(label, value)}
         onAliases={(aliases) => mutateActive({ aliases })}
+        onOutline={revealHeading}
+        onClose={() => setRightOpen(false)}
         onLink={linkMention}
         panels={pluginPanels} />}
+
+      {workspaceView === "notes" && !rightOpen && active && <button
+        className="context-reopen"
+        onClick={() => setRightOpen(true)}
+        aria-label="Show the context panel"
+        title="Show the context panel"
+      ><PanelRightOpen size={15} /></button>}
 
       {notice && <div className="toast" role="status"><Check size={14} />{notice}</div>}
 
@@ -937,6 +1064,7 @@ export function App() {
             { icon: FolderKanban, label: "Open canvas workspace", keys: "", action: () => void showWorkspace("canvas") },
             { icon: Paperclip, label: "Open attachment library", keys: "", action: () => void showWorkspace("files") },
             { icon: BookOpen, label: mode === "write" ? "Switch to reading view" : "Switch to writing view", keys: "⌘ E", action: () => setMode(mode === "write" ? "read" : "write") },
+            { icon: rightOpen ? PanelRightClose : PanelRightOpen, label: rightOpen ? "Hide the context panel" : "Show the context panel", action: () => setRightOpen((value) => !value) },
             { icon: LayoutGrid, label: "Workspaces and saved layouts", keys: "", action: () => setWorkspacesOpen(true) },
             { icon: Palette, label: "Customize theme", keys: "", action: () => setThemeOpen(true) },
             { icon: Clock, label: "Change auto-lock delay", keys: "", action: () => cycleIdleLock() },
