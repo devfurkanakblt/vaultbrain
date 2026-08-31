@@ -39,6 +39,7 @@ import { AttachmentLibrary } from "./AttachmentLibrary";
 import { vaultBridge } from "./bridge";
 import { CanvasBoard } from "./CanvasBoard";
 import { ContextPanel } from "./ContextPanel";
+import type { OutlineItem } from "./ContextPanel";
 import { KnowledgeGraph } from "./KnowledgeGraph";
 import { HistoryDialog, RenameDialog, TemplateDialog, TrashDialog } from "./NoteLifecycle";
 import { PluginManager } from "./PluginManager";
@@ -291,6 +292,9 @@ export function App() {
   const [pluginCommands, setPluginCommands] = useState<RegisteredCommand[]>([]);
   const [pluginPanels, setPluginPanels] = useState<PluginPanel[]>([]);
   const pluginHost = useRef<PluginHost>(undefined);
+  const [reveal, setReveal] = useState<{ line: number; token: number }>();
+  const revealToken = useRef(0);
+  const documentBody = useRef<HTMLDivElement>(null);
   const [notice, setNotice] = useState("");
   const [lockNotice, setLockNotice] = useState("");
   const [idleMinutes, setIdleMinutes] = useState(readIdlePreference);
@@ -585,10 +589,32 @@ export function App() {
     return () => window.clearTimeout(timer);
   }, [query]);
 
-  const outline = useMemo(() => active?.body.split(/\r?\n/gu).flatMap((line) => {
-    const match = /^(#{1,4})\s+(.+)/u.exec(line);
-    return match ? [{ level: match[1].length, text: match[2] }] : [];
-  }) ?? [], [active?.body]);
+  // Fenced blocks are skipped so a shell comment inside one is not mistaken for
+  // a heading, which would both pad the outline and misalign reading-view jumps.
+  const outline = useMemo<OutlineItem[]>(() => {
+    const items: OutlineItem[] = [];
+    let fenced = false;
+    (active?.body.split(/\r?\n/gu) ?? []).forEach((line, index) => {
+      if (/^\s*(?:```|~~~)/u.test(line)) {
+        fenced = !fenced;
+        return;
+      }
+      if (fenced) return;
+      const match = /^(#{1,4})\s+(.+)/u.exec(line);
+      if (match) items.push({ level: match[1].length, text: match[2], line: index });
+    });
+    return items;
+  }, [active?.body]);
+
+  /** Reveal a heading in whichever view is showing the note. */
+  const revealHeading = useCallback((item: OutlineItem, index: number) => {
+    if (mode === "write") {
+      revealToken.current += 1;
+      setReveal({ line: item.line, token: revealToken.current });
+      return;
+    }
+    documentBody.current?.querySelectorAll("h1, h2, h3, h4").item(index)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [mode]);
 
   async function create(path: string, title: string) {
     const note = await vaultBridge.createNote(path, title);
@@ -910,18 +936,15 @@ export function App() {
                   <button onClick={() => void deleteActive()} title="Delete this note"><Trash2 size={16} /></button>
                   <button onClick={() => void copyGuarded("Note", active.body)} title="Copy note to a self-clearing clipboard"><Copy size={16} /></button>
                   <button onClick={() => void openInSplit(active.id)} title="Open in split pane (Ctrl+\)"><Columns2 size={16} /></button>
-                  <button className="context-toggle" onClick={() => setRightOpen((value) => !value)} title="Toggle context panel">
-                    {rightOpen ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}
-                  </button>
                 </div>
               </div>
               <div className="document-title-wrap">
                 <input className="document-title" value={active.title} onChange={(event) => mutateActive({ title: event.target.value })} aria-label="Note title" />
                 <div className="document-meta"><span>REV {String(active.revision).padStart(2, "0")}</span><i /> <span>{active.body.trim().split(/\s+/u).length} WORDS</span><i /> <span>UPDATED {relativeTime(active.updatedAt).toUpperCase()}</span></div>
               </div>
-              <div className="document-body">
+              <div className="document-body" ref={documentBody}>
                 <Suspense fallback={<div className="document-loading">Preparing document…</div>}>
-                  {mode === "write" ? <MarkdownEditor value={active.body} onChange={(body) => mutateActive({ body })} /> :
+                  {mode === "write" ? <MarkdownEditor value={active.body} onChange={(body) => mutateActive({ body })} reveal={reveal} /> :
                     <MarkdownPreview body={active.body} />}
                 </Suspense>
               </div>
@@ -991,8 +1014,17 @@ export function App() {
         onOpen={(id) => void openNote(id)}
         onCopy={(label, value) => void copyGuarded(label, value)}
         onAliases={(aliases) => mutateActive({ aliases })}
+        onOutline={revealHeading}
+        onClose={() => setRightOpen(false)}
         onLink={linkMention}
         panels={pluginPanels} />}
+
+      {workspaceView === "notes" && !rightOpen && active && <button
+        className="context-reopen"
+        onClick={() => setRightOpen(true)}
+        aria-label="Show the context panel"
+        title="Show the context panel"
+      ><PanelRightOpen size={15} /></button>}
 
       {notice && <div className="toast" role="status"><Check size={14} />{notice}</div>}
 
@@ -1032,6 +1064,7 @@ export function App() {
             { icon: FolderKanban, label: "Open canvas workspace", keys: "", action: () => void showWorkspace("canvas") },
             { icon: Paperclip, label: "Open attachment library", keys: "", action: () => void showWorkspace("files") },
             { icon: BookOpen, label: mode === "write" ? "Switch to reading view" : "Switch to writing view", keys: "⌘ E", action: () => setMode(mode === "write" ? "read" : "write") },
+            { icon: rightOpen ? PanelRightClose : PanelRightOpen, label: rightOpen ? "Hide the context panel" : "Show the context panel", action: () => setRightOpen((value) => !value) },
             { icon: LayoutGrid, label: "Workspaces and saved layouts", keys: "", action: () => setWorkspacesOpen(true) },
             { icon: Palette, label: "Customize theme", keys: "", action: () => setThemeOpen(true) },
             { icon: Clock, label: "Change auto-lock delay", keys: "", action: () => cycleIdleLock() },

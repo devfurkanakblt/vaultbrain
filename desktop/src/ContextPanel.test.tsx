@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ContextPanel } from "./ContextPanel";
 import type { NoteDocument, UnlinkedMention } from "./types";
 
@@ -33,12 +33,14 @@ const mention: UnlinkedMention = {
 function renderPanel(overrides: Partial<Parameters<typeof ContextPanel>[0]> = {}) {
   const props = {
     note,
-    outline: [{ level: 2, text: "Constraints" }],
+    outline: [{ level: 2, text: "Constraints", line: 2 }],
     backlinks: [],
     mentions: [mention],
     onOpen: vi.fn(),
     onCopy: vi.fn(),
     onAliases: vi.fn(),
+    onOutline: vi.fn(),
+    onClose: vi.fn(),
     onLink: vi.fn(async () => {}),
     ...overrides,
   };
@@ -47,6 +49,63 @@ function renderPanel(overrides: Partial<Parameters<typeof ContextPanel>[0]> = {}
 }
 
 afterEach(cleanup);
+beforeEach(() => localStorage.clear());
+
+describe("sections", () => {
+  it("keeps every control of the panel reachable", () => {
+    renderPanel({ backlinks: [{ id: "note-c", path: "Atlas/Roadmap.md", title: "Roadmap", aliases: [], tags: [], updatedAt: "2026-08-30T09:00:00.000Z", revision: 1 }] });
+
+    expect(screen.getByLabelText("Copy status")).toBeInTheDocument();
+    expect(screen.getByLabelText("Remove alias North star")).toBeInTheDocument();
+    expect(screen.getByLabelText("New alias")).toBeInTheDocument();
+    expect(screen.getByLabelText("Add alias")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Constraints" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Roadmap/u })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Notes/u })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Link 2 mentions in Notes" })).toBeInTheDocument();
+  });
+
+  it("asks to reveal the heading an outline entry points at", () => {
+    const props = renderPanel();
+    fireEvent.click(screen.getByRole("button", { name: "Constraints" }));
+    expect(props.onOutline).toHaveBeenCalledWith({ level: 2, text: "Constraints", line: 2 }, 0);
+  });
+
+  it("folds and unfolds every card from the panel bar", () => {
+    renderPanel();
+    const labels = [/^PROPERTIES/u, /^ALIASES/u, /^OUTLINE/u, /^BACKLINKS/u, /^UNLINKED MENTIONS/u];
+    const expanded = () => labels.map((label) => screen.getByRole("button", { name: label }).getAttribute("aria-expanded"));
+    expect(expanded()).toEqual(["true", "true", "true", "true", "true"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse every section" }));
+    expect(expanded()).toEqual(["false", "false", "false", "false", "false"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand every section" }));
+    expect(expanded()).toEqual(["true", "true", "true", "true", "true"]);
+  });
+
+  it("hides the panel from its own bar", () => {
+    const props = renderPanel();
+    fireEvent.click(screen.getByRole("button", { name: "Hide the context panel" }));
+    expect(props.onClose).toHaveBeenCalled();
+  });
+
+  it("folds one section and remembers it on this device", () => {
+    renderPanel();
+    const outline = screen.getByRole("button", { name: /^OUTLINE/u });
+    expect(outline).toHaveAttribute("aria-expanded", "true");
+
+    fireEvent.click(outline);
+    expect(outline).toHaveAttribute("aria-expanded", "false");
+    expect(JSON.parse(localStorage.getItem("sbrain:context-sections")!)).toEqual({ outline: true });
+
+    cleanup();
+    renderPanel();
+    expect(screen.getByRole("button", { name: /^OUTLINE/u })).toHaveAttribute("aria-expanded", "false");
+    // Folding one card leaves the others alone.
+    expect(screen.getByRole("button", { name: /^ALIASES/u })).toHaveAttribute("aria-expanded", "true");
+  });
+});
 
 describe("aliases", () => {
   it("adds an alias on Enter", () => {
