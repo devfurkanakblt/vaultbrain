@@ -98,20 +98,62 @@ function folders(notes: NoteSummary[]) {
   return [...grouped.entries()].sort(([a], [b]) => a.localeCompare(b));
 }
 
+const DEFAULT_VAULT_PATH = "./vault/personal";
+const VAULT_HISTORY_KEY = "sbrain:vaults";
+const LEGACY_VAULT_KEY = "sbrain:last-vault";
+const VAULT_HISTORY_LIMIT = 5;
+
+/**
+ * The vault paths this device has unlocked before, most recent first. Only
+ * paths are kept, never a passphrase, and the list stays on this device: it is
+ * a convenience for the person at the keyboard, not vault content.
+ */
+function readVaultHistory(): string[] {
+  try {
+    const stored = localStorage.getItem(VAULT_HISTORY_KEY);
+    const parsed: unknown = stored ? JSON.parse(stored) : [];
+    const paths = Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === "string") : [];
+    const legacy = localStorage.getItem(LEGACY_VAULT_KEY);
+    if (legacy && !paths.includes(legacy)) paths.push(legacy);
+    return paths.slice(0, VAULT_HISTORY_LIMIT);
+  } catch {
+    return [];
+  }
+}
+
+function rememberVault(path: string) {
+  try {
+    const next = [path, ...readVaultHistory().filter((entry) => entry !== path)].slice(0, VAULT_HISTORY_LIMIT);
+    localStorage.setItem(VAULT_HISTORY_KEY, JSON.stringify(next));
+    localStorage.setItem(LEGACY_VAULT_KEY, path);
+  } catch {
+    /* a device that refuses storage still unlocks for this session */
+  }
+}
+
 function LockScreen({ notice, onUnlock }: { notice: string; onUnlock: (path: string, passphrase: string) => Promise<void> }) {
-  const [path, setPath] = useState(localStorage.getItem("sbrain:last-vault") ?? "./vault/personal");
+  const history = useMemo(readVaultHistory, []);
+  const [path, setPath] = useState(() => history[0] ?? DEFAULT_VAULT_PATH);
   const [passphrase, setPassphrase] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const target = path.trim();
+  // The core creates a vault at any path it cannot open, so a typo reads as an
+  // empty vault rather than an error. This device cannot tell the two apart
+  // without unlocking, so it says plainly which paths it has seen before.
+  const unfamiliar = target.length > 0 && !history.includes(target);
+  // The field already shows where it points, so the list only earns its space
+  // by offering somewhere else to go.
+  const elsewhere = history.filter((entry) => entry !== target);
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     setBusy(true);
     setError("");
     try {
-      await onUnlock(path, passphrase);
+      await onUnlock(target, passphrase);
       setPassphrase("");
-      localStorage.setItem("sbrain:last-vault", path);
+      rememberVault(target);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -135,8 +177,40 @@ function LockScreen({ notice, onUnlock }: { notice: string; onUnlock: (path: str
         <form onSubmit={submit}>
           <label>
             <span>Vault location</span>
-            <input value={path} onChange={(event) => setPath(event.target.value)} spellCheck={false} autoCapitalize="off" />
+            <input
+              value={path}
+              onChange={(event) => setPath(event.target.value)}
+              spellCheck={false}
+              autoCapitalize="off"
+              className={unfamiliar ? "is-flagged" : undefined}
+              aria-describedby={unfamiliar ? "vault-unfamiliar" : undefined}
+            />
           </label>
+          <div className={`vault-hint-slot ${unfamiliar ? "is-open" : ""}`} aria-hidden={!unfamiliar}>
+            <span className="vault-hint-link" aria-hidden="true" />
+            <div className="vault-hint-clip">
+              <p className="vault-hint" id="vault-unfamiliar">
+                <FilePlus2 size={13} />
+                <span>
+                  This device has not opened <b>{target}</b> before. If a vault already lives there, your passphrase opens it. If not,
+                  a new empty vault is created and sealed with the passphrase you type — so check the path before continuing.
+                </span>
+              </p>
+            </div>
+          </div>
+          {elsewhere.length > 0 && (
+            <div className="vault-recents">
+              <span className="vault-recents-label">Switch to</span>
+              <div className="vault-recent-list">
+                {elsewhere.map((entry) => (
+                  <button key={entry} type="button" className="vault-recent" onClick={() => setPath(entry)} title={entry}>
+                    <FolderOpen size={12} />
+                    <span>{entry}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           <label>
             <span>Passphrase</span>
             <input type="password" value={passphrase} onChange={(event) => setPassphrase(event.target.value)} autoFocus autoComplete="current-password" />
@@ -149,11 +223,6 @@ function LockScreen({ notice, onUnlock }: { notice: string; onUnlock: (path: str
         </form>
         <div className="trust-line"><span /> AES-256-GCM · LOCAL ONLY · AUDITED ACCESS</div>
       </section>
-      <aside className="lock-manifesto">
-        <span className="manifesto-index">02</span>
-        <blockquote>“Faster to recall.<br />Safer to trust.”</blockquote>
-        <p>Nothing is uploaded to unlock this vault.</p>
-      </aside>
     </main>
   );
 }
