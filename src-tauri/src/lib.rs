@@ -5254,7 +5254,7 @@ mod tests {
             capabilities: vec!["notes:read".into(), "ui:panel".into()],
             // Produced by `signPluginPackage` with a deterministic 32-byte
             // seed. This pins the byte format across the two implementations.
-            signature: Some("ed25519:6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw:77BlVonLJQ9XJTmBnF3A3kW4Jj1IExU-5DuxgfI-opQFMqdXNCZOJuOwZ4Uim_sv7LevQsrkIjwHKHwuQhy8CA".into()),
+            signature: Some("ed25519:6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw:6Y9EfcmAs_WyNSNdaJb1bI6TNS8z1OadUIIlP1sZvSWHt5rU9eOzimrqnSCMugS-vnlxb3wOxJ0Z5EaH-1MiAg".into()),
         }
     }
 
