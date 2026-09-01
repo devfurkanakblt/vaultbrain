@@ -1,4 +1,4 @@
-# secondbrain-vault
+# Vault Brain
 
 > A least-exposure, `.env`-style personal data vault for the AI age.
 
@@ -9,7 +9,7 @@
 > [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 **TL;DR (TR):** Obsidian gibi "2. beyin" araçları kişisel verini (sağlık, kimlik,
-finans) düz metin olarak AI ajanlarına besliyor. `secondbrain-vault`, veriyi
+finans) düz metin olarak AI ajanlarına besliyor. `Vault Brain`, veriyi
 şifreli anahtar-değer çiftleri olarak saklar; AI önce sadece anahtar adlarını
 ve açıklamaları görür (değerleri değil), ihtiyaç duyduğu **tek** değeri talep
 eder, ve her erişim denetim kaydına (audit log) yazılır.
@@ -23,7 +23,7 @@ vault, not just the fact you asked about.
 
 This project borrows a habit developers already trust: **`.env` files**. We
 don't hand an agent a whole config file to "figure out" — we let it ask for
-one variable at a time. `secondbrain-vault` applies the same discipline to
+one variable at a time. `Vault Brain` applies the same discipline to
 personal data.
 
 ## Two modes — read this before you wire it into anything
@@ -472,9 +472,9 @@ prototype-shaping keys are rejected before anything enters encrypted storage.
 ```json
 {
   "mcpServers": {
-    "secondbrain-vault": {
+    "vault-brain": {
       "command": "node",
-      "args": ["/absolute/path/to/secondbrain-vault/dist/cli.js", "--vault", "/absolute/path/to/vault/personal", "mcp"],
+      "args": ["/absolute/path/to/vaultbrain/dist/cli.js", "--vault", "/absolute/path/to/vault/personal", "mcp"],
       "env": {
         "SBRAIN_PASSPHRASE": "use-a-real-passphrase-here",
         "SBRAIN_AGENT": "claude-code"

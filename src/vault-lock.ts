@@ -52,7 +52,7 @@ function isStale(record: LockRecord | undefined, staleMs: number): boolean {
 /**
  * Runs `operation` while holding an exclusive on-disk lock for the vault, so
  * two processes cannot interleave a note write with an index write. The lock
- * is advisory between secondbrain-vault processes — it protects against a
+ * is advisory between Vault Brain processes — it protects against a
  * second CLI/MCP/desktop session, not against someone editing files by hand.
  *
  * A lock left behind by a crashed process goes stale and is reclaimed, which

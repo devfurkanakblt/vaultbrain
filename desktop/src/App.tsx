@@ -185,7 +185,7 @@ function LockScreen({ notice, onUnlock }: { notice: string; onUnlock: (path: str
           <span className="seal-ring seal-ring-two" />
           <LockKeyhole size={30} strokeWidth={1.45} />
         </div>
-        <p className="eyebrow">SECOND BRAIN / LOCAL ARCHIVE</p>
+        <p className="eyebrow">VAULT BRAIN / LOCAL ARCHIVE</p>
         <h1>Your thoughts,<br /><em>under seal.</em></h1>
         <p className="unlock-copy">A fast workspace that stays yours. Unlocking happens on this device; the key never enters the interface.</p>
         {notice && <p className="lock-notice" role="status"><ShieldCheck size={14} />{notice}</p>}

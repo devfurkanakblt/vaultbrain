@@ -2892,7 +2892,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "secondbrain-vault-desktop"
+name = "vault-brain-desktop"
 version = "0.2.0"
 dependencies = [
  "aes-gcm",

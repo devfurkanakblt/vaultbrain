@@ -10,7 +10,7 @@ import { analyzeMarkdown, normalizeNotePath } from "../dist/markdown.js";
 const PASSPHRASE = "document-vault-test-passphrase";
 
 function tempVault() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "secondbrain-documents-test-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-documents-test-"));
 }
 
 test("Markdown analysis extracts knowledge structure but ignores code", () => {

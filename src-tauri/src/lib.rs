@@ -3183,7 +3183,7 @@ fn list_note_revisions(
             current: true,
         });
     }
-    revisions.sort_by(|left, right| right.revision.cmp(&left.revision));
+    revisions.sort_by_key(|item| std::cmp::Reverse(item.revision));
     Ok(revisions)
 }
 
@@ -4689,7 +4689,7 @@ pub fn run() {
             delete_attachment,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running SecondBrain Vault");
+        .expect("error while running Vault Brain");
 }
 
 #[cfg(test)]
@@ -4697,7 +4697,7 @@ mod tests {
     use super::*;
 
     fn temporary_vault(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("secondbrain-{label}-{}", Uuid::new_v4()))
+        std::env::temp_dir().join(format!("vault-brain-{label}-{}", Uuid::new_v4()))
     }
 
     #[test]

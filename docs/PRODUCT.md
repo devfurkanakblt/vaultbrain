@@ -1,8 +1,8 @@
-# SecondBrain Vault — Product Contract
+# Vault Brain — Product Contract
 
 ## Positioning
 
-SecondBrain Vault is a local-first knowledge workspace whose default promise is:
+Vault Brain is a local-first knowledge workspace whose default promise is:
 
 > Faster to recall. Safer to trust.
 

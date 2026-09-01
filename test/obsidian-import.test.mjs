@@ -20,8 +20,8 @@ function write(root, relative, contents) {
 }
 
 test("an Obsidian vault imports notes, assets and canvases with a useful integrity report", () => {
-  const source = tempDirectory("secondbrain-obsidian-source-");
-  const destination = tempDirectory("secondbrain-obsidian-target-");
+  const source = tempDirectory("vault-brain-obsidian-source-");
+  const destination = tempDirectory("vault-brain-obsidian-target-");
   write(source, ".obsidian/app.json", "{}");
   write(source, "People/Ada.md", [
     "---",
@@ -83,7 +83,7 @@ test("an Obsidian vault imports notes, assets and canvases with a useful integri
 });
 
 test("the encrypted destination cannot be nested inside the source vault", () => {
-  const source = tempDirectory("secondbrain-obsidian-nesting-");
+  const source = tempDirectory("vault-brain-obsidian-nesting-");
   write(source, "Note.md", "hello");
   assert.throws(
     () => importObsidianVault(source, path.join(source, "encrypted"), PASSPHRASE),

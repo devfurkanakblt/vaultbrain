@@ -16,7 +16,7 @@ import {
 const PASSPHRASE = "workflow-test-passphrase";
 
 function tempVault() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "secondbrain-workflow-test-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-workflow-test-"));
 }
 
 test("Obsidian-style YAML frontmatter imports nested properties and exports valid YAML", () => {

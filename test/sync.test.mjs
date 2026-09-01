@@ -18,7 +18,7 @@ const DEVICE_A = "11111111-1111-4111-8111-111111111111";
 const DEVICE_B = "22222222-2222-4222-8222-222222222222";
 
 function tempVault(label) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), `secondbrain-sync-${label}-`));
+  return fs.mkdtempSync(path.join(os.tmpdir(), `vault-brain-sync-${label}-`));
 }
 
 function noteMutation(baseRevision, revision, body) {

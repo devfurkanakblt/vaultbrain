@@ -143,7 +143,7 @@ export function decrypt(payload: AnyEncryptedPayload, passphrase: string): strin
   const version = envelopeVersion(payload);
   if (version > ENVELOPE_VERSION) {
     throw new Error(
-      `This vault file uses envelope version ${version}; this build understands up to ${ENVELOPE_VERSION}. Upgrade secondbrain-vault to open it.`
+      `This vault file uses envelope version ${version}; this build understands up to ${ENVELOPE_VERSION}. Upgrade Vault Brain to open it.`
     );
   }
   if (version !== 0 && version !== 1) throw new Error(`Unsupported encrypted envelope version: ${version}`);

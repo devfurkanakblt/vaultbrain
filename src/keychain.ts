@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const SERVICE = "secondbrain-vault";
+const SERVICE = "vault-brain";
 
 export interface KeychainBackend {
   readonly name: string;
@@ -126,7 +126,7 @@ const linuxBackend: KeychainBackend = {
   name: "libsecret",
   available: () => process.platform === "linux" && canRun("secret-tool", ["--version"]),
   store(account, secret) {
-    run("secret-tool", ["store", "--label=secondbrain-vault", "service", SERVICE, "account", account], secret);
+    run("secret-tool", ["store", "--label=Vault Brain", "service", SERVICE, "account", account], secret);
   },
   lookup(account) {
     try {

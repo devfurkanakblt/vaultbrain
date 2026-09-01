@@ -27,7 +27,7 @@ jobs:
       - run: npm run tauri:build
       - uses: actions/upload-artifact@v4
         with:
-          name: secondbrain-vault-windows-${{ github.ref_name }}
+          name: vault-brain-windows-${{ github.ref_name }}
           if-no-files-found: error
           path: |
             src-tauri/target/release/bundle/msi/*.msi

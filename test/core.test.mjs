@@ -13,7 +13,7 @@ import { loadVaultFile, saveVaultFile, upsertEntry, vaultFilePath } from "../dis
 const PASSPHRASE = "correct horse battery staple";
 
 function tempVault() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "secondbrain-vault-test-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-test-"));
 }
 
 test("KV format round-trips quotes, backslashes and newlines", () => {

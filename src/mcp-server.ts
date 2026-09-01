@@ -137,7 +137,7 @@ export async function startMcpServer(vaultDir: string): Promise<void> {
     return { content: [{ type: "text" as const, text: body }], ...(isError ? { isError: true } : {}) };
   }
 
-  const server = new McpServer({ name: "secondbrain-vault", version: "0.2.0" });
+  const server = new McpServer({ name: "vault-brain", version: "0.2.0" });
 
   server.tool(
     "list_keys",

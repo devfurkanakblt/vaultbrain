@@ -25,7 +25,7 @@ const FIXTURE_PASSPHRASE = "fixture-only-passphrase";
 const PASSPHRASE = "durability-test-passphrase";
 
 function tempDir(label = "durability") {
-  return fs.mkdtempSync(path.join(os.tmpdir(), `secondbrain-${label}-`));
+  return fs.mkdtempSync(path.join(os.tmpdir(), `vault-brain-${label}-`));
 }
 
 function copyFixture(name) {

@@ -129,6 +129,11 @@ The existing AES-256-GCM/scrypt implementation remains supported while a version
 envelope and migration path are introduced. Cryptographic changes require test
 vectors and review; custom primitives are forbidden.
 
+The pre-rename `secondbrain-vault:*` associated-data and signature namespaces
+are immutable storage/protocol identifiers, not product branding. Vault Brain
+keeps them so existing encrypted vaults, sync changes and signed plugins remain
+readable and verifiable.
+
 ## Trust boundaries
 
 | Principal | Default access |
@@ -308,7 +313,7 @@ longer exists. Three mechanisms keep that from becoming data loss:
   recovery. A bulk import cannot name its notes up front, so it journals its
   scope instead and recovery does a full rebuild.
 - **An advisory vault lock.** `.sbrain.lock` serializes writers between
-  secondbrain-vault processes, is reentrant within one process, and is
+  Vault Brain processes, is reentrant within one process, and is
   reclaimed when the recorded holder has gone stale, so a crashed session
   cannot wedge a vault permanently. It does not defend against someone editing
   the files by hand — nothing advisory can.

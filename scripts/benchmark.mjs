@@ -49,7 +49,7 @@ if (!Number.isSafeInteger(noteCount) || noteCount < 100 || noteCount > 100_000) 
 const budget = budgetFor(noteCount);
 const shouldAssert = process.argv.includes("--assert");
 const passphrase = "benchmark-only-passphrase";
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "secondbrain-benchmark-"));
+const root = fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-benchmark-"));
 const resolvedRoot = path.resolve(root);
 const resolvedTemp = path.resolve(os.tmpdir());
 if (!resolvedRoot.startsWith(`${resolvedTemp}${path.sep}`)) {

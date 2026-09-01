@@ -10,7 +10,7 @@ import { OllamaLocalModelAdapter } from "../dist/semantic.js";
 const PASSPHRASE = "semantic-search-test-passphrase";
 
 function tempVault() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "secondbrain-semantic-test-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-semantic-test-"));
 }
 
 class TopicEmbeddingAdapter {

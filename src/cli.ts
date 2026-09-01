@@ -64,7 +64,7 @@ function openDocumentVault(vaultDir: string, passphrase: string): DocumentVault 
 program
   .name("sbrain")
   .description(
-    "secondbrain-vault — an .env-style, least-exposure personal data store for the AI age."
+    "Vault Brain — an .env-style, least-exposure personal data store for the AI age."
   )
   .option("--vault <dir>", "vault directory", DEFAULT_VAULT_DIR)
   .option("--sync-device <uuid>", "automatically capture document writes for this sync device");

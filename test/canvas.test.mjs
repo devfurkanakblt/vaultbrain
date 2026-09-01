@@ -11,7 +11,7 @@ import { DocumentVault } from "../dist/documents.js";
 const PASSPHRASE = "canvas-vault-test-passphrase";
 
 function tempVault(label = "canvas") {
-  return fs.mkdtempSync(path.join(os.tmpdir(), `secondbrain-${label}-`));
+  return fs.mkdtempSync(path.join(os.tmpdir(), `vault-brain-${label}-`));
 }
 
 function board(overrides = {}) {

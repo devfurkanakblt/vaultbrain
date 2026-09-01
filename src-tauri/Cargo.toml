@@ -1,12 +1,12 @@
 [package]
-name = "secondbrain-vault-desktop"
+name = "vault-brain-desktop"
 version = "0.2.0"
 description = "Local-first encrypted knowledge workspace"
-authors = ["SecondBrain Vault contributors"]
+authors = ["Vault Brain contributors"]
 edition = "2021"
 
 [lib]
-name = "secondbrain_vault_desktop_lib"
+name = "vault_brain_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
