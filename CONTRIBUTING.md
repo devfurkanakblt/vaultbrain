@@ -64,7 +64,9 @@ unlock performance.
 
 - **Encrypted formats:** keep old vaults readable, version new envelopes and
   add a synthetic compatibility fixture plus migration/tamper tests. The
-  `vault-brain:*` AAD and signature strings are immutable protocol identifiers.
+  `secondbrain-vault:*` AAD namespace and
+  `secondbrain-vault-plugin-signature-v1\n` signature prefix are immutable
+  protocol identifiers.
   Changing one requires an intentional format reset or version bump plus new
   fixtures and migration coverage.
 - **Persistence and sync:** add crash, stale-writer, replay, idempotency or

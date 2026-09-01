@@ -50,6 +50,24 @@ test("Obsidian-style YAML frontmatter imports nested properties and exports vali
   assert.equal(parsed.body, note.body);
 });
 
+test("legacy sbrain_id imports as the note ID without becoming a user property", () => {
+  const vault = new DocumentVault(tempVault(), PASSPHRASE);
+  const note = vault.importMarkdown(
+    "Archive/Legacy.md",
+    [
+      "---",
+      "sbrain_id: 11111111-1111-4111-8111-111111111111",
+      "title: Legacy portable note",
+      "category: archive",
+      "---",
+      "# Legacy portable note",
+    ].join("\n"),
+  );
+
+  assert.equal(note.id, "11111111-1111-4111-8111-111111111111");
+  assert.deepEqual(note.properties, { category: "archive" });
+});
+
 test("frontmatter rejects duplicate, aliased and prototype-shaping input", () => {
   assert.throws(() => parseFrontmatter("---\na: 1\na: 2\n---\nbody"), /Invalid YAML/iu);
   assert.throws(() => parseFrontmatter("---\na: &shared [1, 2]\nb: *shared\n---\nbody"));

@@ -58,7 +58,7 @@ function writeCanvasFixture() {
     ],
     edges: [{ id: "edge", fromNode: "contract", toNode: "text", toEnd: "arrow" }],
   });
-  fs.rmSync(path.join(canvasDir, ".vbrain.lock"), { force: true });
+  fs.rmSync(path.join(canvasDir, ".sbrain.lock"), { force: true });
 }
 
 if (process.argv.includes("--canvas-only")) {
@@ -147,7 +147,7 @@ attachmentVault.putAttachment(
   "frozen-payload.bin",
   "application/octet-stream",
 );
-fs.rmSync(path.join(attachmentDir, ".vbrain.lock"), { force: true });
+fs.rmSync(path.join(attachmentDir, ".sbrain.lock"), { force: true });
 
 writeCanvasFixture();
 
