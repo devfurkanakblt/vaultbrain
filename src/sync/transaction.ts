@@ -10,13 +10,17 @@ import {
 import { assertNoSymlinkComponents, assertNotSymlink, writeFileAtomic } from "../fs-safe.js";
 import { resolveInside } from "../safety.js";
 import {
+  CHANGE_ID,
   DEVICE_ID,
   OBJECT_ID,
   assertSyncJson,
   canonicalSyncJson,
   validateEncryptedSyncChange,
   type EncryptedSyncChange,
+  type SyncChange,
   type SyncJson,
+  type SyncObjectType,
+  type SyncOperation,
 } from "./protocol.js";
 
 export const LOCAL_TRANSACTION_AAD = "secondbrain-vault:sync-local-transaction:v1";
@@ -35,6 +39,32 @@ export type SyncTransactionFaultInjector = (point: SyncTransactionFaultPoint) =>
 
 export interface SyncTransactionOptions {
   faultInjector?: SyncTransactionFaultInjector;
+  applyFaultInjector?: SyncApplyFaultInjector;
+}
+
+export const APPLY_RECEIPT_AAD = "secondbrain-vault:sync-apply-receipt:v1";
+export type SyncApplyPhase = "prepared" | "storage-written" | "cursor-written" | "cleared";
+
+export interface SyncApplyFaultPoint {
+  phase: SyncApplyPhase;
+  timing: "after-effect" | "after-marker";
+}
+
+export type SyncApplyFaultInjector = (point: SyncApplyFaultPoint) => void;
+
+export interface SyncApplyLiveIdentity {
+  objectId: string;
+  storageRevision: number | null;
+}
+
+export interface SyncApplyReceipt {
+  version: 1;
+  changeId: string;
+  objectType: Extract<SyncObjectType, "note" | "canvas" | "attachment">;
+  objectId: string;
+  operation: SyncOperation;
+  expectedLive: SyncApplyLiveIdentity;
+  phase: Exclude<SyncApplyPhase, "cleared">;
 }
 
 export interface SyncLocalStorageOperation {
@@ -299,5 +329,129 @@ export class SyncLocalTransaction {
     if (!intent) return false;
     this.rollForward(intent, effects);
     return true;
+  }
+}
+
+function validateApplyReceipt(value: unknown): SyncApplyReceipt {
+  const receipt = value as SyncApplyReceipt | undefined;
+  if (!receipt || typeof receipt !== "object" || Array.isArray(receipt) || receipt.version !== 1) {
+    throw new Error("Unsupported or invalid sync apply receipt.");
+  }
+  if (!CHANGE_ID.test(receipt.changeId)) throw new Error("A sync apply receipt has an invalid change ID.");
+  if (receipt.objectType !== "note" && receipt.objectType !== "canvas" && receipt.objectType !== "attachment") {
+    throw new Error("A sync apply receipt has an unsupported object type.");
+  }
+  if (typeof receipt.objectId !== "string" || !OBJECT_ID.test(receipt.objectId)) {
+    throw new Error("A sync apply receipt has an invalid object ID.");
+  }
+  if (receipt.operation !== "put" && receipt.operation !== "delete") {
+    throw new Error("A sync apply receipt has an invalid operation.");
+  }
+  if (
+    !receipt.expectedLive ||
+    typeof receipt.expectedLive !== "object" ||
+    receipt.expectedLive.objectId !== receipt.objectId ||
+    !(
+      receipt.expectedLive.storageRevision === null ||
+      (Number.isSafeInteger(receipt.expectedLive.storageRevision) && receipt.expectedLive.storageRevision >= 1)
+    )
+  ) {
+    throw new Error("A sync apply receipt has an invalid expected live identity.");
+  }
+  if (receipt.phase !== "prepared" && receipt.phase !== "storage-written" && receipt.phase !== "cursor-written") {
+    throw new Error("A sync apply receipt has an invalid phase.");
+  }
+  return structuredClone(receipt);
+}
+
+/**
+ * The remote-apply receipt is intentionally separate from the local capture
+ * transaction. It records one storage mutation at a time, allowing recovery
+ * to recognize a completed write before it advances the public sync cursor.
+ */
+export class SyncApplyReceiptStore {
+  private readonly session: DocumentKeySession;
+  private readonly syncDir: string;
+  private readonly receiptPath: string;
+  private closed = false;
+
+  constructor(
+    vaultDir: string,
+    passphrase: string,
+    private readonly options: SyncTransactionOptions = {},
+  ) {
+    this.session = openDocumentKey(vaultDir, passphrase);
+    this.syncDir = resolveInside(this.session.rootDir, "sync");
+    this.receiptPath = resolveInside(this.syncDir, "apply-receipt.enc");
+    assertNoSymlinkComponents(this.session.rootDir, this.syncDir);
+    fs.mkdirSync(this.syncDir, { recursive: true, mode: 0o700 });
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.session.key.fill(0);
+    this.closed = true;
+  }
+
+  private key(): Buffer {
+    if (this.closed) throw new Error("Sync apply receipt store is closed.");
+    return this.session.key;
+  }
+
+  fault(phase: SyncApplyPhase, timing: SyncApplyFaultPoint["timing"]): void {
+    this.options.applyFaultInjector?.({ phase, timing });
+  }
+
+  private save(receipt: SyncApplyReceipt): void {
+    const plaintext = JSON.stringify(validateApplyReceipt(receipt));
+    const payload = encryptDocument(plaintext, this.key(), APPLY_RECEIPT_AAD);
+    assertNoSymlinkComponents(this.session.rootDir, this.receiptPath);
+    writeFileAtomic(this.receiptPath, JSON.stringify(payload), { mode: 0o600 });
+  }
+
+  read(): SyncApplyReceipt | undefined {
+    this.key();
+    assertNoSymlinkComponents(this.session.rootDir, this.receiptPath);
+    if (!fs.existsSync(this.receiptPath)) return undefined;
+    assertNotSymlink(this.receiptPath);
+    const payload = JSON.parse(fs.readFileSync(this.receiptPath, "utf8")) as DocumentPayload;
+    return validateApplyReceipt(JSON.parse(decryptDocument(payload, this.key(), APPLY_RECEIPT_AAD)));
+  }
+
+  begin(change: SyncChange, expectedLive: SyncApplyLiveIdentity): SyncApplyReceipt {
+    if (this.read()) throw new Error("A pending sync apply receipt must be recovered before another starts.");
+    if (
+      change.mutation.objectType !== "note" &&
+      change.mutation.objectType !== "canvas" &&
+      change.mutation.objectType !== "attachment"
+    ) {
+      throw new Error(`Live sync application is not implemented for ${change.mutation.objectType} objects.`);
+    }
+    const receipt: SyncApplyReceipt = {
+      version: 1,
+      changeId: change.id,
+      objectType: change.mutation.objectType,
+      objectId: change.mutation.objectId,
+      operation: change.mutation.operation,
+      expectedLive: structuredClone(expectedLive),
+      phase: "prepared",
+    };
+    this.save(receipt);
+    this.fault("prepared", "after-marker");
+    return receipt;
+  }
+
+  advance(receipt: SyncApplyReceipt, phase: SyncApplyReceipt["phase"]): SyncApplyReceipt {
+    const advanced = { ...receipt, phase };
+    this.save(advanced);
+    this.fault(phase, "after-marker");
+    return advanced;
+  }
+
+  clear(): void {
+    assertNoSymlinkComponents(this.session.rootDir, this.receiptPath);
+    assertNotSymlink(this.receiptPath);
+    if (fs.existsSync(this.receiptPath)) fs.unlinkSync(this.receiptPath);
+    this.fault("cleared", "after-marker");
   }
 }

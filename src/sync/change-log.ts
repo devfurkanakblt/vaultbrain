@@ -231,6 +231,11 @@ export class SyncChangeLog {
     return entry ? structuredClone(entry) : undefined;
   }
 
+  change(changeId: string): SyncChange | undefined {
+    if (!CHANGE_ID.test(changeId)) throw new Error("Invalid sync change ID.");
+    return this.changes().find((change) => change.id === changeId);
+  }
+
   markApplied(change: SyncChange): void {
     const known = this.changes().find((candidate) => candidate.id === change.id);
     if (!known) throw new Error(`Cannot mark an unknown sync change as applied: ${change.id}`);

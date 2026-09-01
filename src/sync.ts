@@ -9,6 +9,7 @@ import {
   type NoteSummary,
 } from "./documents.js";
 import { SyncChangeLog, resolveSyncObject } from "./sync/change-log.js";
+import { SyncApplyEngine, planSyncApplication, type SyncApplyEffects } from "./sync/engine.js";
 import {
   DEVICE_ID,
   MAX_SYNC_ATTACHMENT_BYTES,
@@ -30,6 +31,9 @@ import {
 } from "./sync/snapshots.js";
 import {
   SyncLocalTransaction,
+  SyncApplyReceiptStore,
+  type SyncApplyLiveIdentity,
+  type SyncApplyReceipt,
   type SyncLocalStorageOperation,
   type SyncTransactionEffects,
   type SyncTransactionOptions,
@@ -68,6 +72,9 @@ export type {
 export { SyncChangeLog, resolveSyncObject, verifySyncChanges } from "./sync/change-log.js";
 export type { SyncAppliedObject, SyncResolution, SyncVerification } from "./sync/change-log.js";
 export type {
+  SyncApplyFaultInjector,
+  SyncApplyFaultPoint,
+  SyncApplyPhase,
   SyncTransactionFaultInjector,
   SyncTransactionFaultPoint,
   SyncTransactionOptions,
@@ -81,6 +88,9 @@ export interface SyncApplyResult {
   revision: number;
   applied: number;
   alreadyApplied: boolean;
+  /** Present only when unresolved remote heads left live storage untouched. */
+  conflict?: true;
+  heads?: string[];
 }
 
 function validateOptionalDeviceId(passphrase: string, deviceId: string | undefined): string {
@@ -115,6 +125,7 @@ function noteSummary(note: NoteDocument): NoteSummary {
 export class SyncedDocumentVault extends DocumentVault {
   readonly changeLog: SyncChangeLog;
   private readonly localTransaction: SyncLocalTransaction;
+  private readonly applyEngine: SyncApplyEngine;
   private syncClosed = false;
 
   constructor(
@@ -126,15 +137,22 @@ export class SyncedDocumentVault extends DocumentVault {
     super(syncVaultDir, validateOptionalDeviceId(passphrase, deviceId));
     const changeLog = new SyncChangeLog(syncVaultDir, passphrase);
     let localTransaction: SyncLocalTransaction | undefined;
+    let applyEngine: SyncApplyEngine | undefined;
     try {
       localTransaction = new SyncLocalTransaction(syncVaultDir, passphrase, transactionOptions);
+      applyEngine = new SyncApplyEngine(new SyncApplyReceiptStore(syncVaultDir, passphrase, transactionOptions));
       this.changeLog = changeLog;
       this.localTransaction = localTransaction;
-      withVaultLock(this.syncVaultDir, () => this.localTransaction.recover(this.transactionEffects()));
+      this.applyEngine = applyEngine;
+      withVaultLock(this.syncVaultDir, () => {
+        this.localTransaction.recover(this.transactionEffects());
+        this.applyEngine.recover(this.applyEffects());
+      });
       // Unlock materializes/reconciles the ordinary document index once. A
       // later rejected local preflight can then remain byte-for-byte read-only.
       super.list();
     } catch (error) {
+      applyEngine?.close();
       localTransaction?.close();
       changeLog.close();
       super.lock();
@@ -144,6 +162,7 @@ export class SyncedDocumentVault extends DocumentVault {
 
   override lock(): void {
     if (!this.syncClosed) {
+      this.applyEngine.close();
       this.localTransaction.close();
       this.changeLog.close();
       this.syncClosed = true;
@@ -509,17 +528,46 @@ export class SyncedDocumentVault extends DocumentVault {
     });
   }
 
-  private isAncestor(changes: Map<string, SyncChange>, ancestor: string, descendant: string): boolean {
-    const pending = [...(changes.get(descendant)?.parents ?? [])];
-    const seen = new Set<string>();
-    while (pending.length > 0) {
-      const id = pending.pop()!;
-      if (id === ancestor) return true;
-      if (seen.has(id)) continue;
-      seen.add(id);
-      pending.push(...(changes.get(id)?.parents ?? []));
+  private expectedRemoteLive(change: SyncChange): SyncApplyLiveIdentity {
+    const { objectType, objectId, operation } = change.mutation;
+    if (operation === "delete") return { objectId, storageRevision: null };
+    if (objectType === "note") return { objectId, storageRevision: (this.tryNote(objectId)?.revision ?? 0) + 1 };
+    if (objectType === "canvas") return { objectId, storageRevision: (this.tryCanvas(objectId)?.revision ?? 0) + 1 };
+    if (objectType === "attachment") return { objectId, storageRevision: null };
+    throw new Error(`Live sync application is not implemented for ${objectType} objects.`);
+  }
+
+  private remoteChangeMaterialized(change: SyncChange, receipt: SyncApplyReceipt): boolean {
+    const { objectType, objectId, operation, value } = change.mutation;
+    if (objectType === "note") {
+      const current = this.tryNote(objectId);
+      return operation === "delete"
+        ? !current
+        : !!current &&
+            current.id === receipt.expectedLive.objectId &&
+            current.revision === receipt.expectedLive.storageRevision &&
+            sameSyncValue(asSyncJson(noteSnapshot(current)), value);
     }
-    return false;
+    if (objectType === "canvas") {
+      const current = this.tryCanvas(objectId);
+      return operation === "delete"
+        ? !current
+        : !!current &&
+            current.id === receipt.expectedLive.objectId &&
+            current.revision === receipt.expectedLive.storageRevision &&
+            sameSyncValue(asSyncJson(canvasSnapshot(current)), value);
+    }
+    if (objectType === "attachment") {
+      const present = super.listAttachments().some((attachment) => attachment.id === objectId);
+      if (operation === "delete") return !present;
+      if (!present) return false;
+      const attachment = super.getAttachment(objectId);
+      return (
+        attachment.info.id === receipt.expectedLive.objectId &&
+        sameSyncValue(asSyncJson(attachmentSnapshot(attachment.data, attachment.info)), value)
+      );
+    }
+    throw new Error(`Live sync application is not implemented for ${objectType} objects.`);
   }
 
   private applyStorageChange(change: SyncChange): void {
@@ -557,6 +605,16 @@ export class SyncedDocumentVault extends DocumentVault {
     throw new Error(`Live sync application is not implemented for ${objectType} objects.`);
   }
 
+  private applyEffects(): SyncApplyEffects {
+    return {
+      findChange: (changeId) => this.changeLog.change(changeId),
+      expectedLive: (change) => this.expectedRemoteLive(change),
+      isMaterialized: (change, receipt) => this.remoteChangeMaterialized(change, receipt),
+      writeStorage: (change) => this.applyStorageChange(change),
+      writeCursor: (change) => this.changeLog.markApplied(change),
+    };
+  }
+
   applyResolved(objectType: "note" | "canvas" | "attachment", objectId: string): SyncApplyResult {
     return withVaultLock(this.syncVaultDir, () => {
       const resolution = this.changeLog.resolve(objectType, objectId);
@@ -564,9 +622,16 @@ export class SyncedDocumentVault extends DocumentVault {
         throw new Error(`No sync changes exist for ${objectType}:${objectId}.`);
       }
       if (resolution.status === "conflict") {
-        throw new Error(
-          `Cannot apply ${objectType}:${objectId}: ${resolution.heads.length} unresolved sync heads remain.`,
-        );
+        return {
+          objectType,
+          objectId,
+          changeId: resolution.winner.id,
+          revision: resolution.winner.mutation.revision,
+          applied: 0,
+          alreadyApplied: false,
+          conflict: true,
+          heads: resolution.heads,
+        };
       }
       const winner = resolution.winner;
       const applied = this.changeLog.applied(objectType, objectId);
@@ -581,51 +646,10 @@ export class SyncedDocumentVault extends DocumentVault {
         };
       }
 
-      const all = this.changeLog.changes();
-      const byId = new Map(all.map((change) => [change.id, change]));
-      if (applied && !byId.has(applied.changeId)) {
-        throw new Error(`Applied sync cursor refers to a missing change: ${applied.changeId}`);
-      }
-      const appliedChange = applied ? byId.get(applied.changeId) : undefined;
-      if (
-        appliedChange &&
-        (appliedChange.mutation.objectType !== objectType || appliedChange.mutation.objectId !== objectId)
-      ) {
-        throw new Error("Applied sync cursor refers to a change for another object.");
-      }
-      if (applied && !this.isAncestor(byId, applied.changeId, winner.id)) {
-        throw new Error("The resolved sync winner does not descend from the locally applied change.");
-      }
-
-      const relevant = all.filter(
-        (change) =>
-          change.mutation.objectType === objectType &&
-          change.mutation.objectId === objectId &&
-          (change.id === winner.id || this.isAncestor(byId, change.id, winner.id)),
-      );
-      let cursor = applied;
+      const planned = planSyncApplication(this.changeLog.changes(), objectType, objectId, winner, applied);
       let appliedCount = 0;
-      for (let revision = (cursor?.revision ?? 0) + 1; revision <= winner.mutation.revision; revision += 1) {
-        const candidates = relevant
-          .filter(
-            (change) =>
-              change.mutation.revision === revision && (!cursor || this.isAncestor(byId, cursor.changeId, change.id)),
-          )
-          .sort((left, right) => {
-            if (left.mutation.operation !== right.mutation.operation) {
-              return left.mutation.operation === "delete" ? -1 : 1;
-            }
-            return left.id === right.id ? 0 : left.id < right.id ? 1 : -1;
-          });
-        const next = candidates[0];
-        if (!next) throw new Error(`Resolved sync history is missing object revision ${revision}.`);
-        this.applyStorageChange(next);
-        this.changeLog.markApplied(next);
-        cursor = {
-          changeId: next.id,
-          revision: next.mutation.revision,
-          operation: next.mutation.operation,
-        };
+      for (const next of planned) {
+        this.applyEngine.apply(next, this.applyEffects());
         appliedCount += 1;
       }
       return {

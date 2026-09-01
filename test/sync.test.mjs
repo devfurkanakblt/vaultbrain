@@ -277,7 +277,7 @@ test("unresolved remote conflicts never mutate live vault storage", () => {
   first.changeLog.import(second.changeLog.envelopes());
 
   assert.equal(first.changeLog.resolve("note", note.id).status, "conflict");
-  assert.throws(() => first.applyResolved("note", note.id), /unresolved sync heads/iu);
+  assert.equal(first.applyResolved("note", note.id).conflict, true);
   assert.equal(first.get(note.id).body, "from A");
 
   first.lock();

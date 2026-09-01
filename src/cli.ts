@@ -846,9 +846,11 @@ sync
         objectId,
       );
       console.log(
-        result.alreadyApplied
-          ? `Already applied ${objectType}:${objectId}@${result.revision}.`
-          : `Applied ${result.applied} change(s); ${objectType}:${objectId}@${result.revision} is current.`,
+        result.conflict
+          ? `Cannot apply ${objectType}:${objectId}; ${result.heads!.length} unresolved sync heads remain.`
+          : result.alreadyApplied
+            ? `Already applied ${objectType}:${objectId}@${result.revision}.`
+            : `Applied ${result.applied} change(s); ${objectType}:${objectId}@${result.revision} is current.`,
       );
     } finally {
       vault.lock();
