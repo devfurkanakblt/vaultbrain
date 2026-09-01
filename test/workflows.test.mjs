@@ -6,17 +6,12 @@ import test from "node:test";
 
 import { DocumentVault } from "../dist/documents.js";
 import { parseFrontmatter } from "../dist/frontmatter.js";
-import {
-  createFromTemplate,
-  openDailyNote,
-  parseLocalDate,
-  renderTemplateText,
-} from "../dist/templates.js";
+import { createFromTemplate, openDailyNote, parseLocalDate, renderTemplateText } from "../dist/templates.js";
 
 const PASSPHRASE = "workflow-test-passphrase";
 
 function tempVault() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "secondbrain-workflow-test-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-workflow-test-"));
 }
 
 test("Obsidian-style YAML frontmatter imports nested properties and exports valid YAML", () => {
@@ -49,7 +44,7 @@ test("Obsidian-style YAML frontmatter imports nested properties and exports vali
 
   const portable = vault.exportMarkdown(note.id);
   const parsed = parseFrontmatter(portable);
-  assert.equal(parsed.attributes.sbrain_id, note.id);
+  assert.equal(parsed.attributes.vbrain_id, note.id);
   assert.equal(parsed.attributes.due, "2026-09-15");
   assert.deepEqual(parsed.attributes.nested, { active: true, score: 9.5 });
   assert.equal(parsed.body, note.body);
@@ -89,7 +84,7 @@ test("templates render deterministic safe variables into body and properties", (
       path: "x.md",
       date: new Date(2026, 8, 15, 9, 7),
     }),
-    "2026/09/15 09:07"
+    "2026/09/15 09:07",
   );
 });
 

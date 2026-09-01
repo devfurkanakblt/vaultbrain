@@ -58,7 +58,7 @@ function writeCanvasFixture() {
     ],
     edges: [{ id: "edge", fromNode: "contract", toNode: "text", toEnd: "arrow" }],
   });
-  fs.rmSync(path.join(canvasDir, ".sbrain.lock"), { force: true });
+  fs.rmSync(path.join(canvasDir, ".vbrain.lock"), { force: true });
 }
 
 if (process.argv.includes("--canvas-only")) {
@@ -89,14 +89,14 @@ const legacyPlaintext = [
   "# @desc: Dummy blood type for format tests",
   'BLOOD_TYPE="0 Rh+"',
   "",
-  "# @desc: Dummy appointment with a quoted \\\"note\\\" inside",
+  '# @desc: Dummy appointment with a quoted \\"note\\" inside',
   'DOCTOR_NEXT_APPOINTMENT="2026-09-15"',
   "",
 ].join("\n");
 fs.writeFileSync(
   path.join(legacyDir, "health.kv.enc"),
   JSON.stringify(encryptLegacy(legacyPlaintext, FIXTURE_PASSPHRASE), null, 2),
-  { mode: 0o600 }
+  { mode: 0o600 },
 );
 
 const documentDir = path.join(fixtures, "documents-v1");
@@ -140,14 +140,14 @@ attachmentVault.putMany([
 attachmentVault.putAttachment(
   Buffer.from("This attachment was written by the TypeScript core and must stay readable.\n", "utf8"),
   "frozen-note.txt",
-  "text/plain"
+  "text/plain",
 );
 attachmentVault.putAttachment(
   Buffer.from(Array.from({ length: 4096 }, (_value, index) => index % 256)),
   "frozen-payload.bin",
-  "application/octet-stream"
+  "application/octet-stream",
 );
-fs.rmSync(path.join(attachmentDir, ".sbrain.lock"), { force: true });
+fs.rmSync(path.join(attachmentDir, ".vbrain.lock"), { force: true });
 
 writeCanvasFixture();
 
@@ -155,8 +155,8 @@ fs.writeFileSync(
   path.join(fixtures, "README.md"),
   `# Format fixtures
 
-Checked-in vaults written by earlier releases. Tests open them to prove that a
-change to the storage format did not silently orphan existing data.
+Checked-in synthetic vaults for format-contract and compatibility tests. Tests
+open them to prove that storage behavior remains intentional across changes.
 
 **Passphrase for every fixture here: \`${FIXTURE_PASSPHRASE}\`.**
 
@@ -164,15 +164,14 @@ They contain dummy data only. Never point a fixture at a real vault.
 
 | Directory | Format | What it pins |
 |---|---|---|
-| \`kv-envelope-v0/\` | key-value envelope, pre-versioning | Unversioned \`{salt,iv,authTag,ciphertext}\` files still decrypt, and \`sbrain migrate\` upgrades them in place |
+| \`kv-envelope-v0/\` | key-value envelope, pre-versioning | Unversioned \`{salt,iv,authTag,ciphertext}\` files still decrypt, and \`vbrain migrate\` upgrades them in place |
 | \`documents-v1/\` | document vault manifest v1, index v2 | An encrypted note vault written by the current format still opens, searches and resolves links |
 | \`documents-attachments-v1/\` | document vault with chunk-encrypted attachments | Content-addressed attachments written by the TypeScript core still open in the Rust desktop core |
 | \`documents-canvas-v1/\` | document vault with encrypted canvas objects | Canvas objects, identities, references and AAD written by the TypeScript core stay readable |
 
-Regenerate deliberately (see \`scripts/make-fixtures.mjs\`) — overwriting a
-fixture throws away the evidence it was there to provide. To cover a new
-format version, add a new directory instead of editing an old one.
-`
+Regenerate deliberately (see \`scripts/make-fixtures.mjs\`). After publication,
+preserve released-format fixtures and add a new directory for each new format.
+`,
 );
 
 console.log(`Fixtures written to ${fixtures}`);

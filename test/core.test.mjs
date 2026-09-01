@@ -13,7 +13,7 @@ import { loadVaultFile, saveVaultFile, upsertEntry, vaultFilePath } from "../dis
 const PASSPHRASE = "correct horse battery staple";
 
 function tempVault() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "secondbrain-vault-test-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-test-"));
 }
 
 test("KV format round-trips quotes, backslashes and newlines", () => {
@@ -21,7 +21,7 @@ test("KV format round-trips quotes, backslashes and newlines", () => {
     {
       key: "MULTILINE_NOTE",
       desc: "safe tag",
-      value: "first line\nsecond = line with \\\"quotes\\\" and C:\\\\notes",
+      value: 'first line\nsecond = line with \\"quotes\\" and C:\\\\notes',
     },
   ];
   assert.deepEqual(parseKV(serializeKV(entries)), entries);
@@ -54,7 +54,10 @@ test("encrypted storage writes atomically and schema never contains values", () 
   assert.equal(onDisk.includes("0 Rh+"), false);
   assert.equal(onDisk.includes("line 1"), false);
   assert.equal(schema.files.health.length, 2);
-  assert.deepEqual(fs.readdirSync(vault).filter((name) => name.endsWith(".tmp")), []);
+  assert.deepEqual(
+    fs.readdirSync(vault).filter((name) => name.endsWith(".tmp")),
+    [],
+  );
 });
 
 test("date-only upper bounds include the complete UTC day", () => {

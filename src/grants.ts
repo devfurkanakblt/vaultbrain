@@ -99,9 +99,7 @@ export function grantsExist(vaultDir: string): boolean {
 export function normalizeAgent(input: string): string {
   const agent = input.trim();
   if (!agent || agent.length > 120 || !SAFE_AGENT.test(agent)) {
-    throw new Error(
-      "Invalid agent name. Use up to 120 letters, numbers, spaces, '_', '.', ':' or '-'."
-    );
+    throw new Error("Invalid agent name. Use up to 120 letters, numbers, spaces, '_', '.', ':' or '-'.");
   }
   return agent;
 }
@@ -204,7 +202,7 @@ export function revokeGrant(vaultDir: string, id: string, passphrase: string): A
       // A revoked grant must not leave a usable approval behind.
       requests: file.requests.filter((request) => request.agent !== grant.agent),
     },
-    passphrase
+    passphrase,
   );
   return revoked;
 }
@@ -249,7 +247,8 @@ export function decide(file: GrantFile | null, request: AccessRequest): GrantDec
   const now = request.now ?? new Date();
   const agent = request.agent.trim();
   const matching = file.grants.filter(
-    (grant) => grant.agent === agent && isActive(grant, now) && grant.scopes.some((scope) => scopeCovers(scope, request))
+    (grant) =>
+      grant.agent === agent && isActive(grant, now) && grant.scopes.some((scope) => scopeCovers(scope, request)),
   );
   if (!matching.length) {
     const known = file.grants.some((grant) => grant.agent === agent);
@@ -257,17 +256,17 @@ export function decide(file: GrantFile | null, request: AccessRequest): GrantDec
       allowed: false,
       reason: known
         ? `No active grant lets "${agent}" ${request.action} that key. Ask the vault owner to widen or renew it.`
-        : `"${agent}" has no grant in this vault. Ask the vault owner to run: sbrain grant add.`,
+        : `"${agent}" has no grant in this vault. Ask the vault owner to run: vbrain grant add.`,
       redact: "full",
       requiresConfirmation: false,
       ungoverned: false,
     };
   }
   const covering = matching.flatMap((grant) =>
-    grant.scopes.filter((scope) => scopeCovers(scope, request)).map((scope) => ({ grant, scope }))
+    grant.scopes.filter((scope) => scopeCovers(scope, request)).map((scope) => ({ grant, scope })),
   );
   const strictest = covering.reduce((left, right) =>
-    strictness(right.scope.redact) > strictness(left.scope.redact) ? right : left
+    strictness(right.scope.redact) > strictness(left.scope.redact) ? right : left,
   );
   const requiresConfirmation =
     request.action === "resolve" && covering.every(({ grant }) => grant.confirm === "always");
@@ -295,7 +294,7 @@ function strictness(level: RedactionLevel): number {
 export function requestConfirmation(
   vaultDir: string,
   input: { agent: string; file: string; key: string },
-  passphrase: string
+  passphrase: string,
 ): ConfirmationRequest {
   const file = loadGrants(vaultDir, passphrase);
   if (!file) throw new Error("This vault has no grant policy.");
@@ -306,7 +305,7 @@ export function requestConfirmation(
       request.agent === agent &&
       request.file === input.file &&
       request.key === input.key &&
-      new Date(request.expiresAt).getTime() > now.getTime()
+      new Date(request.expiresAt).getTime() > now.getTime(),
   );
   if (open) return open;
   const request: ConfirmationRequest = {
@@ -318,11 +317,7 @@ export function requestConfirmation(
     expiresAt: new Date(now.getTime() + APPROVAL_TTL_MS).toISOString(),
     approvedAt: null,
   };
-  saveGrants(
-    vaultDir,
-    { ...file, requests: [...pruneRequests(file.requests, now), request] },
-    passphrase
-  );
+  saveGrants(vaultDir, { ...file, requests: [...pruneRequests(file.requests, now), request] }, passphrase);
   return request;
 }
 
@@ -336,17 +331,11 @@ export function pendingRequests(vaultDir: string, passphrase: string): Confirmat
   return pruneRequests(file.requests, new Date()).filter((request) => !request.approvedAt);
 }
 
-export function approveRequest(
-  vaultDir: string,
-  id: string,
-  passphrase: string
-): ConfirmationRequest {
+export function approveRequest(vaultDir: string, id: string, passphrase: string): ConfirmationRequest {
   const file = loadGrants(vaultDir, passphrase);
   if (!file) throw new Error("This vault has no grant policy.");
   const now = new Date();
-  const request = pruneRequests(file.requests, now).find(
-    (entry) => entry.id === id || entry.id.startsWith(id)
-  );
+  const request = pruneRequests(file.requests, now).find((entry) => entry.id === id || entry.id.startsWith(id));
   if (!request) throw new Error(`No pending request matches: ${id}`);
   const approved: ConfirmationRequest = {
     ...request,
@@ -357,11 +346,9 @@ export function approveRequest(
     vaultDir,
     {
       ...file,
-      requests: pruneRequests(file.requests, now).map((entry) =>
-        entry.id === request.id ? approved : entry
-      ),
+      requests: pruneRequests(file.requests, now).map((entry) => (entry.id === request.id ? approved : entry)),
     },
-    passphrase
+    passphrase,
   );
   return approved;
 }
@@ -370,9 +357,7 @@ export function denyRequest(vaultDir: string, id: string, passphrase: string): v
   const file = loadGrants(vaultDir, passphrase);
   if (!file) throw new Error("This vault has no grant policy.");
   const now = new Date();
-  const remaining = pruneRequests(file.requests, now).filter(
-    (entry) => entry.id !== id && !entry.id.startsWith(id)
-  );
+  const remaining = pruneRequests(file.requests, now).filter((entry) => entry.id !== id && !entry.id.startsWith(id));
   saveGrants(vaultDir, { ...file, requests: remaining }, passphrase);
 }
 
@@ -383,7 +368,7 @@ export function denyRequest(vaultDir: string, id: string, passphrase: string): v
 export function consumeApproval(
   vaultDir: string,
   input: { agent: string; file: string; key: string },
-  passphrase: string
+  passphrase: string,
 ): boolean {
   const file = loadGrants(vaultDir, passphrase);
   if (!file) return false;
@@ -394,7 +379,7 @@ export function consumeApproval(
       request.approvedAt !== null &&
       request.agent === input.agent &&
       request.file === input.file &&
-      request.key === input.key
+      request.key === input.key,
   );
   if (!approval) {
     if (live.length !== file.requests.length) {
@@ -402,11 +387,7 @@ export function consumeApproval(
     }
     return false;
   }
-  saveGrants(
-    vaultDir,
-    { ...file, requests: live.filter((request) => request.id !== approval.id) },
-    passphrase
-  );
+  saveGrants(vaultDir, { ...file, requests: live.filter((request) => request.id !== approval.id) }, passphrase);
   return true;
 }
 
@@ -416,11 +397,10 @@ export function filterDiscoverable<T extends { key: string }>(
   agent: string,
   vaultFile: string,
   entries: T[],
-  now = new Date()
+  now = new Date(),
 ): T[] {
   if (!file) return entries;
   return entries.filter(
-    (entry) =>
-      decide(file, { agent, action: "discover", file: vaultFile, key: entry.key, now }).allowed
+    (entry) => decide(file, { agent, action: "discover", file: vaultFile, key: entry.key, now }).allowed,
   );
 }

@@ -27,7 +27,8 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tauri::State;
+use tauri::{AppHandle, State};
+use tauri_plugin_dialog::DialogExt;
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -3183,7 +3184,7 @@ fn list_note_revisions(
             current: true,
         });
     }
-    revisions.sort_by_key(|revision| Reverse(revision.revision));
+    revisions.sort_by_key(|item| std::cmp::Reverse(item.revision));
     Ok(revisions)
 }
 
@@ -4617,11 +4618,30 @@ fn delete_attachment(id: String, state: State<'_, AppState>) -> Result<Attachmen
     with_vault_write(session, |session| remove_attachment(session, &id))
 }
 
+/// Opens the operating system's folder chooser and reports back only the path
+/// the person selected, or `None` when they dismissed it. Typing a path by hand
+/// stays supported; this exists so a vault does not have to be spelled out.
+#[tauri::command(async)]
+fn pick_vault_directory(app: AppHandle) -> Result<Option<String>, String> {
+    let chosen = app
+        .dialog()
+        .file()
+        .set_title("Choose a vault folder")
+        .blocking_pick_folder();
+    let Some(chosen) = chosen else {
+        return Ok(None);
+    };
+    let path = chosen.into_path().map_err(|error| error.to_string())?;
+    Ok(Some(path.to_string_lossy().into_owned()))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
+            pick_vault_directory,
             unlock_vault,
             lock_vault,
             list_notes,
@@ -4670,7 +4690,7 @@ pub fn run() {
             delete_attachment,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running SecondBrain Vault");
+        .expect("error while running Vault Brain");
 }
 
 #[cfg(test)]
@@ -4678,7 +4698,7 @@ mod tests {
     use super::*;
 
     fn temporary_vault(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("secondbrain-{label}-{}", Uuid::new_v4()))
+        std::env::temp_dir().join(format!("vault-brain-{label}-{}", Uuid::new_v4()))
     }
 
     #[test]
@@ -5315,7 +5335,7 @@ mod tests {
         let path = temporary_vault("plugin");
         let path_text = path.to_string_lossy().into_owned();
         let mut session = open_session(&path_text, "plugin passphrase").unwrap();
-        let source = "sbrain.ui.panel('Words', '12');".to_string();
+        let source = "vbrain.ui.panel('Words', '12');".to_string();
 
         let installed = with_vault_write(&mut session, |session| {
             install_plugin_in(

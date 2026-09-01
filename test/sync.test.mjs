@@ -5,20 +5,14 @@ import path from "node:path";
 import test from "node:test";
 
 import { openDocumentKey } from "../dist/document-crypto.js";
-import {
-  SyncChangeLog,
-  SyncedDocumentVault,
-  canonicalSyncJson,
-  openSyncChange,
-  sealSyncChange,
-} from "../dist/sync.js";
+import { SyncChangeLog, SyncedDocumentVault, canonicalSyncJson, openSyncChange, sealSyncChange } from "../dist/sync.js";
 
 const PASSPHRASE = "sync-test-passphrase";
 const DEVICE_A = "11111111-1111-4111-8111-111111111111";
 const DEVICE_B = "22222222-2222-4222-8222-222222222222";
 
 function tempVault(label) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), `secondbrain-sync-${label}-`));
+  return fs.mkdtempSync(path.join(os.tmpdir(), `vault-brain-sync-${label}-`));
 }
 
 function noteMutation(baseRevision, revision, body) {
@@ -245,7 +239,10 @@ test("clean remote changes apply idempotently to the real vault storage", () => 
   assert.equal(target.applyResolved("attachment", attachment.id).applied, 1);
   assert.equal(target.get(note.id).body, "remote edit");
   assert.equal(target.getCanvas(canvas.id).nodes[0].text, "remote edit");
-  assert.equal(target.listAttachments().some((item) => item.id === attachment.id), false);
+  assert.equal(
+    target.listAttachments().some((item) => item.id === attachment.id),
+    false,
+  );
   assert.deepEqual(target.applyResolved("note", note.id), {
     objectType: "note",
     objectId: note.id,

@@ -52,10 +52,13 @@ describe("theme tokens", () => {
     saveTheme(custom);
     expect(loadTheme()).toEqual(custom);
 
-    localStorage.setItem("sbrain:theme", "{not json");
+    localStorage.setItem("vbrain:theme", "{not json");
     expect(loadTheme()).toEqual(DEFAULT_THEME);
 
-    localStorage.setItem("sbrain:theme", JSON.stringify({ preset: "archive", accent: "chartreuse", readingSize: 900, editorFont: "comic" }));
+    localStorage.setItem(
+      "vbrain:theme",
+      JSON.stringify({ preset: "archive", accent: "chartreuse", readingSize: 900, editorFont: "comic" }),
+    );
     expect(loadTheme()).toEqual(DEFAULT_THEME);
   });
 

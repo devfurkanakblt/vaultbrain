@@ -1,5 +1,28 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AttachmentContent, AttachmentInfo, Backlink, Bookmark, CanvasDocument, CanvasInput, CanvasSummary, DailyNote, DeletedNote, KnowledgeGraph, NoteDocument, NoteSummary, PluginPackage, PluginSecurityPolicy, PluginSummary, PropertyRow, RevisionInfo, SavedView, SearchHit, UnlinkedMention, VaultInfo, WorkspaceState } from "./types";
+import type {
+  AttachmentContent,
+  AttachmentInfo,
+  Backlink,
+  Bookmark,
+  CanvasDocument,
+  CanvasInput,
+  CanvasSummary,
+  DailyNote,
+  DeletedNote,
+  KnowledgeGraph,
+  NoteDocument,
+  NoteSummary,
+  PluginPackage,
+  PluginSecurityPolicy,
+  PluginSummary,
+  PropertyRow,
+  RevisionInfo,
+  SavedView,
+  SearchHit,
+  UnlinkedMention,
+  VaultInfo,
+  WorkspaceState,
+} from "./types";
 
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -124,6 +147,16 @@ function demoAttachmentId(data: string): string {
 }
 
 export const vaultBridge = {
+  /**
+   * The native folder chooser lives in the Rust core, so the webview never
+   * reads a directory itself — it receives one path the person picked. Demo
+   * mode has no operating system behind it and answers with a sample path.
+   */
+  async pickVaultDirectory(): Promise<string | null> {
+    if (isTauri) return call<string | null>("pick_vault_directory");
+    await new Promise((resolve) => setTimeout(resolve, 240));
+    return "C:/Users/you/Vaults/Demo";
+  },
   async unlock(path: string, passphrase: string): Promise<VaultInfo> {
     if (isTauri) return call<VaultInfo>("unlock_vault", { vaultPath: path, passphrase });
     await new Promise((resolve) => setTimeout(resolve, 520));
@@ -135,7 +168,9 @@ export const vaultBridge = {
   },
   async listNotes(): Promise<NoteSummary[]> {
     if (isTauri) return call<NoteSummary[]>("list_notes");
-    return demoNotes.map(({ body: _body, properties: _properties, createdAt: _created, version: _version, ...note }) => note);
+    return demoNotes.map(
+      ({ body: _body, properties: _properties, createdAt: _created, version: _version, ...note }) => note,
+    );
   },
   async getNote(reference: string): Promise<NoteDocument> {
     if (isTauri) return call<NoteDocument>("get_note", { reference });
@@ -172,7 +207,9 @@ export const vaultBridge = {
     if (isTauri) return call<NoteDocument>("rename_note", { reference, path, title });
     const note = await vaultBridge.getNote(reference);
     const logical = path.toLowerCase().endsWith(".md") ? path : `${path}.md`;
-    if (demoNotes.some((item) => item.id !== note.id && item.path.toLocaleLowerCase() === logical.toLocaleLowerCase())) {
+    if (
+      demoNotes.some((item) => item.id !== note.id && item.path.toLocaleLowerCase() === logical.toLocaleLowerCase())
+    ) {
       throw new Error(`A note already exists at ${logical}.`);
     }
     demoHistory = [...demoHistory, structuredClone(note)];
@@ -203,7 +240,13 @@ export const vaultBridge = {
       if (!held || held.revision < note.revision) latest.set(note.id, note);
     }
     return [...latest.values()]
-      .map((note) => ({ id: note.id, path: note.path, title: note.title, revision: note.revision, updatedAt: note.updatedAt }))
+      .map((note) => ({
+        id: note.id,
+        path: note.path,
+        title: note.title,
+        revision: note.revision,
+        updatedAt: note.updatedAt,
+      }))
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   },
   async noteRevisions(reference: string): Promise<RevisionInfo[]> {
@@ -230,11 +273,11 @@ export const vaultBridge = {
     const historical = await vaultBridge.noteRevision(reference, revision);
     const live = demoNotes.find((note) => note.id === historical.id);
     if (live) demoHistory = [...demoHistory, structuredClone(live)];
-    const base = live?.revision ?? Math.max(0, ...demoHistory.filter((note) => note.id === historical.id).map((note) => note.revision));
+    const base =
+      live?.revision ??
+      Math.max(0, ...demoHistory.filter((note) => note.id === historical.id).map((note) => note.revision));
     const restored: NoteDocument = { ...historical, revision: base + 1, updatedAt: new Date().toISOString() };
-    demoNotes = live
-      ? demoNotes.map((note) => (note.id === restored.id ? restored : note))
-      : [...demoNotes, restored];
+    demoNotes = live ? demoNotes.map((note) => (note.id === restored.id ? restored : note)) : [...demoNotes, restored];
     return structuredClone(restored);
   },
   async templates(): Promise<NoteSummary[]> {
@@ -244,7 +287,13 @@ export const vaultBridge = {
       .map(({ body: _body, properties: _properties, createdAt: _createdAt, version: _version, ...note }) => note)
       .sort((left, right) => left.path.localeCompare(right.path));
   },
-  async createFromTemplate(template: string, path: string, title?: string, variables?: Record<string, string>, date?: string): Promise<NoteDocument> {
+  async createFromTemplate(
+    template: string,
+    path: string,
+    title?: string,
+    variables?: Record<string, string>,
+    date?: string,
+  ): Promise<NoteDocument> {
     if (isTauri) return call<NoteDocument>("create_from_template", { template, path, title, variables, date });
     const source = await vaultBridge.getNote(template);
     const logical = path.toLowerCase().endsWith(".md") ? path : `${path}.md`;
@@ -261,7 +310,12 @@ export const vaultBridge = {
       body: render(source.body),
       aliases: [],
       tags: source.tags.filter((tag) => tag !== "template"),
-      properties: Object.fromEntries(Object.entries(source.properties).map(([key, value]) => [key, typeof value === "string" ? render(value) : value])),
+      properties: Object.fromEntries(
+        Object.entries(source.properties).map(([key, value]) => [
+          key,
+          typeof value === "string" ? render(value) : value,
+        ]),
+      ),
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       revision: 1,
@@ -278,7 +332,11 @@ export const vaultBridge = {
     if (existing) return { note: structuredClone(existing), created: false };
     if (template) {
       const note = await vaultBridge.createFromTemplate(template, logical, day, undefined, day);
-      const tagged = { ...note, tags: [...new Set(["daily", ...note.tags])], properties: { ...note.properties, date: day } };
+      const tagged = {
+        ...note,
+        tags: [...new Set(["daily", ...note.tags])],
+        properties: { ...note.properties, date: day },
+      };
       demoNotes = demoNotes.map((item) => (item.id === note.id ? tagged : item));
       return { note: structuredClone(tagged), created: true };
     }
@@ -303,7 +361,9 @@ export const vaultBridge = {
     const normalized = query.toLocaleLowerCase();
     if (!normalized) return [];
     return demoNotes
-      .filter((note) => `${note.title} ${note.path} ${note.tags.join(" ")} ${note.body}`.toLocaleLowerCase().includes(normalized))
+      .filter((note) =>
+        `${note.title} ${note.path} ${note.tags.join(" ")} ${note.body}`.toLocaleLowerCase().includes(normalized),
+      )
       .map((note) => ({
         ...note,
         score: note.title.toLocaleLowerCase().includes(normalized) ? 20 : 4,
@@ -334,7 +394,10 @@ export const vaultBridge = {
         }
       }
     }
-    const clusters = demoClusters(demoNotes.map((note) => note.id), edges);
+    const clusters = demoClusters(
+      demoNotes.map((note) => note.id),
+      edges,
+    );
     return {
       nodes: demoNotes.map((note) => ({
         id: note.id,
@@ -370,9 +433,10 @@ export const vaultBridge = {
     if (isTauri) return call<SavedView[]>("save_saved_view", { view });
     const stamped: SavedView = { ...view, id: view.id || crypto.randomUUID(), updatedAt: new Date().toISOString() };
     const index = demoViews.findIndex((item) => item.id === stamped.id);
-    demoViews = index >= 0
-      ? demoViews.map((item) => (item.id === stamped.id ? stamped : item))
-      : [...demoViews, { ...stamped, createdAt: new Date().toISOString() }];
+    demoViews =
+      index >= 0
+        ? demoViews.map((item) => (item.id === stamped.id ? stamped : item))
+        : [...demoViews, { ...stamped, createdAt: new Date().toISOString() }];
     demoViews.sort((left, right) => left.name.localeCompare(right.name));
     return structuredClone(demoViews);
   },
@@ -390,13 +454,19 @@ export const vaultBridge = {
     const stamp = new Date().toISOString();
     const bookmarks: Bookmark[] = [];
     for (const bookmark of state.bookmarks) {
-      if (!bookmarks.some((item) => item.id === bookmark.id)) bookmarks.push({ ...bookmark, createdAt: bookmark.createdAt || stamp });
+      if (!bookmarks.some((item) => item.id === bookmark.id))
+        bookmarks.push({ ...bookmark, createdAt: bookmark.createdAt || stamp });
     }
     demoWorkspace = {
       version: 1,
       bookmarks,
       layouts: state.layouts
-        .map((layout) => ({ ...layout, id: layout.id || crypto.randomUUID(), createdAt: layout.createdAt || stamp, updatedAt: stamp }))
+        .map((layout) => ({
+          ...layout,
+          id: layout.id || crypto.randomUUID(),
+          createdAt: layout.createdAt || stamp,
+          updatedAt: stamp,
+        }))
         .sort((left, right) => left.name.localeCompare(right.name)),
     };
     return structuredClone(demoWorkspace);
@@ -415,9 +485,19 @@ export const vaultBridge = {
         if (!hits.length) continue;
         const at = hits[0].index ?? 0;
         mentions.push({
-          id: note.id, path: note.path, title: note.title, aliases: note.aliases, tags: note.tags,
-          updatedAt: note.updatedAt, revision: note.revision,
-          name, count: hits.length, excerpt: note.body.slice(Math.max(0, at - 60), at + name.length + 60).replace(/\s+/gu, " ").trim(),
+          id: note.id,
+          path: note.path,
+          title: note.title,
+          aliases: note.aliases,
+          tags: note.tags,
+          updatedAt: note.updatedAt,
+          revision: note.revision,
+          name,
+          count: hits.length,
+          excerpt: note.body
+            .slice(Math.max(0, at - 60), at + name.length + 60)
+            .replace(/\s+/gu, " ")
+            .trim(),
         });
         break;
       }
@@ -437,16 +517,21 @@ export const vaultBridge = {
   async getCanvas(reference: string): Promise<CanvasDocument> {
     if (isTauri) return call<CanvasDocument>("get_canvas", { reference });
     const normalized = reference.toLocaleLowerCase().replace(/\.canvas$/u, "");
-    const canvas = demoCanvases.find((item) => item.id === reference
-      || item.path.toLocaleLowerCase().replace(/\.canvas$/u, "") === normalized
-      || item.title.toLocaleLowerCase() === normalized);
+    const canvas = demoCanvases.find(
+      (item) =>
+        item.id === reference ||
+        item.path.toLocaleLowerCase().replace(/\.canvas$/u, "") === normalized ||
+        item.title.toLocaleLowerCase() === normalized,
+    );
     if (!canvas) throw new Error(`Canvas not found: ${reference}`);
     return structuredClone(canvas);
   },
   async saveCanvas(input: CanvasInput): Promise<CanvasDocument> {
     if (isTauri) return call<CanvasDocument>("save_canvas", { input });
     const canvasPath = input.path.toLocaleLowerCase().endsWith(".canvas") ? input.path : `${input.path}.canvas`;
-    const existing = demoCanvases.find((item) => item.id === input.id || item.path.toLocaleLowerCase() === canvasPath.toLocaleLowerCase());
+    const existing = demoCanvases.find(
+      (item) => item.id === input.id || item.path.toLocaleLowerCase() === canvasPath.toLocaleLowerCase(),
+    );
     if (existing && input.baseRevision !== undefined && input.baseRevision !== existing.revision) {
       throw new Error(`Canvas revision conflict: expected ${input.baseRevision}, current ${existing.revision}.`);
     }
@@ -455,7 +540,13 @@ export const vaultBridge = {
       version: 1,
       id: existing?.id ?? input.id ?? crypto.randomUUID(),
       path: canvasPath,
-      title: input.title?.trim() || canvasPath.split("/").at(-1)?.replace(/\.canvas$/iu, "") || "Untitled canvas",
+      title:
+        input.title?.trim() ||
+        canvasPath
+          .split("/")
+          .at(-1)
+          ?.replace(/\.canvas$/iu, "") ||
+        "Untitled canvas",
       nodes: structuredClone(input.nodes),
       edges: structuredClone(input.edges),
       nodeCount: input.nodes.length,
@@ -465,7 +556,7 @@ export const vaultBridge = {
       revision: (existing?.revision ?? 0) + 1,
     };
     demoCanvases = existing
-      ? demoCanvases.map((item) => item.id === existing.id ? canvas : item)
+      ? demoCanvases.map((item) => (item.id === existing.id ? canvas : item))
       : [...demoCanvases, canvas];
     return structuredClone(canvas);
   },
@@ -484,7 +575,10 @@ export const vaultBridge = {
     for (const name of [to.title, ...to.aliases].filter(Boolean).sort((left, right) => right.length - left.length)) {
       const pattern = mentionPattern(name);
       body = outsideLinks(body, (segment) =>
-        segment.replace(pattern, (surface) => (surface === to.title ? `[[${to.title}]]` : `[[${to.title}|${surface}]]`)));
+        segment.replace(pattern, (surface) =>
+          surface === to.title ? `[[${to.title}]]` : `[[${to.title}|${surface}]]`,
+        ),
+      );
     }
     const next = { ...from, body, revision: from.revision + 1, updatedAt: new Date().toISOString() };
     demoNotes = demoNotes.map((note) => (note.id === from.id ? next : note));
@@ -620,24 +714,30 @@ export const vaultBridge = {
 function demoRenderer(title: string, path: string, date: string | undefined, variables?: Record<string, string>) {
   const when = date ? new Date(`${date}T12:00:00`) : new Date();
   const pad = (value: number) => String(value).padStart(2, "0");
-  const stamp = (format: string) => format.replace(/YYYY|MM|DD|HH|mm|ss/gu, (token) => ({
-    YYYY: String(when.getFullYear()),
-    MM: pad(when.getMonth() + 1),
-    DD: pad(when.getDate()),
-    HH: pad(when.getHours()),
-    mm: pad(when.getMinutes()),
-    ss: pad(when.getSeconds()),
-  })[token]!);
-  return (text: string) => text.replace(/\{\{\s*([\w.-]+)(?::([^}]+))?\s*\}\}/gu, (whole, name: string, format?: string) => {
-    if (name === "date") return stamp(format?.trim() || "YYYY-MM-DD");
-    if (name === "time") return stamp(format?.trim() || "HH:mm");
-    if (name === "title") return title;
-    if (name === "path") return path;
-    if (name === "year") return stamp("YYYY");
-    if (name === "month") return stamp("MM");
-    if (name === "day") return stamp("DD");
-    return variables?.[name] ?? whole;
-  });
+  const stamp = (format: string) =>
+    format.replace(
+      /YYYY|MM|DD|HH|mm|ss/gu,
+      (token) =>
+        ({
+          YYYY: String(when.getFullYear()),
+          MM: pad(when.getMonth() + 1),
+          DD: pad(when.getDate()),
+          HH: pad(when.getHours()),
+          mm: pad(when.getMinutes()),
+          ss: pad(when.getSeconds()),
+        })[token]!,
+    );
+  return (text: string) =>
+    text.replace(/\{\{\s*([\w.-]+)(?::([^}]+))?\s*\}\}/gu, (whole, name: string, format?: string) => {
+      if (name === "date") return stamp(format?.trim() || "YYYY-MM-DD");
+      if (name === "time") return stamp(format?.trim() || "HH:mm");
+      if (name === "title") return title;
+      if (name === "path") return path;
+      if (name === "year") return stamp("YYYY");
+      if (name === "month") return stamp("MM");
+      if (name === "day") return stamp("DD");
+      return variables?.[name] ?? whole;
+    });
 }
 
 function demoDay(date?: string) {

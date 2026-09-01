@@ -5,6 +5,6 @@ src-tauri/target/
 *.log
 vault/**/audit.log
 .env
-.sbrain.lock
+.vbrain.lock
 src-tauri/gen/
 src-tauri/vault/

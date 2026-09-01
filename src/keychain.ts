@@ -56,14 +56,19 @@ function credentialDir(): string {
  */
 const windowsBackend: KeychainBackend = {
   name: "windows-dpapi",
-  available: () => process.platform === "win32" && canRun("powershell", ["-NoProfile", "-NonInteractive", "-Command", "exit 0"]),
+  available: () =>
+    process.platform === "win32" && canRun("powershell", ["-NoProfile", "-NonInteractive", "-Command", "exit 0"]),
   store(account, secret) {
     const blob = run(
       "powershell",
-      ["-NoProfile", "-NonInteractive", "-Command",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
         "$plain = [Console]::In.ReadToEnd(); " +
-        "ConvertTo-SecureString -String $plain -AsPlainText -Force | ConvertFrom-SecureString"],
-      secret
+          "ConvertTo-SecureString -String $plain -AsPlainText -Force | ConvertFrom-SecureString",
+      ],
+      secret,
     ).trim();
     if (!/^[0-9a-fA-F]+$/u.test(blob)) throw new Error("DPAPI did not return a credential blob.");
     const dir = credentialDir();
@@ -77,11 +82,15 @@ const windowsBackend: KeychainBackend = {
     try {
       const secret = run(
         "powershell",
-        ["-NoProfile", "-NonInteractive", "-Command",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
           "$blob = [Console]::In.ReadToEnd().Trim(); " +
-          "$sec = ConvertTo-SecureString -String $blob; " +
-          "[Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))"],
-        blob
+            "$sec = ConvertTo-SecureString -String $blob; " +
+            "[Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))",
+        ],
+        blob,
       );
       return secret.replace(/\r?\n$/u, "");
     } catch {
@@ -126,7 +135,7 @@ const linuxBackend: KeychainBackend = {
   name: "libsecret",
   available: () => process.platform === "linux" && canRun("secret-tool", ["--version"]),
   store(account, secret) {
-    run("secret-tool", ["store", "--label=secondbrain-vault", "service", SERVICE, "account", account], secret);
+    run("secret-tool", ["store", "--label=Vault Brain", "service", SERVICE, "account", account], secret);
   },
   lookup(account) {
     try {

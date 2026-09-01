@@ -6,7 +6,7 @@
  *   DOCTOR_NEXT_APPOINTMENT="2026-09-15"
  *
  * The `@desc` line is the ONLY thing that ever leaves the vault unencrypted
- * (via `sbrain index`). It must never itself contain the sensitive value —
+ * (via `vbrain index`). It must never itself contain the sensitive value —
  * that's a convention this tool can't fully enforce, so the README calls
  * it out explicitly.
  */
@@ -58,9 +58,5 @@ export function parseKV(content: string): KVEntry[] {
 }
 
 export function serializeKV(entries: KVEntry[]): string {
-  return (
-    entries
-      .map((e) => `# @desc: ${e.desc}\n${e.key}=${JSON.stringify(e.value)}`)
-      .join("\n\n") + "\n"
-  );
+  return entries.map((e) => `# @desc: ${e.desc}\n${e.key}=${JSON.stringify(e.value)}`).join("\n\n") + "\n";
 }

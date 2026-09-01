@@ -15,7 +15,7 @@ export interface ThemePreset extends ThemeSettings {
   danger: string;
 }
 
-const STORAGE_KEY = "sbrain:theme";
+const STORAGE_KEY = "vbrain:theme";
 
 export const EDITOR_FONTS: Record<EditorFont, string> = {
   serif: '"Newsreader Variable", Georgia, serif',
@@ -24,10 +24,50 @@ export const EDITOR_FONTS: Record<EditorFont, string> = {
 };
 
 export const PRESETS: ThemePreset[] = [
-  { preset: "archive", label: "Archive", shell: "#151713", surface: "#f1eee4", ink: "#25271f", accent: "#c7ef55", danger: "#a84e38", readingSize: 17, editorFont: "serif" },
-  { preset: "slate", label: "Slate", shell: "#14171c", surface: "#eef1f5", ink: "#1e242b", accent: "#8bb8ff", danger: "#c05a45", readingSize: 17, editorFont: "sans" },
-  { preset: "ember", label: "Ember", shell: "#191411", surface: "#f5efe6", ink: "#2a221d", accent: "#eb9a4f", danger: "#b04a34", readingSize: 18, editorFont: "serif" },
-  { preset: "contrast", label: "High contrast", shell: "#000000", surface: "#ffffff", ink: "#000000", accent: "#ffd400", danger: "#c81e1e", readingSize: 18, editorFont: "sans" },
+  {
+    preset: "archive",
+    label: "Archive",
+    shell: "#151713",
+    surface: "#f1eee4",
+    ink: "#25271f",
+    accent: "#c7ef55",
+    danger: "#a84e38",
+    readingSize: 17,
+    editorFont: "serif",
+  },
+  {
+    preset: "slate",
+    label: "Slate",
+    shell: "#14171c",
+    surface: "#eef1f5",
+    ink: "#1e242b",
+    accent: "#8bb8ff",
+    danger: "#c05a45",
+    readingSize: 17,
+    editorFont: "sans",
+  },
+  {
+    preset: "ember",
+    label: "Ember",
+    shell: "#191411",
+    surface: "#f5efe6",
+    ink: "#2a221d",
+    accent: "#eb9a4f",
+    danger: "#b04a34",
+    readingSize: 18,
+    editorFont: "serif",
+  },
+  {
+    preset: "contrast",
+    label: "High contrast",
+    shell: "#000000",
+    surface: "#ffffff",
+    ink: "#000000",
+    accent: "#ffd400",
+    danger: "#c81e1e",
+    readingSize: 18,
+    editorFont: "sans",
+  },
 ];
 
 export const DEFAULT_THEME: ThemeSettings = settingsOf(PRESETS[0]);
@@ -48,7 +88,13 @@ function channels(hex: string) {
 }
 
 function toHex(parts: number[]) {
-  return `#${parts.map((part) => Math.max(0, Math.min(255, Math.round(part))).toString(16).padStart(2, "0")).join("")}`;
+  return `#${parts
+    .map((part) =>
+      Math.max(0, Math.min(255, Math.round(part)))
+        .toString(16)
+        .padStart(2, "0"),
+    )
+    .join("")}`;
 }
 
 export function isHexColor(value: string) {

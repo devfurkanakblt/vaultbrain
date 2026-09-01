@@ -255,13 +255,16 @@ export function parseMarkdownNote(notePath: string, markdown: string): NoteInput
       ? (metadata.properties as Record<string, PropertyValue>)
       : {};
   const portableId =
-    typeof metadata.sbrain_id === "string"
-      ? metadata.sbrain_id
-      : typeof metadata.id === "string" && /^[a-f0-9-]{36}$/u.test(metadata.id)
-        ? metadata.id
-        : undefined;
+    typeof metadata.vbrain_id === "string"
+      ? metadata.vbrain_id
+      : typeof metadata.sbrain_id === "string"
+        ? metadata.sbrain_id
+        : typeof metadata.id === "string" && /^[a-f0-9-]{36}$/u.test(metadata.id)
+          ? metadata.id
+          : undefined;
   const reserved = new Set([
     "sbrain_id",
+    "vbrain_id",
     "title",
     "aliases",
     "tags",
@@ -2248,7 +2251,7 @@ export class DocumentVault {
     const note = this.get(reference);
     const frontmatter: Record<string, PropertyValue> = {
       ...note.properties,
-      sbrain_id: note.id,
+      vbrain_id: note.id,
       title: note.title,
       aliases: note.aliases,
       tags: note.tags,

@@ -20,36 +20,38 @@ function write(root, relative, contents) {
 }
 
 test("an Obsidian vault imports notes, assets and canvases with a useful integrity report", () => {
-  const source = tempDirectory("secondbrain-obsidian-source-");
-  const destination = tempDirectory("secondbrain-obsidian-target-");
+  const source = tempDirectory("vault-brain-obsidian-source-");
+  const destination = tempDirectory("vault-brain-obsidian-target-");
   write(source, ".obsidian/app.json", "{}");
-  write(source, "People/Ada.md", [
-    "---",
-    "id: ada-human-slug",
-    "aliases: [Ada]",
-    "---",
-    "# Ada",
-  ].join("\n"));
-  write(source, "Projects/Alpha.md", [
-    "# Alpha",
-    "Owner: [[People/Ada]].",
-    "Diagram: ![[assets/diagram.png]].",
-    "Missing embed: ![[missing.png]].",
-    "![Photo](../assets/photo.jpg)",
-    "[Missing note](../People/Missing.md)",
-  ].join("\n"));
+  write(source, "People/Ada.md", ["---", "id: ada-human-slug", "aliases: [Ada]", "---", "# Ada"].join("\n"));
+  write(
+    source,
+    "Projects/Alpha.md",
+    [
+      "# Alpha",
+      "Owner: [[People/Ada]].",
+      "Diagram: ![[assets/diagram.png]].",
+      "Missing embed: ![[missing.png]].",
+      "![Photo](../assets/photo.jpg)",
+      "[Missing note](../People/Missing.md)",
+    ].join("\n"),
+  );
   write(source, "Broken.md", "---\na: 1\na: 2\n---\ninvalid frontmatter");
   write(source, "assets/diagram.png", Buffer.from("diagram"));
   write(source, "assets/photo.jpg", Buffer.from("photo"));
   write(source, "one/cover.png", Buffer.from("cover one"));
   write(source, "two/cover.png", Buffer.from("cover two"));
-  write(source, "Boards/Overview.canvas", JSON.stringify({
-    nodes: [
-      { id: "note", type: "file", file: "People/Ada.md", x: 0, y: 0, width: 200, height: 100 },
-      { id: "asset", type: "file", file: "assets/diagram.png", x: 250, y: 0, width: 200, height: 100 },
-    ],
-    edges: [],
-  }));
+  write(
+    source,
+    "Boards/Overview.canvas",
+    JSON.stringify({
+      nodes: [
+        { id: "note", type: "file", file: "People/Ada.md", x: 0, y: 0, width: 200, height: 100 },
+        { id: "asset", type: "file", file: "assets/diagram.png", x: 250, y: 0, width: 200, height: 100 },
+      ],
+      edges: [],
+    }),
+  );
 
   const report = importObsidianVault(source, destination, PASSPHRASE);
   assert.equal(report.ok, false);
@@ -58,7 +60,9 @@ test("an Obsidian vault imports notes, assets and canvases with a useful integri
   assert.deepEqual(report.canvases, { discovered: 1, imported: 1 });
   assert.equal(report.ignoredEntries, 1);
   assert.ok(report.issues.some((issue) => issue.code === "note-import-failed" && issue.path === "Broken.md"));
-  assert.ok(report.issues.some((issue) => issue.code === "missing-attachment" && issue.reference === "![[missing.png]]"));
+  assert.ok(
+    report.issues.some((issue) => issue.code === "missing-attachment" && issue.reference === "![[missing.png]]"),
+  );
   assert.ok(report.issues.some((issue) => issue.code === "missing-markdown-link"));
   assert.ok(report.issues.some((issue) => issue.code === "ambiguous-attachment-name"));
   assert.ok(!report.issues.some((issue) => issue.reference === "![[assets/diagram.png]]"));
@@ -83,10 +87,7 @@ test("an Obsidian vault imports notes, assets and canvases with a useful integri
 });
 
 test("the encrypted destination cannot be nested inside the source vault", () => {
-  const source = tempDirectory("secondbrain-obsidian-nesting-");
+  const source = tempDirectory("vault-brain-obsidian-nesting-");
   write(source, "Note.md", "hello");
-  assert.throws(
-    () => importObsidianVault(source, path.join(source, "encrypted"), PASSPHRASE),
-    /must be outside/iu
-  );
+  assert.throws(() => importObsidianVault(source, path.join(source, "encrypted"), PASSPHRASE), /must be outside/iu);
 });

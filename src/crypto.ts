@@ -82,8 +82,10 @@ function validateParameters(kdf: unknown): ScryptParameters {
   if (!Number.isSafeInteger(N) || N < 2 ** 14 || N > 2 ** 20 || (N & (N - 1)) !== 0) {
     throw new Error("Encrypted envelope declares an unacceptable scrypt cost.");
   }
-  if (!Number.isSafeInteger(r) || r < 1 || r > 32) throw new Error("Encrypted envelope declares an unacceptable scrypt block size.");
-  if (!Number.isSafeInteger(p) || p < 1 || p > 16) throw new Error("Encrypted envelope declares an unacceptable scrypt parallelism.");
+  if (!Number.isSafeInteger(r) || r < 1 || r > 32)
+    throw new Error("Encrypted envelope declares an unacceptable scrypt block size.");
+  if (!Number.isSafeInteger(p) || p < 1 || p > 16)
+    throw new Error("Encrypted envelope declares an unacceptable scrypt parallelism.");
   base64Bytes(candidate.salt, 16, 64, "salt");
   return { name: "scrypt", N, r, p, salt: candidate.salt };
 }
@@ -106,7 +108,7 @@ function deriveKey(passphrase: string, salt: Buffer, parameters: Omit<ScryptPara
 function headerAad(version: number, kdf: ScryptParameters): Buffer {
   return Buffer.from(
     JSON.stringify({ version, cipher: ALGO, kdf: { name: kdf.name, N: kdf.N, r: kdf.r, p: kdf.p, salt: kdf.salt } }),
-    "utf8"
+    "utf8",
   );
 }
 
@@ -143,7 +145,7 @@ export function decrypt(payload: AnyEncryptedPayload, passphrase: string): strin
   const version = envelopeVersion(payload);
   if (version > ENVELOPE_VERSION) {
     throw new Error(
-      `This vault file uses envelope version ${version}; this build understands up to ${ENVELOPE_VERSION}. Upgrade secondbrain-vault to open it.`
+      `This vault file uses envelope version ${version}; this build understands up to ${ENVELOPE_VERSION}. Upgrade Vault Brain to open it.`,
     );
   }
   if (version !== 0 && version !== 1) throw new Error(`Unsupported encrypted envelope version: ${version}`);
@@ -164,10 +166,7 @@ export function decrypt(payload: AnyEncryptedPayload, passphrase: string): strin
     const decipher = crypto.createDecipheriv(ALGO, key, iv);
     if (!legacy) decipher.setAAD(headerAad(version, kdf));
     decipher.setAuthTag(authTag);
-    const dec = Buffer.concat([
-      decipher.update(Buffer.from(payload.ciphertext, "base64")),
-      decipher.final(),
-    ]);
+    const dec = Buffer.concat([decipher.update(Buffer.from(payload.ciphertext, "base64")), decipher.final()]);
     return dec.toString("utf8");
   } finally {
     key.fill(0);

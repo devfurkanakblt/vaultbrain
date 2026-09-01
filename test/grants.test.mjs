@@ -28,7 +28,7 @@ import { upsertEntry } from "../dist/store.js";
 const PASSPHRASE = "correct horse battery staple";
 
 function tempVault() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "secondbrain-grants-test-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-grants-test-"));
 }
 
 function scope(overrides = {}) {
@@ -55,10 +55,7 @@ test("the first grant closes the vault to every other agent", () => {
   addGrant(vault, { agent: "claude", scopes: [scope()] }, PASSPHRASE);
   const policy = loadGrants(vault, PASSPHRASE);
 
-  assert.equal(
-    decide(policy, { agent: "claude", action: "resolve", file: "health", key: "IBAN" }).allowed,
-    true
-  );
+  assert.equal(decide(policy, { agent: "claude", action: "resolve", file: "health", key: "IBAN" }).allowed, true);
   const stranger = decide(policy, { agent: "other-agent", action: "resolve", file: "health", key: "IBAN" });
   assert.equal(stranger.allowed, false);
   assert.equal(stranger.redact, "full");
@@ -67,11 +64,7 @@ test("the first grant closes the vault to every other agent", () => {
 
 test("a scope narrows by file, key pattern and action", () => {
   const vault = tempVault();
-  addGrant(
-    vault,
-    { agent: "claude", scopes: [scope({ keys: ["NOTE_*", "IBAN"], actions: ["resolve"] })] },
-    PASSPHRASE
-  );
+  addGrant(vault, { agent: "claude", scopes: [scope({ keys: ["NOTE_*", "IBAN"], actions: ["resolve"] })] }, PASSPHRASE);
   const policy = loadGrants(vault, PASSPHRASE);
   const ask = (over) =>
     decide(policy, { agent: "claude", action: "resolve", file: "health", key: "IBAN", ...over }).allowed;
@@ -97,7 +90,7 @@ test("an expired grant stops working without being revoked", () => {
   addGrant(
     vault,
     { agent: "claude", scopes: [scope()], expiresAt: new Date(Date.now() + 60_000).toISOString() },
-    PASSPHRASE
+    PASSPHRASE,
   );
   const policy = loadGrants(vault, PASSPHRASE);
   const request = { agent: "claude", action: "resolve", file: "health", key: "IBAN" };
@@ -106,17 +99,13 @@ test("an expired grant stops working without being revoked", () => {
   assert.equal(
     decide(policy, { ...request, now: new Date(Date.now() + 120_000) }).allowed,
     false,
-    "the grant lapses on its own clock"
+    "the grant lapses on its own clock",
   );
 });
 
 test("revoking takes effect immediately and drops that agent's approvals", () => {
   const vault = tempVault();
-  const created = addGrant(
-    vault,
-    { agent: "claude", scopes: [scope()], confirm: "always" },
-    PASSPHRASE
-  );
+  const created = addGrant(vault, { agent: "claude", scopes: [scope()], confirm: "always" }, PASSPHRASE);
   const request = requestConfirmation(vault, { agent: "claude", file: "health", key: "IBAN" }, PASSPHRASE);
   approveRequest(vault, request.id, PASSPHRASE);
 
@@ -130,23 +119,19 @@ test("revoking takes effect immediately and drops that agent's approvals", () =>
       file: "health",
       key: "IBAN",
     }).allowed,
-    false
+    false,
   );
   assert.equal(
     consumeApproval(vault, { agent: "claude", file: "health", key: "IBAN" }, PASSPHRASE),
     false,
-    "a revoked grant must not leave a usable approval behind"
+    "a revoked grant must not leave a usable approval behind",
   );
 });
 
 test("the strictest redaction among matching scopes is the one applied", () => {
   const vault = tempVault();
   addGrant(vault, { agent: "claude", scopes: [scope({ redact: "partial" })] }, PASSPHRASE);
-  addGrant(
-    vault,
-    { agent: "claude", scopes: [scope({ file: "*", keys: ["*"], redact: "none" })] },
-    PASSPHRASE
-  );
+  addGrant(vault, { agent: "claude", scopes: [scope({ file: "*", keys: ["*"], redact: "none" })] }, PASSPHRASE);
   const decision = decide(loadGrants(vault, PASSPHRASE), {
     agent: "claude",
     action: "resolve",
@@ -178,7 +163,7 @@ test("a confirmation approval is single-use", () => {
   assert.equal(
     requestConfirmation(vault, target, PASSPHRASE).id,
     request.id,
-    "a repeated ask reuses the open request rather than flooding the owner"
+    "a repeated ask reuses the open request rather than flooding the owner",
   );
 
   approveRequest(vault, request.id, PASSPHRASE);
@@ -201,11 +186,7 @@ test("denying a request removes it without approving anything", () => {
 
 test("discovery is narrowed to the key names a grant covers", () => {
   const vault = tempVault();
-  addGrant(
-    vault,
-    { agent: "claude", scopes: [scope({ keys: ["NOTE_*"], actions: ["discover"] })] },
-    PASSPHRASE
-  );
+  addGrant(vault, { agent: "claude", scopes: [scope({ keys: ["NOTE_*"], actions: ["discover"] })] }, PASSPHRASE);
   const entries = [
     { key: "NOTE_20260830_090000_visit", desc: "doctor" },
     { key: "IBAN", desc: "bank" },
@@ -215,7 +196,7 @@ test("discovery is narrowed to the key names a grant covers", () => {
 
   assert.deepEqual(
     visible.map((entry) => entry.key),
-    ["NOTE_20260830_090000_visit"]
+    ["NOTE_20260830_090000_visit"],
   );
   assert.equal(filterDiscoverable(null, "claude", "health", entries).length, 2);
 });
@@ -231,10 +212,22 @@ test("the grant file is encrypted at rest and refuses a wrong passphrase", () =>
 
 test("an invalid scope is rejected before it can be stored", () => {
   const vault = tempVault();
-  assert.throws(() => normalizeScope({ file: "../escape", keys: ["*"], actions: ["resolve"], redact: "none" }), /Invalid vault category/u);
-  assert.throws(() => normalizeScope({ file: "health", keys: ["a b"], actions: ["resolve"], redact: "none" }), /Invalid key pattern/u);
-  assert.throws(() => normalizeScope({ file: "health", keys: ["*"], actions: [], redact: "none" }), /at least one action/u);
-  assert.throws(() => normalizeScope({ file: "health", keys: ["*"], actions: ["resolve"], redact: "loud" }), /Unknown redaction level/u);
+  assert.throws(
+    () => normalizeScope({ file: "../escape", keys: ["*"], actions: ["resolve"], redact: "none" }),
+    /Invalid vault category/u,
+  );
+  assert.throws(
+    () => normalizeScope({ file: "health", keys: ["a b"], actions: ["resolve"], redact: "none" }),
+    /Invalid key pattern/u,
+  );
+  assert.throws(
+    () => normalizeScope({ file: "health", keys: ["*"], actions: [], redact: "none" }),
+    /at least one action/u,
+  );
+  assert.throws(
+    () => normalizeScope({ file: "health", keys: ["*"], actions: ["resolve"], redact: "loud" }),
+    /Unknown redaction level/u,
+  );
   assert.throws(() => addGrant(vault, { agent: "bad/name", scopes: [scope()] }, PASSPHRASE), /Invalid agent name/u);
   assert.throws(() => addGrant(vault, { agent: "claude", scopes: [] }, PASSPHRASE), /between 1 and/u);
 });
@@ -280,12 +273,12 @@ test("audit entries carrying grant fields sign and verify, next to legacy ones",
       redaction: "partial",
       outcome: "allowed",
     },
-    PASSPHRASE
+    PASSPHRASE,
   );
   appendAudit(
     vault,
     { actor: "mcp-agent", file: "finance", key: "CARD", agent: "claude", outcome: "denied" },
-    PASSPHRASE
+    PASSPHRASE,
   );
 
   const verification = verifyAudit(vault, PASSPHRASE);
@@ -295,7 +288,11 @@ test("audit entries carrying grant fields sign and verify, next to legacy ones",
   const entries = readAudit(vault);
   assert.equal(entries[1].redaction, "partial");
   assert.equal(entries[2].outcome, "denied");
-  assert.equal(entries.some((entry) => entry.value !== undefined), false, "no value ever enters the log");
+  assert.equal(
+    entries.some((entry) => entry.value !== undefined),
+    false,
+    "no value ever enters the log",
+  );
 });
 
 test("tampering with a recorded redaction level breaks the audit chain", () => {
@@ -303,7 +300,7 @@ test("tampering with a recorded redaction level breaks the audit chain", () => {
   appendAudit(
     vault,
     { actor: "mcp-agent", file: "health", key: "IBAN", agent: "claude", redaction: "full", outcome: "allowed" },
-    PASSPHRASE
+    PASSPHRASE,
   );
   const logPath = path.join(vault, "audit.log");
   fs.writeFileSync(logPath, fs.readFileSync(logPath, "utf8").replace('"full"', '"none"'));

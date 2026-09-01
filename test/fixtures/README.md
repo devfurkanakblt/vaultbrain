@@ -1,7 +1,8 @@
 # Format fixtures
 
-Checked-in vaults written by earlier releases. Tests open them to prove that a
-change to the storage format did not silently orphan existing data.
+Checked-in vaults written by earlier releases. Vault Brain is the product name,
+but these fixtures retain immutable pre-rename storage and cryptographic
+identifiers so tests prove upgrades do not orphan existing data.
 
 **Passphrase for every fixture here: `fixture-only-passphrase`.**
 
@@ -9,7 +10,7 @@ They contain dummy data only. Never point a fixture at a real vault.
 
 | Directory | Format | What it pins |
 |---|---|---|
-| `kv-envelope-v0/` | key-value envelope, pre-versioning | Unversioned `{salt,iv,authTag,ciphertext}` files still decrypt, and `sbrain migrate` upgrades them in place |
+| `kv-envelope-v0/` | key-value envelope, pre-versioning | Unversioned `{salt,iv,authTag,ciphertext}` files still decrypt, and `vbrain migrate` upgrades them in place |
 | `documents-v1/` | document vault manifest v1, index v2 | An encrypted note vault written by the current format still opens, searches and resolves links |
 | `documents-attachments-v1/` | document vault with chunk-encrypted attachments | Content-addressed attachments written by the TypeScript core still open in the Rust desktop core |
 | `documents-canvas-v1/` | document vault with encrypted canvas objects | Canvas objects, identities, references and AAD written by the TypeScript core stay readable |

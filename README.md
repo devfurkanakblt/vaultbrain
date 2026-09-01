@@ -1,4 +1,4 @@
-# secondbrain-vault
+# Vault Brain
 
 > A least-exposure, `.env`-style personal data vault for the AI age.
 
@@ -8,8 +8,12 @@
 > [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), and
 > [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-**TL;DR (TR):** Obsidian gibi "2. beyin" araçları kişisel verini (sağlık, kimlik,
-finans) düz metin olarak AI ajanlarına besliyor. `secondbrain-vault`, veriyi
+> **Compatibility:** Vault Brain is the product and CLI name. Existing vault
+> storage, cryptographic, plugin-signature, sync, and writer-lock identifiers
+> remain immutable so data created by earlier releases stays readable.
+
+**TL;DR (TR):** Obsidian gibi kişisel bilgi yönetimi araçları verini (sağlık, kimlik,
+finans) düz metin olarak AI ajanlarına besliyor. `Vault Brain`, veriyi
 şifreli anahtar-değer çiftleri olarak saklar; AI önce sadece anahtar adlarını
 ve açıklamaları görür (değerleri değil), ihtiyaç duyduğu **tek** değeri talep
 eder, ve her erişim denetim kaydına (audit log) yazılır.
@@ -23,24 +27,24 @@ vault, not just the fact you asked about.
 
 This project borrows a habit developers already trust: **`.env` files**. We
 don't hand an agent a whole config file to "figure out" — we let it ask for
-one variable at a time. `secondbrain-vault` applies the same discipline to
+one variable at a time. `Vault Brain` applies the same discipline to
 personal data.
 
 ## Two modes — read this before you wire it into anything
 
 This is the most important section in the README.
 
-| | Mode 1 — `sbrain get` (Direct) | Mode 2 — `sbrain mcp` (AI-assisted) |
-|---|---|---|
-| Who's involved | You, or a script. No LLM. | An AI agent (e.g. Claude) via MCP |
-| Exposure | Zero — value never enters any model's context | Not zero — content **does** pass through the calling model's context, both when you tell the agent something worth saving (`store_note`) and when it resolves a value back (`resolve_key`) — that's inherent to how a conversational agent has to work |
-| What the agent sees without decrypting anything | N/A | Key names + descriptions (`list_keys` / `find_key`), and note timestamps + tags (`find_notes_in_range`) |
-| Audit | Logged | Logged — writes and reads both, including denials |
-| Scoping | N/A | Optional per-agent grants: which keys, which actions, for how long, how masked |
+|                                                 | Mode 1 — `vbrain get` (Direct)                | Mode 2 — `vbrain mcp` (AI-assisted)                                                                                                                                                                                                                    |
+| ----------------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Who's involved                                  | You, or a script. No LLM.                     | An AI agent (e.g. Claude) via MCP                                                                                                                                                                                                                      |
+| Exposure                                        | Zero — value never enters any model's context | Not zero — content **does** pass through the calling model's context, both when you tell the agent something worth saving (`store_note`) and when it resolves a value back (`resolve_key`) — that's inherent to how a conversational agent has to work |
+| What the agent sees without decrypting anything | N/A                                           | Key names + descriptions (`list_keys` / `find_key`), and note timestamps + tags (`find_notes_in_range`)                                                                                                                                                |
+| Audit                                           | Logged                                        | Logged — writes and reads both, including denials                                                                                                                                                                                                      |
+| Scoping                                         | N/A                                           | Optional per-agent grants: which keys, which actions, for how long, how masked                                                                                                                                                                         |
 
 Mode 2 is a deliberate trade-off, not a zero-exposure claim: you get an agent
 that can capture and recall notes for you in natural language, in exchange
-for that agent seeing what you tell it *in that moment*. What it does **not**
+for that agent seeing what you tell it _in that moment_. What it does **not**
 get is standing access to your whole vault — every other note stays
 encrypted and out of its context until it specifically asks for that one
 key, and every access (read or write) is logged. If you want a hard
@@ -50,32 +54,32 @@ guarantee that something never touches any LLM, keep using Mode 1 for it.
 
 By default a vault has no grant policy, and any agent started with the
 passphrase sees every key — that is how this tool has always worked. Adding the
-first grant flips the vault to *governed*, and from then on an agent gets only
+first grant flips the vault to _governed_, and from then on an agent gets only
 what a live grant gives it.
 
 ```bash
 # A kitchen assistant that may read one key, in one category, for a week.
-sbrain grant add claude-code \
+vbrain grant add claude-code \
   --scope "health:BLOOD_TYPE:discover,resolve:none" \
   --expires 7d --note "meal planning"
 
 # The same agent may see that an IBAN exists and confirm the last four digits,
 # but never read the whole thing.
-sbrain grant add claude-code --scope "finance:IBAN:discover,resolve:partial"
+vbrain grant add claude-code --scope "finance:IBAN:discover,resolve:partial"
 
 # Anything under this grant waits for you before it is answered.
-sbrain grant add research-bot --scope "*:*:discover:full" --confirm
+vbrain grant add research-bot --scope "*:*:discover:full" --confirm
 
-sbrain grant list                  # every grant, active, expired or revoked
-sbrain grant requests              # resolutions waiting on you
-sbrain grant approve <id>          # single-use, expires in five minutes
-sbrain grant revoke <id>           # effective on the agent's very next call
+vbrain grant list                  # every grant, active, expired or revoked
+vbrain grant requests              # resolutions waiting on you
+vbrain grant approve <id>          # single-use, expires in five minutes
+vbrain grant revoke <id>           # effective on the agent's very next call
 ```
 
 A scope reads `file:keys:actions[:redaction]`. Keys are exact names, a
 `PREFIX*` glob, or `*`; actions are `discover`, `resolve` and `store`;
 redaction is `none`, `partial` (mask identifiers, keep a short tail so the agent
-can confirm a match) or `full` (return the value's *shape* — "an IBAN, 26
+can confirm a match) or `full` (return the value's _shape_ — "an IBAN, 26
 characters" — and none of its characters).
 
 Three properties are worth stating plainly:
@@ -87,7 +91,7 @@ Three properties are worth stating plainly:
   spent; it never becomes a standing permission.
 - **Redaction narrows exposure, it does not create a boundary.** A masked value
   still crosses into the model's context as a masked value, and the agent names
-  itself — `SBRAIN_AGENT` is an identity for scoping and audit, not
+  itself — `VBRAIN_AGENT` is an identity for scoping and audit, not
   authentication. Anything that must never reach a model belongs in Mode 1.
 
 Grants live encrypted in `grants.enc` inside the vault, so the agent names, the
@@ -106,16 +110,26 @@ BLOOD_TYPE="0 Rh+"
 - Files live as `vault/<name>.kv.enc` — AES-256-GCM encrypted, scrypt-derived
   key from your passphrase. The plaintext above never touches disk.
 - The `@desc` comment is the **only** thing that ever leaves the vault
-  unencrypted (via `sbrain index` → `schema.json`). Never put sensitive
+  unencrypted (via `vbrain index` → `schema.json`). Never put sensitive
   information in a description — the tool can't enforce that for you.
 
 ## Quickstart
+
+The npm package is named `vault-brain`; installing it globally exposes the
+short, project-specific `vbrain` command:
+
+```bash
+npm install --global vault-brain
+vbrain --help
+```
+
+For local development from this repository:
 
 ```bash
 npm install
 npm run build
 
-export SBRAIN_PASSPHRASE="use-a-real-passphrase-here"
+export VBRAIN_PASSPHRASE="use-a-real-passphrase-here"
 
 node dist/cli.js --vault ./vault/personal init
 node dist/cli.js --vault ./vault/personal add health 'DOCTOR_NEXT_APPOINTMENT="2026-09-15"' --desc "Bir sonraki doktor kontrol tarihi"
@@ -159,7 +173,7 @@ Encrypted files carry an explicit envelope version, cipher name and the exact
 scrypt parameters they were written with, and those header fields are
 authenticated together with the ciphertext — an attacker cannot edit the
 recorded cost factor to weaken the next derivation without the tag check
-failing. Files written before versioning existed still open, and `sbrain
+failing. Files written before versioning existed still open, and `vbrain
 migrate` upgrades them in place. `test/fixtures/` holds vaults written by
 earlier formats so a future change has to prove it can still read them.
 
@@ -296,15 +310,15 @@ attachment library. Dirty notes are persisted before
 navigation, before a tab closes and before lock, so the 700 ms autosave window
 cannot discard an edit.
 
-| Shortcut | Action |
-|---|---|
-| `Ctrl+O` | Quick switcher — title, path or alias; `alt+↵` opens it in the split pane |
-| `Ctrl+K` | Command palette |
-| `Ctrl+Shift+F` | Search the encrypted vault |
-| `Ctrl+\` | Open the current note in the split pane |
-| `Ctrl+W` | Close the active tab (saving it first if dirty) |
-| `Ctrl+D` | Open (or first create) today's daily note |
-| `Ctrl+N` / `Ctrl+S` / `Ctrl+E` / `Ctrl+L` | New note · save · write/read · lock |
+| Shortcut                                  | Action                                                                    |
+| ----------------------------------------- | ------------------------------------------------------------------------- |
+| `Ctrl+O`                                  | Quick switcher — title, path or alias; `alt+↵` opens it in the split pane |
+| `Ctrl+K`                                  | Command palette                                                           |
+| `Ctrl+Shift+F`                            | Search the encrypted vault                                                |
+| `Ctrl+\`                                  | Open the current note in the split pane                                   |
+| `Ctrl+W`                                  | Close the active tab (saving it first if dirty)                           |
+| `Ctrl+D`                                  | Open (or first create) today's daily note                                 |
+| `Ctrl+N` / `Ctrl+S` / `Ctrl+E` / `Ctrl+L` | New note · save · write/read · lock                                       |
 
 A note's whole life is available from the document toolbar and the command
 palette, not only from the CLI:
@@ -314,18 +328,18 @@ palette, not only from the CLI:
   title stay as written and become unresolved mentions, which the context panel
   can relink in one click.
 - **Delete and restore.** Deleting archives the live revision before unlinking
-  the encrypted object, so the note is still recoverable from *Restore a deleted
-  note* in the command palette.
+  the encrypted object, so the note is still recoverable from _Restore a deleted
+  note_ in the command palette.
 - **History.** Every revision is a separate encrypted object. The history dialog
   decrypts one at a time to read, and restoring writes the old content forward
   as a new revision rather than rewinding the counter, so nothing already
   archived is invalidated.
-- **Templates and daily notes.** Any note tagged `template` shows up in *New
-  note from a template*, with the same `{{title}}`, `{{path}}`,
+- **Templates and daily notes.** Any note tagged `template` shows up in _New
+  note from a template_, with the same `{{title}}`, `{{path}}`,
   `{{date:YYYY-MM-DD}}`, `{{time:HH:mm}}` and custom variables the CLI renders.
   `Ctrl+D` opens today's daily note, creating it only the first time.
 
-The sidebar's *Canvas* and *Files* views round out the workspace without ever
+The sidebar's _Canvas_ and _Files_ views round out the workspace without ever
 handing the webview a file path:
 
 - **Canvas.** A board of freeform text cards, group frames, web links, and file
@@ -359,10 +373,10 @@ a manifest and one JavaScript file, and its reach is finite and declared.
 ```
 
 ```bash
-sbrain plugins install ./plugin.json ./main.js   # installs, but leaves it off
-sbrain plugins list                              # what is installed and what it may reach
-sbrain plugins enable word-count
-sbrain plugins remove word-count                 # takes the plugin's settings with it
+vbrain plugins install ./plugin.json ./main.js   # installs, but leaves it off
+vbrain plugins list                              # what is installed and what it may reach
+vbrain plugins enable word-count
+vbrain plugins remove word-count                 # takes the plugin's settings with it
 ```
 
 Publishers can bind the manifest and exact source bytes into one Ed25519
@@ -370,16 +384,16 @@ package. The public key travels in the signature; the private key never enters
 the vault:
 
 ```bash
-sbrain plugins keygen ./publisher.private.pem
-sbrain plugins sign ./plugin.json ./main.js \
+vbrain plugins keygen ./publisher.private.pem
+vbrain plugins sign ./plugin.json ./main.js \
   --key ./publisher.private.pem --out ./plugin.signed.json
-sbrain plugins install ./plugin.signed.json ./main.js
+vbrain plugins install ./plugin.signed.json ./main.js
 
 # Signed-only operation and local emergency revocation
-sbrain plugins restricted on
-sbrain plugins revoke-signer word-count
-sbrain plugins policy
-sbrain plugins restore-signer <64-character-key-id>
+vbrain plugins restricted on
+vbrain plugins revoke-signer word-count
+vbrain plugins policy
+vbrain plugins restore-signer <64-character-key-id>
 ```
 
 Restricted mode refuses unsigned installation and prevents already-installed
@@ -403,7 +417,7 @@ Three things make that list mean something:
 
 - **It runs in a worker with no DOM, no filesystem and no network.** `fetch`,
   `XMLHttpRequest`, `WebSocket` and `importScripts` are removed before the
-  plugin's first line runs, and the plugin is *loaded* as a worker script rather
+  plugin's first line runs, and the plugin is _loaded_ as a worker script rather
   than `eval`'d — so the app never has to grant `'unsafe-eval'` to anything.
 - **Every call is checked against the manifest.** A method that isn't in the
   capability table has no capability and is refused, so a host method added
@@ -413,7 +427,7 @@ Three things make that list mean something:
   hold only the capabilities the webview itself has — and the vault key never
   enters the webview at all.
 
-What this does *not* do is protect you from a plugin abusing what you granted.
+What this does _not_ do is protect you from a plugin abusing what you granted.
 `notes:read` means it reads your notes. The defence there is the capability list
 you approve before it runs, and the switch that turns it off.
 
@@ -426,7 +440,7 @@ accepted or loaded.
 Two session guards protect an unlocked window you walked away from:
 
 - **Inactivity lock.** The vault re-locks after a configurable idle window —
-  1, 5 (default) or 15 minutes, or disabled — set from the sidebar's *Auto-lock*
+  1, 5 (default) or 15 minutes, or disabled — set from the sidebar's _Auto-lock_
   control. Keystrokes, pointer input and scrolling reset it; the lock screen
   then says why it locked.
 - **Self-clearing clipboard.** Copying a note or a single property value marks
@@ -442,7 +456,7 @@ of rows in the document no matter how many notes the vault holds, so a
 bounded; the encrypted core's own 10k/100k budgets are still only measured
 against the 1,000-note benchmark corpus.)
 
-The theme editor — sidebar palette icon, or *Customize theme* in the command
+The theme editor — sidebar palette icon, or _Customize theme_ in the command
 palette — derives the whole interface from four colours (chrome, surface, ink,
 accent) plus a reading size and typeface, with four presets to start from. It
 shows the WCAG contrast ratio for ink-on-surface and accent-on-chrome as you
@@ -472,12 +486,12 @@ prototype-shaping keys are rejected before anything enters encrypted storage.
 ```json
 {
   "mcpServers": {
-    "secondbrain-vault": {
+    "vault-brain": {
       "command": "node",
-      "args": ["/absolute/path/to/secondbrain-vault/dist/cli.js", "--vault", "/absolute/path/to/vault/personal", "mcp"],
+      "args": ["/absolute/path/to/vaultbrain/dist/cli.js", "--vault", "/absolute/path/to/vault/personal", "mcp"],
       "env": {
-        "SBRAIN_PASSPHRASE": "use-a-real-passphrase-here",
-        "SBRAIN_AGENT": "claude-code"
+        "VBRAIN_PASSPHRASE": "use-a-real-passphrase-here",
+        "VBRAIN_AGENT": "claude-code"
       }
     }
   }
@@ -493,13 +507,13 @@ testing — not the intended everyday interface.
 
 The server exposes five tools:
 
-| Tool | Touches values? | Gets audited? |
-|---|---|---|
-| `list_keys` | No | No |
-| `find_key` | No | No |
-| `find_notes_in_range` | No — timestamps/tags only | No |
-| `store_note` | Yes — that's the point | Yes |
-| `resolve_key` | Yes | Yes |
+| Tool                  | Touches values?           | Gets audited? |
+| --------------------- | ------------------------- | ------------- |
+| `list_keys`           | No                        | No            |
+| `find_key`            | No                        | No            |
+| `find_notes_in_range` | No — timestamps/tags only | No            |
+| `store_note`          | Yes — that's the point    | Yes           |
+| `resolve_key`         | Yes                       | Yes           |
 
 Under a grant policy the three value-free tools return only the keys that
 agent may discover, `store_note` needs a `store` action, and `resolve_key`
@@ -528,23 +542,23 @@ replayed into the real vault exactly once.
 
 ```bash
 # Generate and persist this ID in your device configuration.
-sbrain sync device-id
+vbrain sync device-id
 
 # Record revision 1 of one logical object.
-sbrain sync append <device-id> note <note-id> put \
+vbrain sync append <device-id> note <note-id> put \
   --revision 1 --value '{"title":"Plan","body":"private"}'
 
 # Exchange opaque envelopes through files/stdout.
-sbrain sync export > changes.json
-sbrain sync import changes.json
+vbrain sync export > changes.json
+vbrain sync import changes.json
 
 # Validate the complete DAG, inspect concurrent heads, then apply a clean one.
-sbrain sync verify
-sbrain sync resolve note <note-id>
-sbrain sync apply note <note-id>
+vbrain sync verify
+vbrain sync resolve note <note-id>
+vbrain sync apply note <note-id>
 
 # Example automatically captured edit.
-sbrain --sync-device <device-id> docs put Plans/Launch.md --body "Ready"
+vbrain --sync-device <device-id> docs put Plans/Launch.md --body "Ready"
 ```
 
 Unresolved heads fail before live storage is touched. Synchronized attachment
@@ -556,24 +570,24 @@ for the format and conflict rules.
 
 ## The "fast find" layer
 
-`sbrain index` rebuilds `schema.json` — key names + descriptions, no values —
-across the whole vault. `sbrain search` / the `find_key` MCP tool run a fuzzy
+`vbrain index` rebuilds `schema.json` — key names + descriptions, no values —
+across the whole vault. `vbrain search` / the `find_key` MCP tool run a fuzzy
 match over that small, safe file instead of decrypting and scanning every
 vault file. This is the speed win over an Obsidian graph traversal: lookup
-cost scales with the number of *keys*, not the size of your notes.
+cost scales with the number of _keys_, not the size of your notes.
 
 ## Threat model / honesty notes
 
-- Encryption protects data **at rest**. Once `sbrain get` or `resolve_key`
+- Encryption protects data **at rest**. Once `vbrain get` or `resolve_key`
   decrypts a value, it's plaintext in that process's memory / stdout — treat
   it like any other secret in a terminal.
-- The passphrase prompt is masked on a real terminal, and `sbrain unlock
-  --remember` can hand the passphrase to the OS credential store instead
+- The passphrase prompt is masked on a real terminal, and `vbrain unlock
+--remember` can hand the passphrase to the OS credential store instead
   (Windows DPAPI, macOS Keychain, libsecret on Linux). Only the Windows path is
   exercised by this project's tests, because that is the platform it is
   developed on. An OS credential store protects the secret from other users and
   other machines — not from code already running as you.
-- `SBRAIN_PASSPHRASE` still wins over both, which is what makes scripts and MCP
+- `VBRAIN_PASSPHRASE` still wins over both, which is what makes scripts and MCP
   work; an environment variable is visible to your own processes, so prefer the
   credential store for interactive use.
 - Nothing here stops a user (or a misconfigured agent with general filesystem

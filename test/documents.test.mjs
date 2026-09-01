@@ -10,21 +10,26 @@ import { analyzeMarkdown, normalizeNotePath } from "../dist/markdown.js";
 const PASSPHRASE = "document-vault-test-passphrase";
 
 function tempVault() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "secondbrain-documents-test-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-documents-test-"));
 }
 
 test("Markdown analysis extracts knowledge structure but ignores code", () => {
-  const analysis = analyzeMarkdown([
-    "# Project Alpha",
-    "See [[People/Ada#Biography|Ada]] and ![[Diagram]].",
-    "#project/active #important",
-    "`[[Ignored]] #ignored`",
-    "```md",
-    "[[Also ignored]] #ignored-too",
-    "```",
-  ].join("\n"));
+  const analysis = analyzeMarkdown(
+    [
+      "# Project Alpha",
+      "See [[People/Ada#Biography|Ada]] and ![[Diagram]].",
+      "#project/active #important",
+      "`[[Ignored]] #ignored`",
+      "```md",
+      "[[Also ignored]] #ignored-too",
+      "```",
+    ].join("\n"),
+  );
 
-  assert.deepEqual(analysis.links.map((link) => link.target), ["People/Ada", "Diagram"]);
+  assert.deepEqual(
+    analysis.links.map((link) => link.target),
+    ["People/Ada", "Diagram"],
+  );
   assert.deepEqual(analysis.tags, ["important", "project/active"]);
   assert.deepEqual(analysis.headings, [{ level: 1, text: "Project Alpha", slug: "project-alpha" }]);
   assert.equal(analysis.links[0].heading, "Biography");
@@ -67,13 +72,17 @@ test("document vault provides encrypted notes, stable revisions, search and back
   assert.equal(search.length, 1);
   assert.equal(search[0].id, alpha.id);
   assert.match(search[0].excerpt, /launch plan/iu);
-  assert.deepEqual(vault.backlinks(alpha.id).map((note) => note.id), [ada.id]);
+  assert.deepEqual(
+    vault.backlinks(alpha.id).map((note) => note.id),
+    [ada.id],
+  );
   assert.equal(vault.outgoing(alpha.id)[0].resolvedId, ada.id);
 
-  const diskText = fs
-    .readdirSync(path.join(dir, "documents", "objects"))
-    .map((name) => fs.readFileSync(path.join(dir, "documents", "objects", name), "utf8"))
-    .join("\n") + fs.readFileSync(path.join(dir, "documents", "index.enc"), "utf8");
+  const diskText =
+    fs
+      .readdirSync(path.join(dir, "documents", "objects"))
+      .map((name) => fs.readFileSync(path.join(dir, "documents", "objects", name), "utf8"))
+      .join("\n") + fs.readFileSync(path.join(dir, "documents", "index.enc"), "utf8");
   assert.equal(diskText.includes("Secret launch plan"), false);
   assert.equal(diskText.includes("Ada Lovelace"), false);
 });
@@ -126,7 +135,10 @@ test("reverse link index incrementally resolves, invalidates and reports links",
   assert.equal(vault.unresolvedLinks().length, 1);
 
   const target = vault.put({ path: "Future", body: "Now I exist." });
-  assert.deepEqual(vault.backlinks(target.id).map((note) => note.id), [source.id]);
+  assert.deepEqual(
+    vault.backlinks(target.id).map((note) => note.id),
+    [source.id],
+  );
   assert.equal(vault.unresolvedLinks().length, 0);
 
   const renamed = vault.rename(target.id, "Archive/Renamed", "Renamed");
@@ -136,7 +148,10 @@ test("reverse link index incrementally resolves, invalidates and reports links",
   assert.equal(vault.unresolvedLinks()[0].links[0].target, "Future");
 
   vault.put({ path: "Source", body: "Updated link: [[Archive/Renamed]]." });
-  assert.deepEqual(vault.backlinks(target.id).map((note) => note.id), [source.id]);
+  assert.deepEqual(
+    vault.backlinks(target.id).map((note) => note.id),
+    [source.id],
+  );
   assert.equal(vault.outgoing(source.id)[0].resolvedId, target.id);
 });
 
@@ -146,14 +161,20 @@ test("encrypted history restores active and deleted notes with monotonic revisio
   const first = vault.put({ path: "Journal", body: "first version" });
   const second = vault.put({ path: "Journal", body: "second version" });
   assert.equal(second.revision, 2);
-  assert.deepEqual(vault.revisions(first.id).map((item) => item.revision), [2, 1]);
+  assert.deepEqual(
+    vault.revisions(first.id).map((item) => item.revision),
+    [2, 1],
+  );
   assert.equal(vault.getRevision(first.id, 1).body, "first version");
 
   const restored = vault.restore(first.id, 1);
   assert.equal(restored.revision, 3);
   assert.equal(restored.body, "first version");
   vault.remove(first.id);
-  assert.deepEqual(vault.revisions(first.id).map((item) => item.revision), [3, 2, 1]);
+  assert.deepEqual(
+    vault.revisions(first.id).map((item) => item.revision),
+    [3, 2, 1],
+  );
 
   const recoveredDeleted = vault.restore(first.id, 2);
   assert.equal(recoveredDeleted.revision, 4);

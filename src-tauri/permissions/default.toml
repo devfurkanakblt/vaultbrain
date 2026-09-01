@@ -3,6 +3,11 @@ description = "No custom vault commands are granted implicitly."
 permissions = []
 
 [[permission]]
+identifier = "allow-pick-vault-directory"
+description = "Allows the main local window to open the native folder chooser and receive only the selected path."
+commands.allow = ["pick_vault_directory"]
+
+[[permission]]
 identifier = "allow-unlock-vault"
 description = "Allows the main local window to unlock one explicitly supplied vault path."
 commands.allow = ["unlock_vault"]
