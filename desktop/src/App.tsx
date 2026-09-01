@@ -274,6 +274,7 @@ export function App() {
   const [workspacesOpen, setWorkspacesOpen] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [rightOpen, setRightOpen] = useState(true);
+  const [entering, setEntering] = useState(false);
   const [expanded, setExpanded] = useState(new Set<string>());
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -537,6 +538,21 @@ export function App() {
     saveTimer.current = window.setTimeout(() => void saveNow(), 700);
     return () => window.clearTimeout(saveTimer.current);
   }, [active?.body, active?.title, saveNow, saveState]);
+
+  // Two frames: the first paints the entry state, the second releases it so
+  // the transition has a real style change to animate from.
+  useEffect(() => {
+    if (!active?.id) return;
+    setEntering(true);
+    let release = 0;
+    const paint = window.requestAnimationFrame(() => {
+      release = window.requestAnimationFrame(() => setEntering(false));
+    });
+    return () => {
+      window.cancelAnimationFrame(paint);
+      window.cancelAnimationFrame(release);
+    };
+  }, [active?.id]);
 
   useEffect(() => {
     if (!notice) return;
@@ -916,7 +932,7 @@ export function App() {
         </div>}
 
         <div className={`stage-panes ${secondary ? "is-split" : ""}`}>
-          <article className="stage-pane" aria-label="Primary pane">
+          <article className={`stage-pane ${entering ? "is-entering" : ""}`} aria-label="Primary pane">
             {active ? <>
               <div className="document-toolbar">
                 <div className="breadcrumbs"><span>{active.path.split("/").slice(0, -1).join(" / ") || "Notes"}</span><ChevronRight size={13} /><b>{active.path.split("/").at(-1)}</b></div>
@@ -948,7 +964,7 @@ export function App() {
                     <MarkdownPreview body={active.body} />}
                 </Suspense>
               </div>
-            </> : <div className="empty-stage"><BookOpen size={34} /><h2>The archive is quiet.</h2><p>Create a note to begin.</p></div>}
+            </> : <div className="empty-stage"><BookOpen size={32} strokeWidth={1.25} /><h2>The archive is quiet.</h2><p>Select a note to begin.</p></div>}
           </article>
 
           {secondary && <article className="stage-pane split-pane" aria-label="Split pane">
@@ -1025,6 +1041,8 @@ export function App() {
         aria-label="Show the context panel"
         title="Show the context panel"
       ><PanelRightOpen size={15} /></button>}
+
+      {workspaceView === "notes" && !active && <div className="context-reserve" aria-hidden="true" />}
 
       {notice && <div className="toast" role="status"><Check size={14} />{notice}</div>}
 
