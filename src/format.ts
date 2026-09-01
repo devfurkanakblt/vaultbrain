@@ -6,7 +6,7 @@
  *   DOCTOR_NEXT_APPOINTMENT="2026-09-15"
  *
  * The `@desc` line is the ONLY thing that ever leaves the vault unencrypted
- * (via `sbrain index`). It must never itself contain the sensitive value —
+ * (via `vbrain index`). It must never itself contain the sensitive value —
  * that's a convention this tool can't fully enforce, so the README calls
  * it out explicitly.
  */

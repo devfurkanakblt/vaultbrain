@@ -8,7 +8,7 @@
 > [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), and
 > [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-**TL;DR (TR):** Obsidian gibi "2. beyin" araçları kişisel verini (sağlık, kimlik,
+**TL;DR (TR):** Obsidian gibi kişisel bilgi yönetimi araçları verini (sağlık, kimlik,
 finans) düz metin olarak AI ajanlarına besliyor. `Vault Brain`, veriyi
 şifreli anahtar-değer çiftleri olarak saklar; AI önce sadece anahtar adlarını
 ve açıklamaları görür (değerleri değil), ihtiyaç duyduğu **tek** değeri talep
@@ -30,7 +30,7 @@ personal data.
 
 This is the most important section in the README.
 
-| | Mode 1 — `sbrain get` (Direct) | Mode 2 — `sbrain mcp` (AI-assisted) |
+| | Mode 1 — `vbrain get` (Direct) | Mode 2 — `vbrain mcp` (AI-assisted) |
 |---|---|---|
 | Who's involved | You, or a script. No LLM. | An AI agent (e.g. Claude) via MCP |
 | Exposure | Zero — value never enters any model's context | Not zero — content **does** pass through the calling model's context, both when you tell the agent something worth saving (`store_note`) and when it resolves a value back (`resolve_key`) — that's inherent to how a conversational agent has to work |
@@ -55,21 +55,21 @@ what a live grant gives it.
 
 ```bash
 # A kitchen assistant that may read one key, in one category, for a week.
-sbrain grant add claude-code \
+vbrain grant add claude-code \
   --scope "health:BLOOD_TYPE:discover,resolve:none" \
   --expires 7d --note "meal planning"
 
 # The same agent may see that an IBAN exists and confirm the last four digits,
 # but never read the whole thing.
-sbrain grant add claude-code --scope "finance:IBAN:discover,resolve:partial"
+vbrain grant add claude-code --scope "finance:IBAN:discover,resolve:partial"
 
 # Anything under this grant waits for you before it is answered.
-sbrain grant add research-bot --scope "*:*:discover:full" --confirm
+vbrain grant add research-bot --scope "*:*:discover:full" --confirm
 
-sbrain grant list                  # every grant, active, expired or revoked
-sbrain grant requests              # resolutions waiting on you
-sbrain grant approve <id>          # single-use, expires in five minutes
-sbrain grant revoke <id>           # effective on the agent's very next call
+vbrain grant list                  # every grant, active, expired or revoked
+vbrain grant requests              # resolutions waiting on you
+vbrain grant approve <id>          # single-use, expires in five minutes
+vbrain grant revoke <id>           # effective on the agent's very next call
 ```
 
 A scope reads `file:keys:actions[:redaction]`. Keys are exact names, a
@@ -87,7 +87,7 @@ Three properties are worth stating plainly:
   spent; it never becomes a standing permission.
 - **Redaction narrows exposure, it does not create a boundary.** A masked value
   still crosses into the model's context as a masked value, and the agent names
-  itself — `SBRAIN_AGENT` is an identity for scoping and audit, not
+  itself — `VBRAIN_AGENT` is an identity for scoping and audit, not
   authentication. Anything that must never reach a model belongs in Mode 1.
 
 Grants live encrypted in `grants.enc` inside the vault, so the agent names, the
@@ -106,16 +106,26 @@ BLOOD_TYPE="0 Rh+"
 - Files live as `vault/<name>.kv.enc` — AES-256-GCM encrypted, scrypt-derived
   key from your passphrase. The plaintext above never touches disk.
 - The `@desc` comment is the **only** thing that ever leaves the vault
-  unencrypted (via `sbrain index` → `schema.json`). Never put sensitive
+  unencrypted (via `vbrain index` → `schema.json`). Never put sensitive
   information in a description — the tool can't enforce that for you.
 
 ## Quickstart
+
+The npm package is named `vault-brain`; installing it globally exposes the
+short, project-specific `vbrain` command:
+
+```bash
+npm install --global vault-brain
+vbrain --help
+```
+
+For local development from this repository:
 
 ```bash
 npm install
 npm run build
 
-export SBRAIN_PASSPHRASE="use-a-real-passphrase-here"
+export VBRAIN_PASSPHRASE="use-a-real-passphrase-here"
 
 node dist/cli.js --vault ./vault/personal init
 node dist/cli.js --vault ./vault/personal add health 'DOCTOR_NEXT_APPOINTMENT="2026-09-15"' --desc "Bir sonraki doktor kontrol tarihi"
@@ -159,7 +169,7 @@ Encrypted files carry an explicit envelope version, cipher name and the exact
 scrypt parameters they were written with, and those header fields are
 authenticated together with the ciphertext — an attacker cannot edit the
 recorded cost factor to weaken the next derivation without the tag check
-failing. Files written before versioning existed still open, and `sbrain
+failing. Files written before versioning existed still open, and `vbrain
 migrate` upgrades them in place. `test/fixtures/` holds vaults written by
 earlier formats so a future change has to prove it can still read them.
 
@@ -359,10 +369,10 @@ a manifest and one JavaScript file, and its reach is finite and declared.
 ```
 
 ```bash
-sbrain plugins install ./plugin.json ./main.js   # installs, but leaves it off
-sbrain plugins list                              # what is installed and what it may reach
-sbrain plugins enable word-count
-sbrain plugins remove word-count                 # takes the plugin's settings with it
+vbrain plugins install ./plugin.json ./main.js   # installs, but leaves it off
+vbrain plugins list                              # what is installed and what it may reach
+vbrain plugins enable word-count
+vbrain plugins remove word-count                 # takes the plugin's settings with it
 ```
 
 Publishers can bind the manifest and exact source bytes into one Ed25519
@@ -370,16 +380,16 @@ package. The public key travels in the signature; the private key never enters
 the vault:
 
 ```bash
-sbrain plugins keygen ./publisher.private.pem
-sbrain plugins sign ./plugin.json ./main.js \
+vbrain plugins keygen ./publisher.private.pem
+vbrain plugins sign ./plugin.json ./main.js \
   --key ./publisher.private.pem --out ./plugin.signed.json
-sbrain plugins install ./plugin.signed.json ./main.js
+vbrain plugins install ./plugin.signed.json ./main.js
 
 # Signed-only operation and local emergency revocation
-sbrain plugins restricted on
-sbrain plugins revoke-signer word-count
-sbrain plugins policy
-sbrain plugins restore-signer <64-character-key-id>
+vbrain plugins restricted on
+vbrain plugins revoke-signer word-count
+vbrain plugins policy
+vbrain plugins restore-signer <64-character-key-id>
 ```
 
 Restricted mode refuses unsigned installation and prevents already-installed
@@ -476,8 +486,8 @@ prototype-shaping keys are rejected before anything enters encrypted storage.
       "command": "node",
       "args": ["/absolute/path/to/vaultbrain/dist/cli.js", "--vault", "/absolute/path/to/vault/personal", "mcp"],
       "env": {
-        "SBRAIN_PASSPHRASE": "use-a-real-passphrase-here",
-        "SBRAIN_AGENT": "claude-code"
+        "VBRAIN_PASSPHRASE": "use-a-real-passphrase-here",
+        "VBRAIN_AGENT": "claude-code"
       }
     }
   }
@@ -528,23 +538,23 @@ replayed into the real vault exactly once.
 
 ```bash
 # Generate and persist this ID in your device configuration.
-sbrain sync device-id
+vbrain sync device-id
 
 # Record revision 1 of one logical object.
-sbrain sync append <device-id> note <note-id> put \
+vbrain sync append <device-id> note <note-id> put \
   --revision 1 --value '{"title":"Plan","body":"private"}'
 
 # Exchange opaque envelopes through files/stdout.
-sbrain sync export > changes.json
-sbrain sync import changes.json
+vbrain sync export > changes.json
+vbrain sync import changes.json
 
 # Validate the complete DAG, inspect concurrent heads, then apply a clean one.
-sbrain sync verify
-sbrain sync resolve note <note-id>
-sbrain sync apply note <note-id>
+vbrain sync verify
+vbrain sync resolve note <note-id>
+vbrain sync apply note <note-id>
 
 # Example automatically captured edit.
-sbrain --sync-device <device-id> docs put Plans/Launch.md --body "Ready"
+vbrain --sync-device <device-id> docs put Plans/Launch.md --body "Ready"
 ```
 
 Unresolved heads fail before live storage is touched. Synchronized attachment
@@ -556,24 +566,24 @@ for the format and conflict rules.
 
 ## The "fast find" layer
 
-`sbrain index` rebuilds `schema.json` — key names + descriptions, no values —
-across the whole vault. `sbrain search` / the `find_key` MCP tool run a fuzzy
+`vbrain index` rebuilds `schema.json` — key names + descriptions, no values —
+across the whole vault. `vbrain search` / the `find_key` MCP tool run a fuzzy
 match over that small, safe file instead of decrypting and scanning every
 vault file. This is the speed win over an Obsidian graph traversal: lookup
 cost scales with the number of *keys*, not the size of your notes.
 
 ## Threat model / honesty notes
 
-- Encryption protects data **at rest**. Once `sbrain get` or `resolve_key`
+- Encryption protects data **at rest**. Once `vbrain get` or `resolve_key`
   decrypts a value, it's plaintext in that process's memory / stdout — treat
   it like any other secret in a terminal.
-- The passphrase prompt is masked on a real terminal, and `sbrain unlock
+- The passphrase prompt is masked on a real terminal, and `vbrain unlock
   --remember` can hand the passphrase to the OS credential store instead
   (Windows DPAPI, macOS Keychain, libsecret on Linux). Only the Windows path is
   exercised by this project's tests, because that is the platform it is
   developed on. An OS credential store protects the secret from other users and
   other machines — not from code already running as you.
-- `SBRAIN_PASSPHRASE` still wins over both, which is what makes scripts and MCP
+- `VBRAIN_PASSPHRASE` still wins over both, which is what makes scripts and MCP
   work; an environment variable is visible to your own processes, so prefer the
   credential store for interactive use.
 - Nothing here stops a user (or a misconfigured agent with general filesystem

@@ -84,7 +84,7 @@ function summarize(note: NoteDocument): NoteSummary {
 }
 
 function readIdlePreference() {
-  const stored = Number(localStorage.getItem("sbrain:idle-lock"));
+  const stored = Number(localStorage.getItem("vbrain:idle-lock"));
   return IDLE_CHOICES.includes(stored) ? stored : 5;
 }
 
@@ -100,8 +100,8 @@ function folders(notes: NoteSummary[]) {
 }
 
 const DEFAULT_VAULT_PATH = "./vault/personal";
-const VAULT_HISTORY_KEY = "sbrain:vaults";
-const LEGACY_VAULT_KEY = "sbrain:last-vault";
+const VAULT_HISTORY_KEY = "vbrain:vaults";
+const LEGACY_VAULT_KEY = "vbrain:last-vault";
 const VAULT_HISTORY_LIMIT = 5;
 
 /**
@@ -827,7 +827,7 @@ export function App() {
   function cycleIdleLock() {
     const next = IDLE_CHOICES[(IDLE_CHOICES.indexOf(idleMinutes) + 1) % IDLE_CHOICES.length];
     setIdleMinutes(next);
-    localStorage.setItem("sbrain:idle-lock", String(next));
+    localStorage.setItem("vbrain:idle-lock", String(next));
     setNotice(next ? `Auto-lock set to ${next} minute${next === 1 ? "" : "s"} of inactivity.` : "Auto-lock disabled for this device.");
   }
 
@@ -843,7 +843,7 @@ export function App() {
   return (
     <main className={`workspace-shell ${workspaceView !== "notes" || !rightOpen ? "without-context" : ""}`}>
       <header className="topbar" data-tauri-drag-region>
-        <div className="brand-mark"><span>SB</span><i>02</i></div>
+        <div className="brand-mark"><span>VB</span></div>
         <button className="vault-switch" title="Current encrypted vault">
           <Archive size={15} /><span>{vault.name}</span><ChevronDown size={13} />
         </button>

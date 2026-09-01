@@ -70,13 +70,13 @@ export function readSecret(prompt = "Vault passphrase: "): Promise<string> {
  * Resolution order: the environment (scripts, MCP), then the OS credential
  * store for this vault, then a masked prompt. The passphrase is never written
  * to disk by this module — only the OS store holds it, and only if the user
- * asked for that with `sbrain keychain store`.
+ * asked for that with `vbrain keychain store`.
  */
 export async function getPassphrase(options: PassphraseOptions = {}): Promise<string> {
-  if (process.env.SBRAIN_PASSPHRASE) return process.env.SBRAIN_PASSPHRASE;
+  if (process.env.VBRAIN_PASSPHRASE) return process.env.VBRAIN_PASSPHRASE;
   if (options.vaultDir && options.useKeychain !== false) {
     const remembered = recallPassphrase(options.vaultDir);
     if (remembered) return remembered;
   }
-  return readSecret(options.prompt ?? "Vault passphrase (or set SBRAIN_PASSPHRASE): ");
+  return readSecret(options.prompt ?? "Vault passphrase (or set VBRAIN_PASSPHRASE): ");
 }

@@ -4,7 +4,7 @@ import { ChevronDown, ChevronsDownUp, ChevronsUpDown, Copy, Hash, Link2, PanelRi
 import type { PluginPanel } from "./plugins/protocol";
 import type { Backlink, NoteDocument, UnlinkedMention } from "./types";
 
-const SECTIONS_KEY = "sbrain:context-sections";
+const SECTIONS_KEY = "vbrain:context-sections";
 
 /**
  * Which panel sections this device folded away. A missing entry means open, so

@@ -123,7 +123,6 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--acid); outl
 .workspace-shell.without-context { grid-template-columns: 252px minmax(420px, 1fr) 28px; }
 .topbar { grid-column: 1 / -1; display: flex; align-items: center; border-bottom: 1px solid #30332c; background: #171915; color: #d6d5cc; user-select: none; }
 .brand-mark { width: 68px; height: 100%; display: flex; align-items: center; justify-content: center; gap: 3px; border-right: 1px solid #30332c; font: 650 13px var(--font-mono); letter-spacing: -.05em; }
-.brand-mark i { color: var(--acid); font-size: 8px; font-style: normal; align-self: flex-start; margin-top: 10px; }
 .vault-switch { height: 100%; border: 0; border-right: 1px solid #30332c; background: transparent; display: flex; align-items: center; gap: 8px; padding: 0 16px; color: #b9baaf; font-size: 12px; cursor: pointer; }
 .vault-switch:hover { background: #20231d; color: #fff; }
 .topbar-center { margin: auto; display: flex; align-items: center; gap: 7px; color: #7f8276; font: 9px var(--font-mono); letter-spacing: .07em; text-transform: uppercase; }

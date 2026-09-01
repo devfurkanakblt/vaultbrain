@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import type { PluginManifest, PluginSignatureInfo } from "./plugins.js";
 
-const SIGNATURE_PREFIX = "secondbrain-vault-plugin-signature-v1\n";
+const SIGNATURE_PREFIX = "vault-brain-plugin-signature-v1\n";
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 const ED25519_PKCS8_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
 const RAW_PUBLIC_KEY_BYTES = 32;

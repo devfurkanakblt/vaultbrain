@@ -3,7 +3,7 @@
   "kdf": {
     "name": "scrypt",
     "N": 32768,
-    "salt": "Gclr5TvT+T8yo9DcE3aXWQ=="
+    "salt": "rdJGV2KwhNutArOf+m4b9g=="
   },
-  "verifier": "f6c35577045a9acd149a6d3f7c926cc3df71691f99cce7493ef5c64475fa0a7b"
+  "verifier": "50c9a1b341bb88f6d933b7da8901a685567666fe6ece75ed98829f77d879ca59"
 }

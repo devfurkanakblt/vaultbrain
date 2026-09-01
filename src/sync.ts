@@ -21,10 +21,10 @@ import {
   type NoteSummary,
 } from "./documents.js";
 
-const CHANGE_ID_CONTEXT = "secondbrain-vault:sync-change-id:v1";
-const CHANGE_KEY_CONTEXT = "secondbrain-vault:sync-change-key:v1";
-const CHANGE_AAD_PREFIX = "secondbrain-vault:sync-change:v1:";
-const APPLIED_AAD = "secondbrain-vault:sync-applied:v1";
+const CHANGE_ID_CONTEXT = "vault-brain:sync-change-id:v1";
+const CHANGE_KEY_CONTEXT = "vault-brain:sync-change-key:v1";
+const CHANGE_AAD_PREFIX = "vault-brain:sync-change:v1:";
+const APPLIED_AAD = "vault-brain:sync-applied:v1";
 const MAX_CHANGE_BYTES = 8 * 1024 * 1024;
 const MAX_ENVELOPE_BYTES = 12 * 1024 * 1024;
 const MAX_PARENTS = 256;

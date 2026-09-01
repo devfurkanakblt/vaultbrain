@@ -4,7 +4,7 @@
  * It is a reduction in exposure, not a guarantee: under the current MCP spec a
  * tool result flows into the calling model's context, so the honest claim is
  * "the model saw a masked value", never "the model cannot know the value".
- * Anything that must never reach a model belongs behind `sbrain get` (Mode 1),
+ * Anything that must never reach a model belongs behind `vbrain get` (Mode 1),
  * which invokes no model at all.
  */
 

@@ -129,10 +129,10 @@ The existing AES-256-GCM/scrypt implementation remains supported while a version
 envelope and migration path are introduced. Cryptographic changes require test
 vectors and review; custom primitives are forbidden.
 
-The pre-rename `secondbrain-vault:*` associated-data and signature namespaces
-are immutable storage/protocol identifiers, not product branding. Vault Brain
-keeps them so existing encrypted vaults, sync changes and signed plugins remain
-readable and verifiable.
+The `vault-brain:*` associated-data and signature namespaces are canonical
+storage/protocol identifiers. Changing one requires an intentional format reset
+or version bump because it invalidates encrypted records, sync changes and
+signed plugins created with that identifier.
 
 ## Trust boundaries
 
@@ -312,13 +312,13 @@ longer exists. Three mechanisms keep that from becoming data loss:
   and staying readable without the key is exactly what makes it usable for
   recovery. A bulk import cannot name its notes up front, so it journals its
   scope instead and recovery does a full rebuild.
-- **An advisory vault lock.** `.sbrain.lock` serializes writers between
+- **An advisory vault lock.** `.vbrain.lock` serializes writers between
   Vault Brain processes, is reentrant within one process, and is
   reclaimed when the recorded holder has gone stale, so a crashed session
   cannot wedge a vault permanently. It does not defend against someone editing
   the files by hand — nothing advisory can.
 
-The Rust desktop core now uses the same `.sbrain.lock` protocol and plaintext
+The Rust desktop core now uses the same `.vbrain.lock` protocol and plaintext
 write-journal shape as the TypeScript core. Every desktop mutation refreshes the
 encrypted index while holding that cross-process lock, note writes announce
 their stable IDs before touching the object, and unlock replays an interrupted
@@ -426,7 +426,7 @@ field; a value it cannot classify is masked anyway rather than passed through.
 `full` returns a description of the value's shape and none of its characters.
 
 What this is not: a boundary. A redacted value still crosses into the calling
-model's context as a redacted value, and `SBRAIN_AGENT` is a name the agent
+model's context as a redacted value, and `VBRAIN_AGENT` is a name the agent
 chooses, not a credential — anything that can start the server can pick any
 name. The security boundary remains the passphrase and the encrypted files, and
 Mode 1 remains the only path that involves no model at all.
@@ -439,8 +439,8 @@ byte-for-byte as it did and keeps verifying.
 Unlocking is an explicit lifecycle in the core, not only in the desktop shell.
 `DocumentVault.lock()` overwrites the derived key in place and drops the
 decrypted index; every later operation on that session fails until a new one is
-opened with the passphrase. The CLI mirrors it: `sbrain unlock --remember`
-places the passphrase in the OS credential store, `sbrain lock` removes it.
+opened with the passphrase. The CLI mirrors it: `vbrain unlock --remember`
+places the passphrase in the OS credential store, `vbrain lock` removes it.
 
 The credential backends are Windows DPAPI (through PowerShell, with the secret
 crossing on stdin rather than argv), macOS Keychain via `security`, and

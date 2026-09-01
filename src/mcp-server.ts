@@ -51,7 +51,7 @@ export function resolveForAgent(
       requestId: request.id,
       message: [
         "This grant holds each resolution for the vault owner's approval.",
-        `Ask them to run:  sbrain grant approve ${request.id.slice(0, 8)}`,
+        `Ask them to run:  vbrain grant approve ${request.id.slice(0, 8)}`,
         "Then call resolve_key again. The approval is single-use and expires shortly.",
       ].join("\n"),
     };
@@ -104,13 +104,13 @@ export function resolveForAgent(
  *      approval, and how much of a value comes back — see `grants.ts`.
  *
  * Redaction narrows exposure; it does not create a boundary. If you need a
- * true zero-exposure path, use `sbrain get` (Mode 1) instead — that command
+ * true zero-exposure path, use `vbrain get` (Mode 1) instead — that command
  * never invokes an LLM at all.
  */
 export async function startMcpServer(vaultDir: string): Promise<void> {
-  const passphrase = process.env.SBRAIN_PASSPHRASE;
+  const passphrase = process.env.VBRAIN_PASSPHRASE;
   if (!passphrase) {
-    console.error("SBRAIN_PASSPHRASE must be set to run the MCP server (no interactive prompt in agent contexts).");
+    console.error("VBRAIN_PASSPHRASE must be set to run the MCP server (no interactive prompt in agent contexts).");
     process.exit(1);
   }
 
@@ -119,13 +119,13 @@ export async function startMcpServer(vaultDir: string): Promise<void> {
   // any name. The security boundary stays the passphrase and the vault files.
   let agent = "mcp-agent";
   try {
-    agent = normalizeAgent(process.env.SBRAIN_AGENT ?? "mcp-agent");
+    agent = normalizeAgent(process.env.VBRAIN_AGENT ?? "mcp-agent");
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);
   }
 
-  // Reloaded per call rather than cached, so `sbrain grant revoke` takes effect
+  // Reloaded per call rather than cached, so `vbrain grant revoke` takes effect
   // on the agent's very next request instead of at its next restart.
   const policy = (): GrantFile | null => loadGrants(vaultDir, passphrase);
 
@@ -146,7 +146,7 @@ export async function startMcpServer(vaultDir: string): Promise<void> {
     async () => {
       const schema = readSchema(vaultDir);
       if (!schema) {
-        return text("No schema found. Ask the user to run 'sbrain index'.");
+        return text("No schema found. Ask the user to run 'vbrain index'.");
       }
       const grants = policy();
       const visible: Record<string, unknown[]> = {};
@@ -156,7 +156,7 @@ export async function startMcpServer(vaultDir: string): Promise<void> {
       }
       if (grants && !Object.keys(visible).length) {
         return text(
-          `No key in this vault is discoverable by "${agent}". Ask the vault owner to run: sbrain grant add.`,
+          `No key in this vault is discoverable by "${agent}". Ask the vault owner to run: vbrain grant add.`,
           true
         );
       }
@@ -171,7 +171,7 @@ export async function startMcpServer(vaultDir: string): Promise<void> {
     async ({ query }) => {
       const schema = readSchema(vaultDir);
       if (!schema) {
-        return text("No schema found. Ask the user to run 'sbrain index'.");
+        return text("No schema found. Ask the user to run 'vbrain index'.");
       }
       const grants = policy();
       const hits = searchSchema(schema, query).filter(
@@ -260,7 +260,7 @@ export async function startMcpServer(vaultDir: string): Promise<void> {
     async ({ category, from, to }) => {
       const schema = readSchema(vaultDir);
       if (!schema) {
-        return text("No schema found. Call store_note first, or run 'sbrain index'.");
+        return text("No schema found. Call store_note first, or run 'vbrain index'.");
       }
       const grants = policy();
       const hits = filterNotesByDate(schema, { file: category, from, to }).filter(

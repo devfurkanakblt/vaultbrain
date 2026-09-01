@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const LOCK_FILENAME = ".sbrain.lock";
+const LOCK_FILENAME = ".vbrain.lock";
 const DEFAULT_STALE_MS = 30_000;
 const DEFAULT_WAIT_MS = 2_000;
 const POLL_MS = 40;

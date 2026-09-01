@@ -97,7 +97,7 @@ describe("sections", () => {
 
     fireEvent.click(outline);
     expect(outline).toHaveAttribute("aria-expanded", "false");
-    expect(JSON.parse(localStorage.getItem("sbrain:context-sections")!)).toEqual({ outline: true });
+    expect(JSON.parse(localStorage.getItem("vbrain:context-sections")!)).toEqual({ outline: true });
 
     cleanup();
     renderPanel();

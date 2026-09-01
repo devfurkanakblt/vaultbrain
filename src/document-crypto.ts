@@ -6,7 +6,7 @@ import { resolveInside } from "./safety.js";
 
 const SCRYPT_N = 2 ** 15;
 const KEY_LENGTH = 32;
-const KEY_CHECK_CONTEXT = "secondbrain-vault:document-key:v1";
+const KEY_CHECK_CONTEXT = "vault-brain:document-key:v1";
 
 export interface DocumentManifest {
   version: 1;

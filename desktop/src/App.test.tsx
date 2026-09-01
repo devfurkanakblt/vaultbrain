@@ -211,6 +211,7 @@ describe("desktop workspace", () => {
   it("unlocks locally and opens the first encrypted note", async () => {
     await unlockWorkspace();
     expect(bridgeMock.unlock).toHaveBeenCalledWith("./vault/personal", "safe passphrase");
+    expect(screen.getByText("VB")).toBeInTheDocument();
     expect(screen.getByRole("navigation", { name: "Vault notes" })).toBeInTheDocument();
     expect(screen.getByText("Encrypted & saved")).toBeInTheDocument();
   });
@@ -240,7 +241,7 @@ describe("desktop workspace", () => {
     fireEvent.change(screen.getByLabelText("Passphrase"), { target: { value: "safe passphrase" } });
     fireEvent.click(screen.getByRole("button", { name: /unlock workspace/i }));
     await screen.findByDisplayValue("Product principles");
-    expect(JSON.parse(localStorage.getItem("sbrain:vaults")!)).toEqual(["./vault/personal"]);
+    expect(JSON.parse(localStorage.getItem("vbrain:vaults")!)).toEqual(["./vault/personal"]);
 
     cleanup();
     render(<App />);
@@ -457,7 +458,7 @@ describe("desktop workspace", () => {
   });
 
   it("locks the workspace after the configured idle window and says so", async () => {
-    localStorage.setItem("sbrain:idle-lock", "1");
+    localStorage.setItem("vbrain:idle-lock", "1");
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       await unlockWorkspace();
@@ -472,7 +473,7 @@ describe("desktop workspace", () => {
   });
 
   it("keeps the vault open past the idle window while auto-lock is disabled", async () => {
-    localStorage.setItem("sbrain:idle-lock", "0");
+    localStorage.setItem("vbrain:idle-lock", "0");
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       await unlockWorkspace();
@@ -526,11 +527,11 @@ describe("desktop workspace", () => {
     fireEvent.change(within(editor).getByLabelText("Accent hex"), { target: { value: "#ff8800" } });
     await waitFor(() => expect(document.documentElement.style.getPropertyValue("--acid")).toBe("#ff8800"));
     expect(document.documentElement.style.getPropertyValue("--acid-deep")).toBe(shade("#ff8800", -0.34));
-    expect(JSON.parse(localStorage.getItem("sbrain:theme")!)).toMatchObject({ accent: "#ff8800", preset: "custom" });
+    expect(JSON.parse(localStorage.getItem("vbrain:theme")!)).toMatchObject({ accent: "#ff8800", preset: "custom" });
 
     fireEvent.click(within(editor).getByRole("button", { name: /reset to archive/i }));
     await waitFor(() => expect(document.documentElement.style.getPropertyValue("--acid")).toBe(DEFAULT_THEME.accent));
-    expect(localStorage.getItem("sbrain:theme")).toBeNull();
+    expect(localStorage.getItem("vbrain:theme")).toBeNull();
   });
 
   it("opens a canvas, adds a node and writes the board back encrypted", async () => {

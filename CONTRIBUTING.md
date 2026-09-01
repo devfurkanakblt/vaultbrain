@@ -64,8 +64,9 @@ unlock performance.
 
 - **Encrypted formats:** keep old vaults readable, version new envelopes and
   add a synthetic compatibility fixture plus migration/tamper tests. The
-  historical `secondbrain-vault:*` AAD and signature strings are immutable
-  protocol identifiers despite the Vault Brain product rename.
+  `vault-brain:*` AAD and signature strings are immutable protocol identifiers.
+  Changing one requires an intentional format reset or version bump plus new
+  fixtures and migration coverage.
 - **Persistence and sync:** add crash, stale-writer, replay, idempotency or
   concurrency coverage as appropriate. Canonical encodings and change IDs must
   remain deterministic.
@@ -76,7 +77,7 @@ unlock performance.
   capability tables aligned, and add signature vectors when canonical package
   encoding changes.
 - **MCP and grants:** test both allowed and denied paths. Do not describe agent
-  names or redaction as authentication; `SBRAIN_AGENT` is caller-selected.
+  names or redaction as authentication; `VBRAIN_AGENT` is caller-selected.
 - **Performance:** report the relevant benchmark before and after the change.
   Do not relax a budget solely to make CI pass.
 

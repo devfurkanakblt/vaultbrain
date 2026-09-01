@@ -182,7 +182,7 @@ test("a second writer is refused while a live lock is held, and reclaims a stale
   const vault = new DocumentVault(vaultDir, PASSPHRASE);
   vault.put({ path: "Notes/First.md", body: "# First" });
 
-  const lockPath = path.join(vaultDir, ".sbrain.lock");
+  const lockPath = path.join(vaultDir, ".vbrain.lock");
   const foreign = (acquiredAt) =>
     JSON.stringify({ token: "another-process", pid: 999_999, host: "elsewhere", acquiredAt });
 
@@ -249,19 +249,19 @@ test("a remembered passphrase is scoped per vault and resolves ahead of the prom
     assert.equal(recallPassphrase(first), "first-secret");
     assert.equal(recallPassphrase(second), undefined);
 
-    delete process.env.SBRAIN_PASSPHRASE;
+    delete process.env.VBRAIN_PASSPHRASE;
     assert.equal(await getPassphrase({ vaultDir: first }), "first-secret");
 
-    process.env.SBRAIN_PASSPHRASE = "environment-wins";
+    process.env.VBRAIN_PASSPHRASE = "environment-wins";
     assert.equal(await getPassphrase({ vaultDir: first }), "environment-wins");
-    delete process.env.SBRAIN_PASSPHRASE;
+    delete process.env.VBRAIN_PASSPHRASE;
 
     assert.equal(forgetPassphrase(first), true);
     assert.equal(forgetPassphrase(first), false);
     assert.equal(recallPassphrase(first), undefined);
   } finally {
     setKeychainBackend(undefined);
-    delete process.env.SBRAIN_PASSPHRASE;
+    delete process.env.VBRAIN_PASSPHRASE;
   }
 });
 
@@ -294,7 +294,7 @@ test("frontmatter keeps its comments, order and style through a round-trip", () 
   assert.ok(exported.indexOf("title:") < exported.indexOf("status:"), "original key order survives");
   assert.match(exported, /confidence: 0\.92/u);
   assert.ok(exported.endsWith("Body stays exactly as written."), "body is untouched");
-  assert.match(exported, /sbrain_id: /u);
+  assert.match(exported, /vbrain_id: /u);
 
   // Changing one property rewrites that entry and leaves the rest alone.
   const updated = vault.put({

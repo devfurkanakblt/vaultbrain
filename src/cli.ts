@@ -62,7 +62,7 @@ function openDocumentVault(vaultDir: string, passphrase: string): DocumentVault 
 }
 
 program
-  .name("sbrain")
+  .name("vbrain")
   .description(
     "Vault Brain — an .env-style, least-exposure personal data store for the AI age."
   )
@@ -76,12 +76,12 @@ program
     const dir = program.opts().vault;
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     console.log(`Vault initialized at ${dir}`);
-    console.log(`Set SBRAIN_PASSPHRASE before running add/get/index/mcp.`);
+    console.log(`Set VBRAIN_PASSPHRASE before running add/get/index/mcp.`);
   });
 
 program
   .command("add <file> <keyval>")
-  .description('add or update a key, e.g. sbrain add health DOCTOR_NEXT_APPOINTMENT="2026-09-15"')
+  .description('add or update a key, e.g. vbrain add health DOCTOR_NEXT_APPOINTMENT="2026-09-15"')
   .requiredOption("--desc <description>", "short, NON-sensitive description of what this key holds")
   .action(async (file, keyval, opts) => {
     const eq = keyval.indexOf("=");
@@ -127,7 +127,7 @@ program
     const dir = program.opts().vault;
     const schema = readSchema(dir);
     if (!schema) {
-      console.log("No schema.json yet — run 'sbrain index' first.");
+      console.log("No schema.json yet — run 'vbrain index' first.");
       return;
     }
     const hits = filterNotesByDate(schema, { file: opts.category, from: opts.from, to: opts.to });
@@ -162,7 +162,7 @@ program
     const dir = program.opts().vault;
     const schema = readSchema(dir);
     if (!schema) {
-      console.log("No schema.json yet — run 'sbrain index' first.");
+      console.log("No schema.json yet — run 'vbrain index' first.");
       return;
     }
     for (const [file, entries] of Object.entries(schema.files)) {
@@ -178,7 +178,7 @@ program
     const dir = program.opts().vault;
     const schema = readSchema(dir);
     if (!schema) {
-      console.log("No schema.json yet — run 'sbrain index' first.");
+      console.log("No schema.json yet — run 'vbrain index' first.");
       return;
     }
     const hits = searchSchema(schema, query);
@@ -1223,7 +1223,7 @@ program
     if (!grantsExist(dir)) {
       console.error(
         "Note: this vault has no grant policy, so any agent that starts this server sees every key. " +
-          "Run 'sbrain grant add <agent> --scope ...' to govern it."
+          "Run 'vbrain grant add <agent> --scope ...' to govern it."
       );
     }
     await startMcpServer(dir);
@@ -1256,7 +1256,7 @@ program
   .option("--remember", "store the passphrase in the OS credential store for this vault")
   .action(async (opts) => {
     const dir = program.opts().vault;
-    const passphrase = process.env.SBRAIN_PASSPHRASE ?? (await readSecret("Vault passphrase: "));
+    const passphrase = process.env.VBRAIN_PASSPHRASE ?? (await readSecret("Vault passphrase: "));
     if (!passphrase) {
       console.error("A passphrase is required.");
       process.exit(1);
@@ -1266,7 +1266,7 @@ program
     console.log(`Unlocked ${dir}.`);
     if (opts.remember) {
       const backend = rememberPassphrase(dir, passphrase);
-      console.log(`Passphrase remembered in the OS credential store (${backend}). Run 'sbrain lock' to forget it.`);
+      console.log(`Passphrase remembered in the OS credential store (${backend}). Run 'vbrain lock' to forget it.`);
     }
   });
 

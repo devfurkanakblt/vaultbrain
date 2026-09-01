@@ -49,7 +49,7 @@ test("Obsidian-style YAML frontmatter imports nested properties and exports vali
 
   const portable = vault.exportMarkdown(note.id);
   const parsed = parseFrontmatter(portable);
-  assert.equal(parsed.attributes.sbrain_id, note.id);
+  assert.equal(parsed.attributes.vbrain_id, note.id);
   assert.equal(parsed.attributes.due, "2026-09-15");
   assert.deepEqual(parsed.attributes.nested, { active: true, score: 9.5 });
   assert.equal(parsed.body, note.body);

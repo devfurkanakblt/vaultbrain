@@ -70,12 +70,12 @@ Encryption at rest does not protect plaintext after an authorized operation
 decrypts it. An unlocked process, terminal output, clipboard, export destination
 or calling AI model may hold that plaintext.
 
-- `sbrain get` is the direct, no-model path. MCP content operations necessarily
+- `vbrain get` is the direct, no-model path. MCP content operations necessarily
   place the returned or submitted content in the calling model's context.
 - Grants and redaction minimize exposure; they are not model authentication.
-  `SBRAIN_AGENT` is selected by whoever starts the MCP server and is not a
+  `VBRAIN_AGENT` is selected by whoever starts the MCP server and is not a
   credential.
-- `SBRAIN_PASSPHRASE` is useful for automation but may be visible to processes
+- `VBRAIN_PASSPHRASE` is useful for automation but may be visible to processes
   running as the same OS user. The OS credential store is preferable for
   interactive use, but it also cannot defend against code already running as
   that user.

@@ -108,15 +108,15 @@ test("opening a canvas object as a note fails cryptographically, and the reverse
   );
 
   assert.equal(
-    JSON.parse(decryptDocument(canvasPayload, session.key, `secondbrain-vault:canvas:v1:${canvas.id}`)).id,
+    JSON.parse(decryptDocument(canvasPayload, session.key, `vault-brain:canvas:v1:${canvas.id}`)).id,
     canvas.id
   );
   assert.throws(
-    () => decryptDocument(canvasPayload, session.key, `secondbrain-vault:note:v1:${canvas.id}`),
+    () => decryptDocument(canvasPayload, session.key, `vault-brain:note:v1:${canvas.id}`),
     /unable to authenticate|bad decrypt/iu
   );
   assert.throws(
-    () => decryptDocument(notePayload, session.key, `secondbrain-vault:canvas:v1:${note.id}`),
+    () => decryptDocument(notePayload, session.key, `vault-brain:canvas:v1:${note.id}`),
     /unable to authenticate|bad decrypt/iu
   );
 
@@ -343,11 +343,11 @@ test("derived layout migration rebuilds once and canvas journal recovery heals a
   const canvas = vault.putCanvas(board());
   const session = openDocumentKey(dir, PASSPHRASE);
   const encryptedIndex = JSON.parse(fs.readFileSync(indexPath(dir), "utf8"));
-  const index = JSON.parse(decryptDocument(encryptedIndex, session.key, "secondbrain-vault:document-index:v1"));
+  const index = JSON.parse(decryptDocument(encryptedIndex, session.key, "vault-brain:document-index:v1"));
   index.derived = 4;
   fs.writeFileSync(
     indexPath(dir),
-    JSON.stringify(encryptDocument(JSON.stringify(index), session.key, "secondbrain-vault:document-index:v1"))
+    JSON.stringify(encryptDocument(JSON.stringify(index), session.key, "vault-brain:document-index:v1"))
   );
   const migrated = new DocumentVault(dir, PASSPHRASE);
   assert.equal(migrated.listCanvases().length, 1);

@@ -33,14 +33,14 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 type HmacSha256 = Hmac<Sha256>;
-const INDEX_AAD: &str = "secondbrain-vault:document-index:v1";
+const INDEX_AAD: &str = "vault-brain:document-index:v1";
 const DERIVED_LAYOUT: u8 = 5;
-const KEY_CHECK_CONTEXT: &str = "secondbrain-vault:document-key:v1";
+const KEY_CHECK_CONTEXT: &str = "vault-brain:document-key:v1";
 const MAX_NOTE_BYTES: usize = 25 * 1024 * 1024;
-const SAVED_VIEWS_AAD: &str = "secondbrain-vault:saved-views:v1";
+const SAVED_VIEWS_AAD: &str = "vault-brain:saved-views:v1";
 const MAX_SAVED_VIEWS: usize = 200;
 const MAX_CLUSTER_ROUNDS: usize = 20;
-const WORKSPACE_AAD: &str = "secondbrain-vault:workspace:v1";
+const WORKSPACE_AAD: &str = "vault-brain:workspace:v1";
 const MAX_BOOKMARKS: usize = 500;
 const MAX_LAYOUTS: usize = 100;
 const MAX_MENTIONS: usize = 50;
@@ -52,8 +52,8 @@ const MAX_CANVAS_EDGES: usize = 10_000;
 const MAX_PLUGIN_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_PLUGIN_STORAGE_BYTES: usize = 256 * 1024;
 const MAX_PLUGINS: usize = 100;
-const PLUGIN_POLICY_AAD: &str = "secondbrain-vault:plugin-policy:v1";
-const PLUGIN_SIGNATURE_PREFIX: &[u8] = b"secondbrain-vault-plugin-signature-v1\n";
+const PLUGIN_POLICY_AAD: &str = "vault-brain:plugin-policy:v1";
+const PLUGIN_SIGNATURE_PREFIX: &[u8] = b"vault-brain-plugin-signature-v1\n";
 
 /// The capability names this build understands.
 ///
@@ -77,7 +77,7 @@ const PLUGIN_CAPABILITIES: [&str; 11] = [
     "ui:panel",
     "storage",
 ];
-const VAULT_LOCK_FILENAME: &str = ".sbrain.lock";
+const VAULT_LOCK_FILENAME: &str = ".vbrain.lock";
 const VAULT_LOCK_STALE_SECONDS: i64 = 30;
 const VAULT_LOCK_WAIT: Duration = Duration::from_secs(2);
 const VAULT_LOCK_POLL: Duration = Duration::from_millis(40);
@@ -854,11 +854,11 @@ fn reject_symlink(path: &Path) -> Result<(), String> {
 }
 
 fn note_aad(id: &str) -> String {
-    format!("secondbrain-vault:note:v1:{id}")
+    format!("vault-brain:note:v1:{id}")
 }
 
 fn history_aad(id: &str, revision: u64) -> String {
-    format!("secondbrain-vault:note-history:v1:{id}:{revision}")
+    format!("vault-brain:note-history:v1:{id}:{revision}")
 }
 
 fn journal_path(session: &VaultSession) -> PathBuf {
@@ -2170,13 +2170,13 @@ fn open_daily_note_in(
 }
 
 fn plugin_aad(id: &str) -> String {
-    format!("secondbrain-vault:plugin:v1:{id}")
+    format!("vault-brain:plugin:v1:{id}")
 }
 
 /// A plugin's settings live in their own object, so writing a setting never
 /// rewrites the code and a reader of the settings never decrypts the code.
 fn plugin_store_aad(id: &str) -> String {
-    format!("secondbrain-vault:plugin-store:v1:{id}")
+    format!("vault-brain:plugin-store:v1:{id}")
 }
 
 fn plugin_object_path(root: &Path, id: &str) -> Result<PathBuf, String> {
@@ -3775,11 +3775,11 @@ fn link_unlinked_mention(
 }
 
 fn canvas_aad(id: &str) -> String {
-    format!("secondbrain-vault:canvas:v1:{id}")
+    format!("vault-brain:canvas:v1:{id}")
 }
 
 fn canvas_history_aad(id: &str, revision: u64) -> String {
-    format!("secondbrain-vault:canvas-history:v1:{id}:{revision}")
+    format!("vault-brain:canvas-history:v1:{id}:{revision}")
 }
 
 fn canvas_object_path(root: &Path, id: &str) -> Result<PathBuf, String> {
@@ -4338,7 +4338,7 @@ fn delete_canvas(reference: String, state: State<'_, AppState>) -> Result<Canvas
 /// This is the same on-disk shape the TypeScript core writes, because both
 /// implementations have to read one vault: `attachments/<id>/manifest.enc`
 /// beside `attachments/<id>/<n>.chunk.enc`, where `<id>` is
-/// `HMAC-SHA256(vault key, "secondbrain-vault:attachment-id:v1\0" || bytes)`.
+/// `HMAC-SHA256(vault key, "vault-brain:attachment-id:v1\0" || bytes)`.
 /// Keying the address means two vaults never agree on an ID for the same file,
 /// so a directory listing tells an observer nothing about what is stored.
 ///
@@ -4366,16 +4366,16 @@ struct AttachmentContent {
 }
 
 fn attachment_manifest_aad(id: &str) -> String {
-    format!("secondbrain-vault:attachment-manifest:v1:{id}")
+    format!("vault-brain:attachment-manifest:v1:{id}")
 }
 
 fn attachment_chunk_aad(id: &str, index: usize) -> String {
-    format!("secondbrain-vault:attachment-chunk:v1:{id}:{index}")
+    format!("vault-brain:attachment-chunk:v1:{id}:{index}")
 }
 
 fn attachment_id(key: &[u8], data: &[u8]) -> Result<String, String> {
     let mut mac = <HmacSha256 as Mac>::new_from_slice(key).map_err(|_| "invalid HMAC key")?;
-    mac.update(b"secondbrain-vault:attachment-id:v1\0");
+    mac.update(b"vault-brain:attachment-id:v1\0");
     mac.update(data);
     Ok(hex_lower(&mac.finalize().into_bytes()))
 }
@@ -5334,7 +5334,7 @@ mod tests {
         let path = temporary_vault("plugin");
         let path_text = path.to_string_lossy().into_owned();
         let mut session = open_session(&path_text, "plugin passphrase").unwrap();
-        let source = "sbrain.ui.panel('Words', '12');".to_string();
+        let source = "vbrain.ui.panel('Words', '12');".to_string();
 
         let installed = with_vault_write(&mut session, |session| {
             install_plugin_in(

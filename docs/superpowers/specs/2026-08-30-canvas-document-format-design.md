@@ -30,8 +30,8 @@ A canvas is a **sibling object type** to a note: the same UUID identity space, a
 distinct file suffix, a distinct AAD.
 
 ```
-documents/objects/<uuid>.canvas.enc           AAD: secondbrain-vault:canvas:v1:<id>
-documents/history/<uuid>/<rev>.canvas.enc     AAD: secondbrain-vault:canvas-history:v1:<id>:<rev>
+documents/objects/<uuid>.canvas.enc           AAD: vault-brain:canvas:v1:<id>
+documents/history/<uuid>/<rev>.canvas.enc     AAD: vault-brain:canvas-history:v1:<id>:<rev>
 ```
 
 ```ts

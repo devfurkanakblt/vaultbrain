@@ -235,13 +235,13 @@ export function parseMarkdownNote(notePath: string, markdown: string): NoteInput
       ? (metadata.properties as Record<string, PropertyValue>)
       : {};
   const portableId =
-    typeof metadata.sbrain_id === "string"
-      ? metadata.sbrain_id
+    typeof metadata.vbrain_id === "string"
+      ? metadata.vbrain_id
       : typeof metadata.id === "string" && /^[a-f0-9-]{36}$/u.test(metadata.id)
         ? metadata.id
         : undefined;
   const reserved = new Set([
-    "sbrain_id", "title", "aliases", "tags", "created", "createdAt",
+    "vbrain_id", "title", "aliases", "tags", "created", "createdAt",
     "modified", "updatedAt", "properties",
   ]);
   if (portableId) reserved.add("id");
@@ -311,17 +311,17 @@ export interface AttachmentInfo {
   createdAt: string;
 }
 
-const INDEX_AAD = "secondbrain-vault:document-index:v1";
-const PLUGIN_POLICY_AAD = "secondbrain-vault:plugin-policy:v1";
+const INDEX_AAD = "vault-brain:document-index:v1";
+const PLUGIN_POLICY_AAD = "vault-brain:plugin-policy:v1";
 const ATTACHMENT_CHUNK_SIZE = 1024 * 1024;
 const MAX_ATTACHMENT_SIZE = 250 * 1024 * 1024;
 
 function noteAad(id: string): string {
-  return `secondbrain-vault:note:v1:${id}`;
+  return `vault-brain:note:v1:${id}`;
 }
 
 function historyAad(id: string, revision: number): string {
-  return `secondbrain-vault:note-history:v1:${id}:${revision}`;
+  return `vault-brain:note-history:v1:${id}:${revision}`;
 }
 
 /**
@@ -331,12 +331,12 @@ function historyAad(id: string, revision: number): string {
  * none can be bypassed.
  */
 function canvasAad(id: string): string {
-  return `secondbrain-vault:canvas:v1:${id}`;
+  return `vault-brain:canvas:v1:${id}`;
 }
 
 /** Same type-confusion argument as `canvasAad`, for the third object type. */
 function pluginAad(id: string): string {
-  return `secondbrain-vault:plugin:v1:${id}`;
+  return `vault-brain:plugin:v1:${id}`;
 }
 
 /**
@@ -345,19 +345,19 @@ function pluginAad(id: string): string {
  * never decrypts the code at all.
  */
 function pluginStoreAad(id: string): string {
-  return `secondbrain-vault:plugin-store:v1:${id}`;
+  return `vault-brain:plugin-store:v1:${id}`;
 }
 
 function canvasHistoryAad(id: string, revision: number): string {
-  return `secondbrain-vault:canvas-history:v1:${id}:${revision}`;
+  return `vault-brain:canvas-history:v1:${id}:${revision}`;
 }
 
 function attachmentManifestAad(id: string): string {
-  return `secondbrain-vault:attachment-manifest:v1:${id}`;
+  return `vault-brain:attachment-manifest:v1:${id}`;
 }
 
 function attachmentChunkAad(id: string, index: number): string {
-  return `secondbrain-vault:attachment-chunk:v1:${id}:${index}`;
+  return `vault-brain:attachment-chunk:v1:${id}:${index}`;
 }
 
 function normalizeText(value: string): string {
@@ -1997,7 +1997,7 @@ export class DocumentVault {
     }
     const id = crypto
       .createHmac("sha256", this.session.key)
-      .update("secondbrain-vault:attachment-id:v1\0", "utf8")
+      .update("vault-brain:attachment-id:v1\0", "utf8")
       .update(data)
       .digest("hex");
     if (fs.existsSync(this.attachmentManifestPath(id))) return this.readAttachmentManifest(id);
@@ -2046,7 +2046,7 @@ export class DocumentVault {
     const data = Buffer.concat(parts);
     const actualId = crypto
       .createHmac("sha256", this.session.key)
-      .update("secondbrain-vault:attachment-id:v1\0", "utf8")
+      .update("vault-brain:attachment-id:v1\0", "utf8")
       .update(data)
       .digest("hex");
     if (data.length !== info.size || actualId !== id) throw new Error("Attachment integrity check failed.");
@@ -2092,7 +2092,7 @@ export class DocumentVault {
     const note = this.get(reference);
     const frontmatter: Record<string, PropertyValue> = {
       ...note.properties,
-      sbrain_id: note.id,
+      vbrain_id: note.id,
       title: note.title,
       aliases: note.aliases,
       tags: note.tags,

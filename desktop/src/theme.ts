@@ -15,7 +15,7 @@ export interface ThemePreset extends ThemeSettings {
   danger: string;
 }
 
-const STORAGE_KEY = "sbrain:theme";
+const STORAGE_KEY = "vbrain:theme";
 
 export const EDITOR_FONTS: Record<EditorFont, string> = {
   serif: '"Newsreader Variable", Georgia, serif',

@@ -257,7 +257,7 @@ export function decide(file: GrantFile | null, request: AccessRequest): GrantDec
       allowed: false,
       reason: known
         ? `No active grant lets "${agent}" ${request.action} that key. Ask the vault owner to widen or renew it.`
-        : `"${agent}" has no grant in this vault. Ask the vault owner to run: sbrain grant add.`,
+        : `"${agent}" has no grant in this vault. Ask the vault owner to run: vbrain grant add.`,
       redact: "full",
       requiresConfirmation: false,
       ungoverned: false,
