@@ -168,6 +168,12 @@ export interface PluginSecurityPolicy {
   revokedSigners: string[];
 }
 
+export interface PluginCallContext {
+  pluginId: string;
+  instanceToken: string;
+  revision: number;
+}
+
 /** A daily note, plus whether this call is what created it. */
 export interface DailyNote {
   note: NoteDocument;

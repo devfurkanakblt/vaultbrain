@@ -11,7 +11,12 @@ import {
   type DocumentKeySession,
   type DocumentPayload,
 } from "./document-crypto.js";
-import { assertNoSymlinkComponents, assertNotSymlink, writeFileAtomic } from "./fs-safe.js";
+import {
+  assertNoSymlinkComponents,
+  assertNotSymlink,
+  readTextFileLimited,
+  writeFileAtomic,
+} from "./fs-safe.js";
 import {
   analyzeMarkdown,
   makeExcerpt,
@@ -548,7 +553,9 @@ export class DocumentVault {
     const manifestPath = this.attachmentManifestPath(id);
     if (!fs.existsSync(manifestPath)) throw new Error(`Attachment not found: ${id}`);
     assertNotSymlink(manifestPath);
-    const payload = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as DocumentPayload;
+    const payload = JSON.parse(
+      readTextFileLimited(manifestPath, 1024 * 1024, "Attachment manifest")
+    ) as DocumentPayload;
     const info = JSON.parse(
       decryptDocument(payload, this.session.key, attachmentManifestAad(id))
     ) as AttachmentInfo;
@@ -564,7 +571,9 @@ export class DocumentVault {
     const indexPath = this.indexPath();
     if (!fs.existsSync(indexPath)) return this.rebuildIndex();
     assertNotSymlink(indexPath);
-    const payload = JSON.parse(fs.readFileSync(indexPath, "utf8")) as DocumentPayload;
+    const payload = JSON.parse(
+      readTextFileLimited(indexPath, 512 * 1024 * 1024, "Document index")
+    ) as DocumentPayload;
     const parsed = JSON.parse(
       decryptDocument(payload, this.session.key, INDEX_AAD)
     ) as DocumentIndex | LegacyDocumentIndex;
@@ -592,7 +601,9 @@ export class DocumentVault {
     const journalPath = this.journalPath();
     if (!fs.existsSync(journalPath)) return undefined;
     try {
-      const journal = JSON.parse(fs.readFileSync(journalPath, "utf8")) as WriteJournal;
+      const journal = JSON.parse(
+        readTextFileLimited(journalPath, 1024 * 1024, "Write journal")
+      ) as WriteJournal;
       if (journal?.version !== 1) return undefined;
       // A scope this build does not know still means "the index may be stale",
       // so it degrades to the strongest recovery rather than to none. Nothing
@@ -745,7 +756,9 @@ export class DocumentVault {
     const filePath = encryptedDocumentPath(this.session.rootDir, id);
     if (!fs.existsSync(filePath)) throw new Error(`Note object is missing: ${id}`);
     assertNotSymlink(filePath);
-    const payload = JSON.parse(fs.readFileSync(filePath, "utf8")) as DocumentPayload;
+    const payload = JSON.parse(
+      readTextFileLimited(filePath, 40 * 1024 * 1024, "Note object")
+    ) as DocumentPayload;
     const note = JSON.parse(decryptDocument(payload, this.session.key, noteAad(id))) as NoteDocument;
     if (note.version !== 1 || note.id !== id) throw new Error(`Invalid note object: ${id}`);
     return note;
@@ -756,7 +769,9 @@ export class DocumentVault {
     const filePath = this.canvasObjectPath(id);
     if (!fs.existsSync(filePath)) throw new Error(`Canvas object is missing: ${id}`);
     assertNotSymlink(filePath);
-    const payload = JSON.parse(fs.readFileSync(filePath, "utf8")) as DocumentPayload;
+    const payload = JSON.parse(
+      readTextFileLimited(filePath, 12 * 1024 * 1024, "Canvas object")
+    ) as DocumentPayload;
     const canvas = JSON.parse(
       decryptDocument(payload, this.session.key, canvasAad(id))
     ) as CanvasDocument;
@@ -811,7 +826,9 @@ export class DocumentVault {
     const historyPath = this.historyPath(id, revision);
     if (!fs.existsSync(historyPath)) throw new Error(`Revision not found: ${id}@${revision}`);
     assertNotSymlink(historyPath);
-    const payload = JSON.parse(fs.readFileSync(historyPath, "utf8")) as DocumentPayload;
+    const payload = JSON.parse(
+      readTextFileLimited(historyPath, 40 * 1024 * 1024, "Note revision")
+    ) as DocumentPayload;
     const note = JSON.parse(
       decryptDocument(payload, this.session.key, historyAad(id, revision))
     ) as NoteDocument;
@@ -825,7 +842,9 @@ export class DocumentVault {
     const historyPath = this.canvasHistoryPath(id, revision);
     if (!fs.existsSync(historyPath)) throw new Error(`Canvas revision not found: ${id}@${revision}`);
     assertNotSymlink(historyPath);
-    const payload = JSON.parse(fs.readFileSync(historyPath, "utf8")) as DocumentPayload;
+    const payload = JSON.parse(
+      readTextFileLimited(historyPath, 12 * 1024 * 1024, "Canvas revision")
+    ) as DocumentPayload;
     const canvas = JSON.parse(
       decryptDocument(payload, this.session.key, canvasHistoryAad(id, revision))
     ) as CanvasDocument;
@@ -1345,7 +1364,9 @@ export class DocumentVault {
     const filePath = this.pluginObjectPath(id);
     if (!fs.existsSync(filePath)) throw new Error(`Plugin not found: ${id}`);
     assertNotSymlink(filePath);
-    const payload = JSON.parse(fs.readFileSync(filePath, "utf8")) as DocumentPayload;
+    const payload = JSON.parse(
+      readTextFileLimited(filePath, 4 * 1024 * 1024, "Plugin package")
+    ) as DocumentPayload;
     const plugin = JSON.parse(
       decryptDocument(payload, this.session.key, pluginAad(id))
     ) as PluginPackage;
@@ -1364,12 +1385,14 @@ export class DocumentVault {
     return { ...rest, manifest, ...(signature ? { signature } : {}) };
   }
 
-  private loadPluginPolicy(): PluginSecurityPolicy {
+  protected loadPluginPolicy(): PluginSecurityPolicy {
     this.assertUnlocked();
     const filePath = this.pluginPolicyPath();
     if (!fs.existsSync(filePath)) return { version: 1, restrictedMode: false, revokedSigners: [] };
     assertNotSymlink(filePath);
-    const payload = JSON.parse(fs.readFileSync(filePath, "utf8")) as DocumentPayload;
+    const payload = JSON.parse(
+      readTextFileLimited(filePath, 4 * 1024 * 1024, "Plugin policy")
+    ) as DocumentPayload;
     const raw = JSON.parse(
       decryptDocument(payload, this.session.key, PLUGIN_POLICY_AAD)
     ) as Partial<PluginSecurityPolicy>;
@@ -1383,7 +1406,7 @@ export class DocumentVault {
     return { version: 1, restrictedMode: raw.restrictedMode, revokedSigners };
   }
 
-  private savePluginPolicy(policy: PluginSecurityPolicy): void {
+  protected savePluginPolicy(policy: PluginSecurityPolicy): void {
     const normalized: PluginSecurityPolicy = {
       version: 1,
       restrictedMode: policy.restrictedMode,
@@ -1592,7 +1615,9 @@ export class DocumentVault {
     const filePath = this.pluginStorePath(id);
     if (!fs.existsSync(filePath)) return {};
     assertNotSymlink(filePath);
-    const payload = JSON.parse(fs.readFileSync(filePath, "utf8")) as DocumentPayload;
+    const payload = JSON.parse(
+      readTextFileLimited(filePath, 1024 * 1024, "Plugin storage")
+    ) as DocumentPayload;
     const parsed = JSON.parse(decryptDocument(payload, this.session.key, pluginStoreAad(id))) as unknown;
     return parsed && typeof parsed === "object" && !Array.isArray(parsed)
       ? (parsed as Record<string, string>)
@@ -2040,7 +2065,9 @@ export class DocumentVault {
       const chunkPath = resolveInside(this.attachmentDir(id), `${index}.chunk.enc`);
       if (!fs.existsSync(chunkPath)) throw new Error(`Missing attachment chunk ${index}.`);
       assertNotSymlink(chunkPath);
-      const payload = JSON.parse(fs.readFileSync(chunkPath, "utf8")) as DocumentPayload;
+      const payload = JSON.parse(
+        readTextFileLimited(chunkPath, 2 * 1024 * 1024, "Attachment chunk")
+      ) as DocumentPayload;
       parts.push(decryptDocumentBytes(payload, this.session.key, attachmentChunkAad(id, index)));
     }
     const data = Buffer.concat(parts);

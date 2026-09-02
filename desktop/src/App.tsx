@@ -99,7 +99,7 @@ function folders(notes: NoteSummary[]) {
 }
 
 function LockScreen({ notice, onUnlock }: { notice: string; onUnlock: (path: string, passphrase: string) => Promise<void> }) {
-  const [path, setPath] = useState(localStorage.getItem("sbrain:last-vault") ?? "./vault/personal");
+  const [path, setPath] = useState("./vault/personal");
   const [passphrase, setPassphrase] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -111,7 +111,6 @@ function LockScreen({ notice, onUnlock }: { notice: string; onUnlock: (path: str
     try {
       await onUnlock(path, passphrase);
       setPassphrase("");
-      localStorage.setItem("sbrain:last-vault", path);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -223,61 +222,17 @@ export function App() {
    * capability table decides what may be asked for, and this decides what
    * exists to answer.
    */
-  const pluginBridge = useCallback(async (method: string, params: Record<string, unknown>) => {
-    const reference = String(params.reference ?? "");
-    switch (method) {
-      case "notes.list":
-        return vaultBridge.listNotes();
-      case "notes.metadata": {
-        const note = await vaultBridge.getNote(reference);
-        const { body: _body, ...metadata } = note;
-        return metadata;
-      }
-      case "notes.read":
-        return vaultBridge.getNote(reference);
-      case "notes.create":
-        return vaultBridge.createNote(String(params.path ?? ""), String(params.title ?? ""));
-      case "notes.update": {
-        const current = await vaultBridge.getNote(reference);
-        return vaultBridge.saveNote({ ...current, body: String(params.body ?? "") });
-      }
-      case "search.query":
-        return vaultBridge.search(String(params.query ?? ""));
-      case "canvas.list":
-        return vaultBridge.canvases();
-      case "canvas.read":
-        return vaultBridge.getCanvas(reference);
-      case "canvas.save":
-        return vaultBridge.saveCanvas(params.input as Parameters<typeof vaultBridge.saveCanvas>[0]);
-      case "attachments.list":
-        return vaultBridge.attachments();
-      case "attachments.read":
-        return vaultBridge.readAttachment(String(params.id ?? ""));
-      case "storage.get": {
-        const stored = await vaultBridge.pluginStorage(String(params.pluginId ?? ""));
-        return stored[String(params.key ?? "")] ?? null;
-      }
-      case "storage.set": {
-        const id = String(params.pluginId ?? "");
-        const stored = await vaultBridge.pluginStorage(id);
-        await vaultBridge.savePluginStorage(id, { ...stored, [String(params.key ?? "")]: String(params.value ?? "") });
-        return null;
-      }
-      default:
-        throw new Error(`Unknown plugin method: ${method}`);
-    }
-  }, []);
-
   const host = useCallback(() => {
     pluginHost.current ??= new PluginHost({
-      call: pluginBridge,
+      authorize: (pluginId, revision) => vaultBridge.authorizePluginInstance(pluginId, revision),
+      call: (context, method, params) => vaultBridge.pluginCall(context, method, params),
       onNotice: (name, message) => setNotice(`${name}: ${message}`),
       onCommandsChanged: setPluginCommands,
       onPanelsChanged: setPluginPanels,
       onStateChanged: setPluginStates,
     });
     return pluginHost.current;
-  }, [pluginBridge]);
+  }, []);
 
   /**
    * Source is fetched only for the plugins that are actually enabled, so a

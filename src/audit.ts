@@ -1,7 +1,8 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
-import { assertNotSymlink, writeFileAtomic } from "./fs-safe.js";
+import { assertNotSymlink, readTextFileLimited, writeFileAtomic } from "./fs-safe.js";
 import { resolveInside } from "./safety.js";
+import { withVaultLock } from "./vault-lock.js";
 
 export interface AuditEntry {
   timestamp: string;
@@ -29,12 +30,31 @@ export interface AuditVerification {
 
 const AUDIT_FILENAME = "audit.log";
 const AUDIT_META_FILENAME = "audit.meta.json";
+const AUDIT_HEAD_FILENAME = "audit.head.json";
 const GENESIS_HASH = "GENESIS";
-const auditKeyCache = new Map<string, Buffer>();
+const MAX_AUDIT_BYTES = 16 * 1024 * 1024;
+const auditKeyCache = new Map<string, { key: Buffer; lastUsed: number }>();
+
+export function clearAuditKeyCache(vaultDir?: string): void {
+  const prefix = vaultDir ? `${resolveInside(vaultDir, ".")}\0` : undefined;
+  for (const [id, cached] of auditKeyCache) {
+    if (!prefix || id.startsWith(prefix)) {
+      cached.key.fill(0);
+      auditKeyCache.delete(id);
+    }
+  }
+}
 
 interface AuditMeta {
   version: 1;
   salt: string;
+}
+
+interface AuditHead {
+  version: 1;
+  signedEntries: number;
+  lastHash: string;
+  mac: string;
 }
 
 function auditPath(vaultDir: string): string {
@@ -45,11 +65,15 @@ function metaPath(vaultDir: string): string {
   return resolveInside(vaultDir, AUDIT_META_FILENAME);
 }
 
+function headPath(vaultDir: string): string {
+  return resolveInside(vaultDir, AUDIT_HEAD_FILENAME);
+}
+
 function loadOrCreateMeta(vaultDir: string): AuditMeta {
   const p = metaPath(vaultDir);
   if (fs.existsSync(p)) {
     assertNotSymlink(p);
-    const meta: AuditMeta = JSON.parse(fs.readFileSync(p, "utf8"));
+    const meta: AuditMeta = JSON.parse(readTextFileLimited(p, 64 * 1024, "Audit metadata"));
     if (meta.version !== 1 || !meta.salt) throw new Error("Invalid audit metadata.");
     return meta;
   }
@@ -62,7 +86,7 @@ function loadMeta(vaultDir: string): AuditMeta | null {
   const p = metaPath(vaultDir);
   if (!fs.existsSync(p)) return null;
   assertNotSymlink(p);
-  const meta: AuditMeta = JSON.parse(fs.readFileSync(p, "utf8"));
+  const meta: AuditMeta = JSON.parse(readTextFileLimited(p, 64 * 1024, "Audit metadata"));
   return meta.version === 1 && meta.salt ? meta : null;
 }
 
@@ -77,15 +101,36 @@ function auditKey(vaultDir: string, passphrase: string, meta: AuditMeta): Buffer
     .update(passphrase, "utf8")
     .digest("hex");
   const cacheId = `${resolveInside(vaultDir, ".")}\0${fingerprint}`;
+  const cutoff = Date.now() - 5 * 60 * 1000;
+  for (const [id, cached] of auditKeyCache) {
+    if (cached.lastUsed < cutoff || (auditKeyCache.size > 8 && id !== cacheId)) {
+      cached.key.fill(0);
+      auditKeyCache.delete(id);
+    }
+  }
   const cached = auditKeyCache.get(cacheId);
-  if (cached) return cached;
+  if (cached) {
+    cached.lastUsed = Date.now();
+    return cached.key;
+  }
 
   const derived = crypto.scryptSync(passphrase, Buffer.from(meta.salt, "base64"), 32, {
     N: 2 ** 15,
     maxmem: 64 * 1024 * 1024,
   });
-  auditKeyCache.set(cacheId, derived);
+  auditKeyCache.set(cacheId, { key: derived, lastUsed: Date.now() });
   return derived;
+}
+
+function headMac(head: Omit<AuditHead, "mac">, key: Buffer): string {
+  return crypto.createHmac("sha256", key).update(JSON.stringify(head), "utf8").digest("hex");
+}
+
+function saveHead(vaultDir: string, signedEntries: number, lastHash: string, key: Buffer): void {
+  const unsigned = { version: 1 as const, signedEntries, lastHash };
+  writeFileAtomic(headPath(vaultDir), JSON.stringify({ ...unsigned, mac: headMac(unsigned, key) }), {
+    mode: 0o600,
+  });
 }
 
 /**
@@ -119,22 +164,30 @@ export function appendAudit(
   entry: Omit<AuditEntry, "timestamp" | "prevHash" | "hash">,
   passphrase: string
 ): void {
-  fs.mkdirSync(vaultDir, { recursive: true, mode: 0o700 });
-  const p = auditPath(vaultDir);
-  assertNotSymlink(p);
-  const existing = readAudit(vaultDir);
-  const previousSigned = [...existing].reverse().find((item) => item.hash);
-  const prevHash = previousSigned?.hash ?? GENESIS_HASH;
-  const unsigned = { timestamp: new Date().toISOString(), ...entry, prevHash };
-  const hash = calculateHash(unsigned, auditKey(vaultDir, passphrase, loadOrCreateMeta(vaultDir)));
-  const full: AuditEntry = { ...unsigned, hash };
-  fs.appendFileSync(p, JSON.stringify(full) + "\n", { encoding: "utf8", mode: 0o600 });
+  withVaultLock(vaultDir, () => {
+    fs.mkdirSync(vaultDir, { recursive: true, mode: 0o700 });
+    const p = auditPath(vaultDir);
+    assertNotSymlink(p);
+    const existing = readAudit(vaultDir);
+    const signedEntries = existing.filter((item) => item.hash).length;
+    const previousSigned = [...existing].reverse().find((item) => item.hash);
+    const prevHash = previousSigned?.hash ?? GENESIS_HASH;
+    const unsigned = { timestamp: new Date().toISOString(), ...entry, prevHash };
+    const key = auditKey(vaultDir, passphrase, loadOrCreateMeta(vaultDir));
+    const hash = calculateHash(unsigned, key);
+    const full: AuditEntry = { ...unsigned, hash };
+    fs.appendFileSync(p, JSON.stringify(full) + "\n", { encoding: "utf8", mode: 0o600 });
+    saveHead(vaultDir, signedEntries + 1, hash, key);
+  });
 }
 
 export function readAudit(vaultDir: string): AuditEntry[] {
   const p = auditPath(vaultDir);
   if (!fs.existsSync(p)) return [];
   assertNotSymlink(p);
+  if (fs.statSync(p).size > MAX_AUDIT_BYTES) {
+    throw new Error("Audit log exceeds the 16 MiB safety limit.");
+  }
   return fs
     .readFileSync(p, "utf8")
     .split("\n")
@@ -149,7 +202,12 @@ export function verifyAudit(vaultDir: string, passphrase: string): AuditVerifica
     (entry): entry is AuditEntry & { hash: string; prevHash: string } =>
       Boolean(entry.hash && entry.prevHash)
   );
-  if (signed.length === 0) return { valid: true, signedEntries: 0, legacyEntries };
+  if (signed.length === 0) {
+    if (fs.existsSync(headPath(vaultDir)) || loadMeta(vaultDir)) {
+      return { valid: false, signedEntries: 0, legacyEntries, error: "Audit log is missing or truncated." };
+    }
+    return { valid: true, signedEntries: 0, legacyEntries };
+  }
 
   const meta = loadMeta(vaultDir);
   if (!meta) {
@@ -186,6 +244,21 @@ export function verifyAudit(vaultDir: string, passphrase: string): AuditVerifica
       };
     }
     expectedPrevious = entry.hash;
+  }
+  const sealedPath = headPath(vaultDir);
+  if (!fs.existsSync(sealedPath)) {
+    return { valid: false, signedEntries: signed.length, legacyEntries, error: "Audit head is missing." };
+  }
+  assertNotSymlink(sealedPath);
+  const head = JSON.parse(readTextFileLimited(sealedPath, 64 * 1024, "Audit head")) as AuditHead;
+  const unsigned = { version: head.version, signedEntries: head.signedEntries, lastHash: head.lastHash };
+  const expectedMac = headMac(unsigned, key);
+  const validMac = /^[a-f0-9]{64}$/u.test(head.mac) && crypto.timingSafeEqual(
+    Buffer.from(head.mac, "hex"),
+    Buffer.from(expectedMac, "hex")
+  );
+  if (!validMac || head.version !== 1 || head.signedEntries !== signed.length || head.lastHash !== expectedPrevious) {
+    return { valid: false, signedEntries: signed.length, legacyEntries, error: "Audit head does not match the log." };
   }
   return { valid: true, signedEntries: signed.length, legacyEntries };
 }

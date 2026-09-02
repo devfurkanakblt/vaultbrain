@@ -28,6 +28,20 @@ export function assertNoSymlinkComponents(rootDir: string, targetPath: string): 
   }
 }
 
+export function readTextFileLimited(filePath: string, maxBytes: number, label: string): string {
+  assertNotSymlink(filePath);
+  const size = fs.statSync(filePath).size;
+  if (size > maxBytes) throw new Error(`${label} exceeds the ${maxBytes}-byte safety limit.`);
+  return fs.readFileSync(filePath, "utf8");
+}
+
+export function readBufferFileLimited(filePath: string, maxBytes: number, label: string): Buffer {
+  assertNotSymlink(filePath);
+  const size = fs.statSync(filePath).size;
+  if (size > maxBytes) throw new Error(`${label} exceeds the ${maxBytes}-byte safety limit.`);
+  return fs.readFileSync(filePath);
+}
+
 /**
  * Write and fsync a sibling temporary file before replacing the destination.
  * A crash can therefore leave either the old complete file or the new complete

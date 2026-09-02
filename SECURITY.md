@@ -13,6 +13,15 @@ affected versions, impact, and any suggested mitigation.
 Until the external review gate in `docs/PRODUCT.md` is complete, releases must
 not be presented as suitable for real medical, financial, or identity data.
 
+## Windows release signing
+
+Stable `v1.*` release tags fail closed unless the repository has both
+`WINDOWS_CERTIFICATE` (a base64-encoded Authenticode PFX) and
+`WINDOWS_CERTIFICATE_PASSWORD` secrets. The release workflow signs every MSI
+and NSIS executable with SHA-256, obtains an RFC 3161 timestamp, verifies the
+signature, and only then produces checksums, SBOM and provenance. Pre-1.0
+artifacts without these secrets must be described as unsigned test builds.
+
 ## What the grant layer does and does not claim
 
 Per-agent grants and redaction narrow how much an agent is handed. They are not

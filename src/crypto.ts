@@ -1,8 +1,10 @@
 import crypto from "node:crypto";
+import { assertStrongPassphrase } from "./passphrase-policy.js";
 
 const ALGO = "aes-256-gcm";
 const KEY_LEN = 32; // 256-bit
-const SCRYPT_N = 2 ** 15; // cost factor; MVP default, tune upward for production
+const SCRYPT_N = 2 ** 16;
+const LEGACY_SCRYPT_N = 2 ** 15;
 const SCRYPT_R = 8;
 const SCRYPT_P = 1;
 const MAX_MEM = 128 * 1024 * 1024;
@@ -43,7 +45,7 @@ export type AnyEncryptedPayload = EncryptedPayload | LegacyEncryptedPayload;
 
 const LEGACY_PARAMETERS: Omit<ScryptParameters, "salt"> = {
   name: "scrypt",
-  N: SCRYPT_N,
+  N: LEGACY_SCRYPT_N,
   r: SCRYPT_R,
   p: SCRYPT_P,
 };
@@ -115,8 +117,9 @@ function headerAad(version: number, kdf: ScryptParameters): Buffer {
  * The passphrase itself is never written to disk anywhere.
  */
 export function encrypt(plaintext: string, passphrase: string): EncryptedPayload {
+  assertStrongPassphrase(passphrase);
   const salt = crypto.randomBytes(16);
-  const kdf: ScryptParameters = { ...LEGACY_PARAMETERS, salt: salt.toString("base64") };
+  const kdf: ScryptParameters = { ...LEGACY_PARAMETERS, N: SCRYPT_N, salt: salt.toString("base64") };
   const key = deriveKey(passphrase, salt, kdf);
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv(ALGO, key, iv);

@@ -83,6 +83,16 @@ description = "Allows listing installed plugins, their versions and the capabili
 commands.allow = ["list_plugins"]
 
 [[permission]]
+identifier = "allow-authorize-plugin-instance"
+description = "Allows the main local window to obtain a revision-bound token for one enabled plugin worker."
+commands.allow = ["authorize_plugin_instance"]
+
+[[permission]]
+identifier = "allow-plugin-call"
+description = "Allows a token-bound plugin call whose live capability and revocation policy is revalidated in Rust."
+commands.allow = ["plugin_call"]
+
+[[permission]]
 identifier = "allow-get-plugin"
 description = "Allows reading one plugin's manifest and source so the sandbox worker can be built."
 commands.allow = ["get_plugin"]

@@ -1,18 +1,16 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import { decrypt, encrypt, type AnyEncryptedPayload } from "./crypto.js";
-import { assertNotSymlink, writeFileAtomic } from "./fs-safe.js";
+import { assertNotSymlink, readTextFileLimited, writeFileAtomic } from "./fs-safe.js";
 import { isRedactionLevel, type RedactionLevel } from "./redaction.js";
 import { normalizeVaultName, resolveInside } from "./safety.js";
 
 /**
  * Per-agent scoped grants.
  *
- * The file's existence is the switch: a vault with no `grants.enc` behaves the
- * way it always has — one passphrase, no per-agent narrowing — and a vault with
- * one enforces every rule below. That keeps an existing vault working until its
- * owner decides to govern it, and makes "is this vault governed?" a question
- * with a yes/no answer rather than a policy to read.
+ * MCP access is fail-closed: no `grants.enc` means no agent access. Direct CLI
+ * operations remain available to the owner, but an MCP process cannot turn a
+ * missing policy into whole-vault access.
  */
 
 export type GrantAction = "discover" | "resolve" | "store";
@@ -76,7 +74,7 @@ export interface GrantDecision {
   redact: RedactionLevel;
   /** True when the caller must first obtain an approval for this exact key. */
   requiresConfirmation: boolean;
-  /** True when the vault has no grant file and is therefore ungoverned. */
+  /** True when the vault has no grant file (and access was denied). */
   ungoverned: boolean;
 }
 
@@ -134,7 +132,7 @@ export function loadGrants(vaultDir: string, passphrase: string): GrantFile | nu
   const path = grantsPath(vaultDir);
   if (!fs.existsSync(path)) return null;
   assertNotSymlink(path);
-  const payload: AnyEncryptedPayload = JSON.parse(fs.readFileSync(path, "utf8"));
+  const payload: AnyEncryptedPayload = JSON.parse(readTextFileLimited(path, 8 * 1024 * 1024, "Grant policy"));
   const parsed: GrantFile = JSON.parse(decrypt(payload, passphrase));
   if (parsed.version !== 1 || !Array.isArray(parsed.grants)) {
     throw new Error("Unrecognized grant file. Refusing to enforce a policy this build cannot read.");
@@ -239,9 +237,9 @@ function scopeCovers(scope: GrantScope, request: AccessRequest): boolean {
 export function decide(file: GrantFile | null, request: AccessRequest): GrantDecision {
   if (!file) {
     return {
-      allowed: true,
-      reason: "This vault has no grant policy, so every unlocked key is reachable.",
-      redact: "none",
+      allowed: false,
+      reason: "This vault has no grant policy. Ask the vault owner to run: sbrain grant add.",
+      redact: "full",
       requiresConfirmation: false,
       ungoverned: true,
     };
@@ -418,7 +416,7 @@ export function filterDiscoverable<T extends { key: string }>(
   entries: T[],
   now = new Date()
 ): T[] {
-  if (!file) return entries;
+  if (!file) return [];
   return entries.filter(
     (entry) =>
       decide(file, { agent, action: "discover", file: vaultFile, key: entry.key, now }).allowed

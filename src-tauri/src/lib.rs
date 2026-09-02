@@ -84,6 +84,19 @@ const VAULT_LOCK_POLL: Duration = Duration::from_millis(40);
 #[derive(Default)]
 struct AppState {
     session: Mutex<Option<VaultSession>>,
+    plugin_instances: Mutex<HashMap<String, PluginInstanceGrant>>,
+}
+
+#[derive(Debug, Clone)]
+struct PluginInstanceGrant {
+    plugin_id: String,
+    revision: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginInstanceAuthorization {
+    instance_token: String,
 }
 
 struct VaultSession {
@@ -644,18 +657,51 @@ fn lock_host() -> String {
 }
 
 fn read_lock_record(path: &Path) -> Option<VaultLockRecord> {
-    serde_json::from_slice(&fs::read(path).ok()?).ok()
+    serde_json::from_slice(&read_limited(path, 64 * 1024, "vault lock").ok()?).ok()
 }
 
-fn lock_is_stale(record: Option<&VaultLockRecord>) -> bool {
-    let Some(record) = record else { return true };
-    let Ok(acquired) = chrono::DateTime::parse_from_rfc3339(&record.acquired_at) else {
-        return true;
+#[cfg(windows)]
+fn process_is_alive(pid: u32) -> bool {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, GetLastError, ERROR_INVALID_PARAMETER},
+        System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
     };
-    Utc::now()
+
+    const STILL_ACTIVE: u32 = 259;
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            // Access denied and other unknown states fail closed. Windows lets
+            // the current user query its own normal processes, including the
+            // peer CLI/desktop writers this lock coordinates.
+            return GetLastError() != ERROR_INVALID_PARAMETER;
+        }
+        let mut code = 0;
+        let ok = GetExitCodeProcess(handle, &mut code) != 0;
+        let _ = CloseHandle(handle);
+        !ok || code == STILL_ACTIVE
+    }
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+fn lock_is_reclaimable(record: Option<&VaultLockRecord>) -> bool {
+    let Some(record) = record else { return false };
+    if !record.host.eq_ignore_ascii_case(&lock_host()) {
+        return false;
+    }
+    let Ok(acquired) = chrono::DateTime::parse_from_rfc3339(&record.acquired_at) else {
+        return false;
+    };
+    let old_enough = Utc::now()
         .signed_duration_since(acquired.with_timezone(&Utc))
         .num_seconds()
-        > VAULT_LOCK_STALE_SECONDS
+        > VAULT_LOCK_STALE_SECONDS;
+    old_enough && !process_is_alive(record.pid)
 }
 
 impl VaultWriteGuard {
@@ -683,7 +729,7 @@ impl VaultWriteGuard {
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     let holder = read_lock_record(&path);
-                    if lock_is_stale(holder.as_ref()) {
+                    if lock_is_reclaimable(holder.as_ref()) {
                         match fs::remove_file(&path) {
                             Ok(()) => continue,
                             Err(remove_error)
@@ -729,8 +775,23 @@ fn hex_lower(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn derive_key(passphrase: &str, salt: &[u8]) -> Result<Zeroizing<[u8; 32]>, String> {
-    let params = ScryptParams::new(15, 8, 1, 32).map_err(|error| error.to_string())?;
+fn validate_new_passphrase(passphrase: &str) -> Result<(), String> {
+    if passphrase.chars().count() < 12 {
+        return Err("vault passphrases must contain at least 12 characters".into());
+    }
+    if passphrase.chars().collect::<HashSet<_>>().len() < 4 {
+        return Err("choose a less predictable vault passphrase".into());
+    }
+    Ok(())
+}
+
+fn derive_key(passphrase: &str, salt: &[u8], n: u32) -> Result<Zeroizing<[u8; 32]>, String> {
+    let log_n = match n {
+        32_768 => 15,
+        65_536 => 16,
+        _ => return Err("unsupported scrypt work factor".into()),
+    };
+    let params = ScryptParams::new(log_n, 8, 1, 32).map_err(|error| error.to_string())?;
     let mut key = Zeroizing::new([0u8; 32]);
     scrypt(passphrase.as_bytes(), salt, &params, key.as_mut())
         .map_err(|error| format!("key derivation failed: {error}"))?;
@@ -841,15 +902,34 @@ fn replace_atomic(source: &Path, destination: &Path) -> Result<(), String> {
 }
 
 fn reject_symlink(path: &Path) -> Result<(), String> {
-    if path.exists()
-        && fs::symlink_metadata(path)
-            .map_err(|error| error.to_string())?
-            .file_type()
-            .is_symlink()
-    {
-        return Err(format!("refusing symbolic link: {}", path.display()));
+    for component in path.ancestors() {
+        if component.exists() {
+            let metadata = fs::symlink_metadata(component).map_err(|error| error.to_string())?;
+            let mut link_like = metadata.file_type().is_symlink();
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+                link_like |= metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+            }
+            if link_like {
+                return Err(format!(
+                    "refusing symbolic link or reparse point: {}",
+                    component.display()
+                ));
+            }
+        }
     }
     Ok(())
+}
+
+fn read_limited(path: &Path, max_bytes: u64, label: &str) -> Result<Vec<u8>, String> {
+    reject_symlink(path)?;
+    let size = fs::metadata(path).map_err(|error| error.to_string())?.len();
+    if size > max_bytes {
+        return Err(format!("{label} exceeds its {max_bytes}-byte safety limit"));
+    }
+    fs::read(path).map_err(|error| error.to_string())
 }
 
 fn note_aad(id: &str) -> String {
@@ -915,7 +995,7 @@ fn load_note(session: &VaultSession, id: &str) -> Result<NoteDocument, String> {
     let path = note_path(&session.root_dir, id)?;
     reject_symlink(&path)?;
     let payload: EncryptedPayload =
-        serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?)
+        serde_json::from_slice(&read_limited(&path, 40 * 1024 * 1024, "note")?)
             .map_err(|error| error.to_string())?;
     let note: NoteDocument =
         serde_json::from_slice(&decrypt(&payload, session.key.as_ref(), &note_aad(id))?)
@@ -933,7 +1013,7 @@ fn read_index(session: &VaultSession) -> Result<DocumentIndex, String> {
     }
     reject_symlink(&path)?;
     let payload: EncryptedPayload =
-        serde_json::from_slice(&fs::read(path).map_err(|error| error.to_string())?)
+        serde_json::from_slice(&read_limited(&path, 512 * 1024 * 1024, "document index")?)
             .map_err(|error| error.to_string())?;
     let mut index: DocumentIndex =
         serde_json::from_slice(&decrypt(&payload, session.key.as_ref(), INDEX_AAD)?)
@@ -951,10 +1031,9 @@ fn recover_pending_journal(session: &mut VaultSession) -> Result<(), String> {
         return Ok(());
     }
     reject_symlink(&path)?;
-    let journal = serde_json::from_slice::<WriteJournal>(
-        &fs::read(&path).map_err(|error| error.to_string())?,
-    )
-    .ok();
+    let journal =
+        serde_json::from_slice::<WriteJournal>(&read_limited(&path, 1024 * 1024, "write journal")?)
+            .ok();
     if journal
         .as_ref()
         .is_some_and(|entry| entry.version == 1 && entry.scope == "canvases")
@@ -1413,28 +1492,32 @@ fn open_session(vault_path: &str, passphrase: &str) -> Result<VaultSession, Stri
     let (key, _manifest) = if manifest_path.exists() {
         reject_symlink(&manifest_path)?;
         let manifest: Manifest =
-            serde_json::from_slice(&fs::read(&manifest_path).map_err(|error| error.to_string())?)
+            serde_json::from_slice(&read_limited(&manifest_path, 64 * 1024, "vault manifest")?)
                 .map_err(|error| error.to_string())?;
-        if manifest.version != 1 || manifest.kdf.name != "scrypt" || manifest.kdf.n != 32768 {
+        if manifest.version != 1
+            || manifest.kdf.name != "scrypt"
+            || !matches!(manifest.kdf.n, 32_768 | 65_536)
+        {
             return Err("unsupported document vault manifest".into());
         }
         let salt = BASE64
             .decode(&manifest.kdf.salt)
             .map_err(|_| "invalid manifest salt")?;
-        let key = derive_key(passphrase, &salt)?;
+        let key = derive_key(passphrase, &salt, manifest.kdf.n)?;
         if verifier(key.as_ref())? != manifest.verifier {
             return Err("wrong passphrase or damaged manifest".into());
         }
         (key, manifest)
     } else {
+        validate_new_passphrase(passphrase)?;
         let mut salt = [0u8; 16];
         OsRng.fill_bytes(&mut salt);
-        let key = derive_key(passphrase, &salt)?;
+        let key = derive_key(passphrase, &salt, 65_536)?;
         let manifest = Manifest {
             version: 1,
             kdf: KdfManifest {
                 name: "scrypt".into(),
-                n: 32768,
+                n: 65_536,
                 salt: BASE64.encode(salt),
             },
             verifier: verifier(key.as_ref())?,
@@ -1608,7 +1691,7 @@ fn load_saved_views(session: &VaultSession) -> Result<Vec<SavedView>, String> {
     }
     reject_symlink(&path)?;
     let payload: EncryptedPayload =
-        serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?)
+        serde_json::from_slice(&read_limited(&path, 16 * 1024 * 1024, "saved views")?)
             .map_err(|error| error.to_string())?;
     let file: SavedViewFile =
         serde_json::from_slice(&decrypt(&payload, session.key.as_ref(), SAVED_VIEWS_AAD)?)
@@ -1768,7 +1851,8 @@ fn load_revision(session: &VaultSession, id: &str, revision: u64) -> Result<Note
     let path = note_history_dir(session, id)?.join(format!("{revision}.note.enc"));
     reject_symlink(&path)?;
     let payload: EncryptedPayload = serde_json::from_slice(
-        &fs::read(&path).map_err(|_| format!("revision {revision} not found for note {id}"))?,
+        &read_limited(&path, 40 * 1024 * 1024, "note revision")
+            .map_err(|_| format!("revision {revision} not found for note {id}"))?,
     )
     .map_err(|error| error.to_string())?;
     let note: NoteDocument = serde_json::from_slice(&decrypt(
@@ -2266,7 +2350,7 @@ fn load_plugin_policy(session: &VaultSession) -> Result<PluginSecurityPolicy, St
     }
     reject_symlink(&path)?;
     let payload: EncryptedPayload =
-        serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?)
+        serde_json::from_slice(&read_limited(&path, 4 * 1024 * 1024, "plugin policy")?)
             .map_err(|error| error.to_string())?;
     let mut policy: PluginSecurityPolicy =
         serde_json::from_slice(&decrypt(&payload, session.key.as_ref(), PLUGIN_POLICY_AAD)?)
@@ -2314,6 +2398,56 @@ fn plugin_allowed(plugin: &PluginPackage, policy: &PluginSecurityPolicy) -> bool
         return false;
     }
     !policy.restricted_mode || plugin.signature.is_some()
+}
+
+fn plugin_method_capability(method: &str) -> Option<&'static str> {
+    match method {
+        "notes.list" | "notes.metadata" => Some("notes:metadata"),
+        "notes.read" => Some("notes:read"),
+        "notes.create" | "notes.update" => Some("notes:write"),
+        "search.query" => Some("search"),
+        "canvas.list" | "canvas.read" => Some("canvas:read"),
+        "canvas.save" => Some("canvas:write"),
+        "attachments.list" | "attachments.read" => Some("attachments:read"),
+        "storage.get" | "storage.set" => Some("storage"),
+        _ => None,
+    }
+}
+
+fn validate_live_plugin_call(
+    session: &VaultSession,
+    plugin_id: &str,
+    revision: u64,
+    method: &str,
+) -> Result<PluginPackage, String> {
+    let plugin = load_plugin(session, plugin_id)?;
+    if !plugin.enabled
+        || plugin.revision != revision
+        || !plugin_allowed(&plugin, &load_plugin_policy(session)?)
+    {
+        return Err("plugin authorization was revoked, disabled, or changed".into());
+    }
+    let capability = plugin_method_capability(method).ok_or("unknown privileged plugin method")?;
+    if !plugin
+        .manifest
+        .capabilities
+        .iter()
+        .any(|entry| entry == capability)
+    {
+        return Err(format!("plugin lacks required capability: {capability}"));
+    }
+    Ok(plugin)
+}
+
+fn plugin_param<'a>(params: &'a Value, name: &str) -> Result<&'a str, String> {
+    params
+        .get(name)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("plugin parameter {name} must be a string"))
+}
+
+fn plugin_json<T: Serialize>(value: T) -> Result<Value, String> {
+    serde_json::to_value(value).map_err(|error| error.to_string())
 }
 
 fn summarize_plugin(plugin: &PluginPackage, policy: &PluginSecurityPolicy) -> PluginSummary {
@@ -2446,9 +2580,11 @@ fn store_plugin_index(
 fn load_plugin(session: &VaultSession, id: &str) -> Result<PluginPackage, String> {
     let path = plugin_object_path(&session.root_dir, id)?;
     reject_symlink(&path)?;
-    let payload: EncryptedPayload =
-        serde_json::from_slice(&fs::read(&path).map_err(|_| format!("plugin not found: {id}"))?)
-            .map_err(|error| error.to_string())?;
+    let payload: EncryptedPayload = serde_json::from_slice(
+        &read_limited(&path, 4 * 1024 * 1024, "plugin package")
+            .map_err(|_| format!("plugin not found: {id}"))?,
+    )
+    .map_err(|error| error.to_string())?;
     let plugin: PluginPackage =
         serde_json::from_slice(&decrypt(&payload, session.key.as_ref(), &plugin_aad(id))?)
             .map_err(|error| error.to_string())?;
@@ -2655,7 +2791,7 @@ fn read_plugin_storage(
     }
     reject_symlink(&path)?;
     let payload: EncryptedPayload =
-        serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?)
+        serde_json::from_slice(&read_limited(&path, 1024 * 1024, "plugin storage")?)
             .map_err(|error| error.to_string())?;
     serde_json::from_slice(&decrypt(
         &payload,
@@ -2700,7 +2836,7 @@ fn load_workspace(session: &VaultSession) -> Result<WorkspaceState, String> {
     }
     reject_symlink(&path)?;
     let payload: EncryptedPayload =
-        serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?)
+        serde_json::from_slice(&read_limited(&path, 16 * 1024 * 1024, "workspace")?)
             .map_err(|error| error.to_string())?;
     let state: WorkspaceState =
         serde_json::from_slice(&decrypt(&payload, session.key.as_ref(), WORKSPACE_AAD)?)
@@ -3024,6 +3160,11 @@ fn unlock_vault(
         path: session.vault_dir.to_string_lossy().into_owned(),
         note_count: session.index.notes.len(),
     };
+    state
+        .plugin_instances
+        .lock()
+        .map_err(|_| "plugin instance lock poisoned")?
+        .clear();
     *state
         .session
         .lock()
@@ -3037,6 +3178,11 @@ fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
         .session
         .lock()
         .map_err(|_| "vault session lock poisoned")? = None;
+    state
+        .plugin_instances
+        .lock()
+        .map_err(|_| "plugin instance lock poisoned")?
+        .clear();
     Ok(())
 }
 
@@ -3303,6 +3449,152 @@ fn list_plugins(state: State<'_, AppState>) -> Result<Vec<PluginSummary>, String
     }
     plugins.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(plugins)
+}
+
+#[tauri::command(async)]
+fn authorize_plugin_instance(
+    plugin_id: String,
+    revision: u64,
+    state: State<'_, AppState>,
+) -> Result<PluginInstanceAuthorization, String> {
+    let guard = state
+        .session
+        .lock()
+        .map_err(|_| "vault session lock poisoned")?;
+    let session = guard.as_ref().ok_or("vault is locked")?;
+    let plugin = load_plugin(session, &resolve_plugin_id(session, &plugin_id)?)?;
+    if !plugin.enabled
+        || plugin.revision != revision
+        || !plugin_allowed(&plugin, &load_plugin_policy(session)?)
+    {
+        return Err("plugin is disabled, revoked, or has changed revision".into());
+    }
+    let instance_token = Uuid::new_v4().to_string();
+    state
+        .plugin_instances
+        .lock()
+        .map_err(|_| "plugin instance lock poisoned")?
+        .insert(
+            instance_token.clone(),
+            PluginInstanceGrant {
+                plugin_id: plugin.id,
+                revision,
+            },
+        );
+    Ok(PluginInstanceAuthorization { instance_token })
+}
+
+#[tauri::command(async)]
+fn plugin_call(
+    plugin_id: String,
+    instance_token: String,
+    revision: u64,
+    method: String,
+    params: Value,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    let instance = state
+        .plugin_instances
+        .lock()
+        .map_err(|_| "plugin instance lock poisoned")?
+        .get(&instance_token)
+        .cloned()
+        .ok_or("invalid plugin instance authorization")?;
+    if instance.plugin_id != plugin_id || instance.revision != revision {
+        return Err("plugin instance identity or revision mismatch".into());
+    }
+
+    {
+        // Reload both package and policy from disk on every privileged call.
+        // An out-of-process disable, update, or signer revocation therefore
+        // takes effect at the next call without waiting for a UI refresh.
+        let guard = state
+            .session
+            .lock()
+            .map_err(|_| "vault session lock poisoned")?;
+        let session = guard.as_ref().ok_or("vault is locked")?;
+        validate_live_plugin_call(session, &plugin_id, revision, &method)?;
+        if method == "attachments.read" {
+            let info = read_attachment_manifest(session, plugin_param(&params, "id")?)?;
+            if info.size > 4 * 1024 * 1024 {
+                return Err("plugin attachment reads are limited to 4 MiB".into());
+            }
+        }
+    }
+
+    let result: Value = match method.as_str() {
+        "notes.list" => plugin_json(list_notes(state)?),
+        "notes.metadata" => {
+            let mut value =
+                plugin_json(get_note(plugin_param(&params, "reference")?.into(), state)?)?;
+            if let Some(object) = value.as_object_mut() {
+                object.remove("body");
+            }
+            Ok(value)
+        }
+        "notes.read" => plugin_json(get_note(plugin_param(&params, "reference")?.into(), state)?),
+        "notes.create" => plugin_json(create_note(
+            plugin_param(&params, "path")?.into(),
+            plugin_param(&params, "title")?.into(),
+            state,
+        )?),
+        "notes.update" => {
+            let reference = plugin_param(&params, "reference")?.to_string();
+            let body = plugin_param(&params, "body")?.to_string();
+            let mut note = get_note(reference, state.clone())?;
+            note.body = body;
+            plugin_json(save_note(note, state)?)
+        }
+        "search.query" => plugin_json(search_notes(
+            plugin_param(&params, "query")?.into(),
+            50,
+            state,
+        )?),
+        "canvas.list" => plugin_json(list_canvases(state)?),
+        "canvas.read" => plugin_json(get_canvas(
+            plugin_param(&params, "reference")?.into(),
+            state,
+        )?),
+        "canvas.save" => {
+            let input = serde_json::from_value::<CanvasInput>(
+                params
+                    .get("input")
+                    .cloned()
+                    .ok_or("plugin parameter input is required")?,
+            )
+            .map_err(|error| error.to_string())?;
+            plugin_json(save_canvas(input, state)?)
+        }
+        "attachments.list" => plugin_json(list_attachments(state)?),
+        "attachments.read" => {
+            plugin_json(read_attachment(plugin_param(&params, "id")?.into(), state)?)
+        }
+        "storage.get" => {
+            let key = plugin_param(&params, "key")?;
+            let stored = get_plugin_storage(plugin_id, state)?;
+            Ok(stored
+                .get(key)
+                .map_or(Value::Null, |value| Value::String(value.clone())))
+        }
+        "storage.set" => {
+            let key = plugin_param(&params, "key")?.to_string();
+            let value = plugin_param(&params, "value")?.to_string();
+            let mut stored = get_plugin_storage(plugin_id.clone(), state.clone())?;
+            stored.insert(key, value);
+            set_plugin_storage(plugin_id, stored, state)?;
+            Ok(Value::Null)
+        }
+        _ => Err("unknown privileged plugin method".into()),
+    }?;
+
+    if serde_json::to_vec(&result)
+        .map_err(|error| error.to_string())?
+        .len()
+        > 4 * 1024 * 1024
+    {
+        return Err("plugin response exceeds 4 MiB".into());
+    }
+    Ok(result)
 }
 
 /// The only command that hands back plugin code. The webview needs it to build
@@ -3900,9 +4192,11 @@ fn validate_canvas(nodes: &[Value], edges: &[Value]) -> Result<(), String> {
 fn load_canvas(session: &VaultSession, id: &str) -> Result<CanvasDocument, String> {
     let path = canvas_object_path(&session.root_dir, id)?;
     reject_symlink(&path)?;
-    let payload: EncryptedPayload =
-        serde_json::from_slice(&fs::read(&path).map_err(|_| format!("canvas not found: {id}"))?)
-            .map_err(|error| error.to_string())?;
+    let payload: EncryptedPayload = serde_json::from_slice(
+        &read_limited(&path, 12 * 1024 * 1024, "canvas")
+            .map_err(|_| format!("canvas not found: {id}"))?,
+    )
+    .map_err(|error| error.to_string())?;
     let canvas: CanvasDocument =
         serde_json::from_slice(&decrypt(&payload, session.key.as_ref(), &canvas_aad(id))?)
             .map_err(|error| error.to_string())?;
@@ -4426,7 +4720,7 @@ fn read_attachment_manifest(session: &VaultSession, id: &str) -> Result<Attachme
     }
     reject_symlink(&path)?;
     let payload: EncryptedPayload =
-        serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?)
+        serde_json::from_slice(&read_limited(&path, 1024 * 1024, "attachment manifest")?)
             .map_err(|error| error.to_string())?;
     let info: AttachmentInfo = serde_json::from_slice(&decrypt(
         &payload,
@@ -4510,7 +4804,7 @@ fn get_attachment(session: &VaultSession, id: &str) -> Result<(AttachmentInfo, V
         }
         reject_symlink(&path)?;
         let payload: EncryptedPayload =
-            serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?)
+            serde_json::from_slice(&read_limited(&path, 2 * 1024 * 1024, "attachment chunk")?)
                 .map_err(|error| error.to_string())?;
         data.extend_from_slice(&decrypt(
             &payload,
@@ -4637,6 +4931,8 @@ pub fn run() {
             create_from_template,
             open_daily_note,
             list_plugins,
+            authorize_plugin_instance,
+            plugin_call,
             get_plugin,
             get_plugin_security_policy,
             set_plugin_restricted_mode,
@@ -4763,13 +5059,33 @@ mod tests {
         let stale = VaultLockRecord {
             token: Uuid::new_v4().to_string(),
             pid: 999_999,
-            host: "crashed-host".into(),
+            host: lock_host(),
             acquired_at: "1970-01-01T00:00:00.000Z".into(),
         };
         fs::write(&lock_path, serde_json::to_vec(&stale).unwrap()).unwrap();
         let reclaimed = VaultWriteGuard::acquire(&path).unwrap();
         assert_ne!(read_lock_record(&lock_path).unwrap().token, stale.token);
         drop(reclaimed);
+
+        let live_but_old = VaultLockRecord {
+            token: Uuid::new_v4().to_string(),
+            pid: std::process::id(),
+            host: lock_host(),
+            acquired_at: "1970-01-01T00:00:00.000Z".into(),
+        };
+        fs::write(&lock_path, serde_json::to_vec(&live_but_old).unwrap()).unwrap();
+        assert!(VaultWriteGuard::acquire(&path).is_err());
+        fs::remove_file(&lock_path).unwrap();
+
+        let remote = VaultLockRecord {
+            token: Uuid::new_v4().to_string(),
+            pid: 999_999,
+            host: "remote-host".into(),
+            acquired_at: "1970-01-01T00:00:00.000Z".into(),
+        };
+        fs::write(&lock_path, serde_json::to_vec(&remote).unwrap()).unwrap();
+        assert!(VaultWriteGuard::acquire(&path).is_err());
+        fs::remove_file(&lock_path).unwrap();
         fs::remove_dir_all(path).unwrap();
     }
 
@@ -5280,11 +5596,34 @@ mod tests {
         .unwrap();
         assert_eq!(installed.signature_status, "verified");
         assert!(installed.enabled);
+        assert!(validate_live_plugin_call(
+            &session,
+            &installed.id,
+            installed.revision,
+            "notes.read"
+        )
+        .is_ok());
+        assert!(validate_live_plugin_call(
+            &session,
+            &installed.id,
+            installed.revision,
+            "notes.create"
+        )
+        .unwrap_err()
+        .contains("lacks required capability"));
 
         policy
             .revoked_signers
             .push(installed.signer.clone().unwrap());
         save_plugin_policy(&session, &policy).unwrap();
+        assert!(validate_live_plugin_call(
+            &session,
+            &installed.id,
+            installed.revision,
+            "notes.read"
+        )
+        .unwrap_err()
+        .contains("revoked"));
         let plugin = load_plugin(&session, &installed.id).unwrap();
         assert!(!plugin_allowed(
             &plugin,

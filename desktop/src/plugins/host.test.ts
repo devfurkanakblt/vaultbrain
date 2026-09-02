@@ -64,6 +64,7 @@ function harness(overrides: Partial<PluginSummary> = {}) {
   const onPanelsChanged = vi.fn();
   const onStateChanged = vi.fn();
   const host = new PluginHost({
+    authorize: vi.fn(async () => ({ instanceToken: "instance-token" })),
     call,
     onNotice,
     onCommandsChanged,
@@ -87,7 +88,11 @@ describe("plugin host", () => {
 
     const reply = await request(worker, "notes.read", { reference: "note-1" });
 
-    expect(call).toHaveBeenCalledWith("notes.read", { reference: "note-1" });
+    expect(call).toHaveBeenCalledWith(
+      { pluginId: installed.id, instanceToken: "instance-token", revision: installed.revision },
+      "notes.read",
+      { reference: "note-1" }
+    );
     expect(reply).toMatchObject({ ok: true, value: "served" });
   });
 
@@ -132,7 +137,11 @@ describe("plugin host", () => {
 
     await request(worker, "storage.get", { key: "lastRun" });
 
-    expect(call).toHaveBeenCalledWith("storage.get", { key: "lastRun", pluginId: installed.id });
+    expect(call).toHaveBeenCalledWith(
+      { pluginId: installed.id, instanceToken: "instance-token", revision: installed.revision },
+      "storage.get",
+      { key: "lastRun" }
+    );
   });
 
   it("stops a plugin that will not stop calling", async () => {
@@ -146,7 +155,25 @@ describe("plugin host", () => {
 
     expect(worker.terminated).toBe(true);
     expect(host.states()[0]).toMatchObject({ status: "failed" });
-    expect(host.states()[0].error).toMatch(/too many calls/u);
+    expect(host.states()[0].error).toMatch(/too many calls|concurrency/u);
+  });
+
+  it("terminates a worker whose runtime event loop stops answering heartbeats", async () => {
+    vi.useFakeTimers();
+    try {
+      const { host, worker, summary: installed } = harness();
+      await host.sync([{ summary: installed, source: "// noop" }]);
+      worker.emit({ kind: "emit", event: "ready", payload: {} });
+
+      await vi.advanceTimersByTimeAsync(8_100);
+
+      expect(worker.sent.some((message) => (message as { kind?: string }).kind === "ping")).toBe(true);
+      expect(worker.terminated).toBe(true);
+      expect(host.states()[0]).toMatchObject({ status: "failed" });
+      expect(host.states()[0].error).toMatch(/runtime heartbeats/u);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("refuses to run a plugin whose sandbox could not be fully isolated", async () => {
@@ -181,6 +208,7 @@ describe("plugin host", () => {
   it("retires the old worker when a plugin's code changes", async () => {
     const workers: FakeWorker[] = [];
     const host = new PluginHost({
+      authorize: vi.fn(async () => ({ instanceToken: "instance-token" })),
       call: vi.fn(async () => null),
       onNotice: vi.fn(),
       onCommandsChanged: vi.fn(),
@@ -200,6 +228,24 @@ describe("plugin host", () => {
     expect(workers).toHaveLength(2);
     expect(workers[0].terminated).toBe(true);
     expect(workers[1].terminated).toBe(false);
+  });
+
+  it("refuses to start when the privileged boundary rejects authorization", async () => {
+    const worker = new FakeWorker();
+    const host = new PluginHost({
+      authorize: vi.fn(async () => { throw new Error("plugin was revoked"); }),
+      call: vi.fn(async () => null),
+      onNotice: vi.fn(),
+      onCommandsChanged: vi.fn(),
+      onPanelsChanged: vi.fn(),
+      onStateChanged: vi.fn(),
+      createWorker: () => ({ worker: worker as unknown as Worker, objectUrl: "test:worker" }),
+    });
+
+    await host.sync([{ summary: summary(), source: "// noop" }]);
+
+    expect(worker.terminated).toBe(false);
+    expect(host.states()[0]).toMatchObject({ status: "failed", error: "plugin was revoked" });
   });
 });
 

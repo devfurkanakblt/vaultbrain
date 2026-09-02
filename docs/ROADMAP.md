@@ -70,10 +70,10 @@ Each phase must ship a usable vertical slice and keep older vaults readable.
 
 ## Phase 6 — Encrypted sync and mobile
 
-- [ ] Immutable encrypted change protocol and conflict resolution
+- [x] Immutable encrypted change protocol and conflict resolution
   - [x] Content-addressed encrypted envelopes, device chains, causal DAG validation and deterministic conflict inspection
   - [x] Emit changes automatically from note/canvas/attachment transactions and apply resolved remote changes to live storage
-  - [ ] Capture plugin package and plugin-policy transactions
+  - [x] Capture plugin package and plugin-policy transactions
 - [ ] Device enrollment, removal and key rotation
 - [ ] Untrusted relay server and self-hosted option
 - [ ] Desktop multi-device release, then iOS/Android clients

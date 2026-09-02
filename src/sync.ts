@@ -8,7 +8,12 @@ import {
   type DocumentKeySession,
   type DocumentPayload,
 } from "./document-crypto.js";
-import { assertNoSymlinkComponents, assertNotSymlink, writeFileAtomic } from "./fs-safe.js";
+import {
+  assertNoSymlinkComponents,
+  assertNotSymlink,
+  readTextFileLimited,
+  writeFileAtomic,
+} from "./fs-safe.js";
 import { resolveInside } from "./safety.js";
 import { withVaultLock } from "./vault-lock.js";
 import {
@@ -19,6 +24,9 @@ import {
   type NoteDocument,
   type NoteInput,
   type NoteSummary,
+  type PluginPackage,
+  type PluginSecurityPolicy,
+  type PluginSummary,
 } from "./documents.js";
 
 const CHANGE_ID_CONTEXT = "secondbrain-vault:sync-change-id:v1";
@@ -27,6 +35,8 @@ const CHANGE_AAD_PREFIX = "secondbrain-vault:sync-change:v1:";
 const APPLIED_AAD = "secondbrain-vault:sync-applied:v1";
 const MAX_CHANGE_BYTES = 8 * 1024 * 1024;
 const MAX_ENVELOPE_BYTES = 12 * 1024 * 1024;
+const MAX_CHANGE_COUNT = 50_000;
+const MAX_CHANGE_STORE_BYTES = 512 * 1024 * 1024;
 const MAX_PARENTS = 256;
 const MAX_JSON_DEPTH = 32;
 const MAX_JSON_NODES = 100_000;
@@ -97,7 +107,7 @@ interface SyncAppliedState {
 }
 
 export interface SyncApplyResult {
-  objectType: "note" | "canvas" | "attachment";
+  objectType: SyncObjectType;
   objectId: string;
   changeId: string;
   revision: number;
@@ -129,6 +139,14 @@ interface AttachmentSyncSnapshot {
   mime: string;
   data: string;
 }
+
+interface PluginSyncSnapshot {
+  manifest: PluginPackage["manifest"];
+  source: string;
+  enabled: boolean;
+}
+
+const PLUGIN_POLICY_OBJECT_ID = "plugin-policy";
 
 function assertUnicode(value: string, label: string): void {
   for (let index = 0; index < value.length; index += 1) {
@@ -414,6 +432,10 @@ function attachmentSnapshot(data: Buffer, info: AttachmentInfo): AttachmentSyncS
   return { filename: info.filename, mime: info.mime, data: data.toString("base64") };
 }
 
+function pluginSnapshot(plugin: PluginPackage): PluginSyncSnapshot {
+  return structuredClone({ manifest: plugin.manifest, source: plugin.source, enabled: plugin.enabled });
+}
+
 function recordValue(value: SyncJson, label: string): Record<string, SyncJson> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} sync snapshot must be an object.`);
@@ -489,7 +511,42 @@ function parseAttachmentSnapshot(value: SyncJson): AttachmentSyncSnapshot {
   };
 }
 
+function parsePluginSnapshot(value: SyncJson): PluginSyncSnapshot {
+  const raw = recordValue(value, "Plugin");
+  if (!raw.manifest || typeof raw.manifest !== "object" || Array.isArray(raw.manifest)) {
+    throw new Error("Plugin sync manifest must be an object.");
+  }
+  if (typeof raw.source !== "string" || typeof raw.enabled !== "boolean") {
+    throw new Error("Plugin sync snapshot has invalid source or enabled state.");
+  }
+  return structuredClone({
+    manifest: raw.manifest as unknown as PluginPackage["manifest"],
+    source: raw.source,
+    enabled: raw.enabled,
+  });
+}
+
+function parsePluginPolicySnapshot(value: SyncJson): PluginSecurityPolicy {
+  const raw = recordValue(value, "Plugin policy");
+  if (
+    raw.version !== 1 ||
+    typeof raw.restrictedMode !== "boolean" ||
+    !Array.isArray(raw.revokedSigners) ||
+    raw.revokedSigners.some((entry) => typeof entry !== "string" || !/^[a-f0-9]{64}$/u.test(entry))
+  ) {
+    throw new Error("Plugin policy sync snapshot is invalid.");
+  }
+  return {
+    version: 1,
+    restrictedMode: raw.restrictedMode,
+    revokedSigners: [...new Set(raw.revokedSigners as string[])].sort(),
+  };
+}
+
 function validateChangeSet(changes: readonly SyncChange[]): SyncVerification {
+  if (changes.length > MAX_CHANGE_COUNT) {
+    throw new Error(`A sync change set may contain at most ${MAX_CHANGE_COUNT} changes.`);
+  }
   const byId = new Map<string, SyncChange>();
   const deviceSequence = new Map<string, string>();
   for (const change of changes) {
@@ -635,7 +692,9 @@ export class SyncChangeLog {
     this.key();
     if (!fs.existsSync(this.appliedPath)) return { version: 1, objects: {} };
     assertNotSymlink(this.appliedPath);
-    const payload = JSON.parse(fs.readFileSync(this.appliedPath, "utf8")) as DocumentPayload;
+    const payload = JSON.parse(
+      readTextFileLimited(this.appliedPath, 64 * 1024 * 1024, "Sync application state")
+    ) as DocumentPayload;
     const parsed = JSON.parse(decryptDocument(payload, this.key(), APPLIED_AAD)) as SyncAppliedState;
     if (parsed?.version !== 1 || !parsed.objects || typeof parsed.objects !== "object") {
       throw new Error("Unsupported or invalid sync application state.");
@@ -680,17 +739,26 @@ export class SyncChangeLog {
   private readEnvelopes(): EncryptedSyncChange[] {
     this.key();
     assertNoSymlinkComponents(this.session.rootDir, this.changesDir);
-    return fs
+    const names = fs
       .readdirSync(this.changesDir)
       .filter((name) => name.endsWith(".change.enc"))
-      .sort()
-      .map((name) => {
+      .sort();
+    if (names.length > MAX_CHANGE_COUNT) {
+      throw new Error(`A sync change store may contain at most ${MAX_CHANGE_COUNT} changes.`);
+    }
+    let totalBytes = 0;
+    return names.map((name) => {
         const id = name.slice(0, -".change.enc".length);
         if (!CHANGE_ID.test(id)) throw new Error(`Invalid sync change filename: ${name}`);
         const filePath = resolveInside(this.changesDir, name);
         assertNotSymlink(filePath);
-        if (fs.statSync(filePath).size > MAX_ENVELOPE_BYTES) throw new Error(`Sync envelope is too large: ${id}`);
-        const envelope = validateEnvelope(JSON.parse(fs.readFileSync(filePath, "utf8")));
+        totalBytes += fs.statSync(filePath).size;
+        if (totalBytes > MAX_CHANGE_STORE_BYTES) {
+          throw new Error("The sync change store exceeds its 512 MiB safety limit.");
+        }
+        const envelope = validateEnvelope(
+          JSON.parse(readTextFileLimited(filePath, MAX_ENVELOPE_BYTES, `Sync envelope ${id}`))
+        );
         if (envelope.id !== id) throw new Error(`Sync change filename does not match its envelope: ${id}`);
         return envelope;
       });
@@ -806,7 +874,7 @@ export class SyncChangeLog {
 }
 
 /**
- * A document session whose successful note, canvas and attachment mutations
+ * A document session whose successful note, canvas, attachment and plugin mutations
  * are mirrored into the immutable sync DAG. Reads are inherited unchanged.
  * Remote application deliberately calls the base storage methods so receiving
  * a change never manufactures a second local change.
@@ -861,8 +929,17 @@ export class SyncedDocumentVault extends DocumentVault {
     }
   }
 
+  private tryPlugin(reference: string): PluginPackage | undefined {
+    try {
+      return super.getPlugin(reference);
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("Plugin not found:")) return undefined;
+      throw error;
+    }
+  }
+
   private appendLocal(
-    objectType: "note" | "canvas" | "attachment",
+    objectType: SyncObjectType,
     objectId: string,
     operation: SyncOperation,
     value: SyncJson,
@@ -889,6 +966,16 @@ export class SyncedDocumentVault extends DocumentVault {
   private ensureCanvasBaseline(canvas: CanvasDocument): void {
     if (this.changeLog.resolve("canvas", canvas.id).status !== "missing") return;
     this.appendLocal("canvas", canvas.id, "put", asSyncJson(canvasSnapshot(canvas)));
+  }
+
+  private ensurePluginBaseline(plugin: PluginPackage): void {
+    if (this.changeLog.resolve("plugin", plugin.manifest.id).status !== "missing") return;
+    this.appendLocal("plugin", plugin.manifest.id, "put", asSyncJson(pluginSnapshot(plugin)));
+  }
+
+  private ensurePluginPolicyBaseline(policy: PluginSecurityPolicy): void {
+    if (this.changeLog.resolve("vault", PLUGIN_POLICY_OBJECT_ID).status !== "missing") return;
+    this.appendLocal("vault", PLUGIN_POLICY_OBJECT_ID, "put", asSyncJson(policy));
   }
 
   override put(input: NoteInput): NoteDocument {
@@ -977,6 +1064,73 @@ export class SyncedDocumentVault extends DocumentVault {
     });
   }
 
+  override installPlugin(input: {
+    manifest: unknown;
+    source: string;
+    enabled?: boolean;
+    baseRevision?: number;
+  }): PluginPackage {
+    return withVaultLock(this.syncVaultDir, () => {
+      const manifestId =
+        input.manifest && typeof input.manifest === "object" && !Array.isArray(input.manifest)
+          ? String((input.manifest as { id?: unknown }).id ?? "")
+          : "";
+      const existing = manifestId ? this.tryPlugin(manifestId) : undefined;
+      if (existing) this.ensurePluginBaseline(existing);
+      const plugin = super.installPlugin(input);
+      this.appendLocal("plugin", plugin.manifest.id, "put", asSyncJson(pluginSnapshot(plugin)));
+      return plugin;
+    });
+  }
+
+  override setPluginEnabled(reference: string, enabled: boolean): PluginSummary {
+    return withVaultLock(this.syncVaultDir, () => {
+      const current = super.getPlugin(reference);
+      this.ensurePluginBaseline(current);
+      const summary = super.setPluginEnabled(reference, enabled);
+      const plugin = super.getPlugin(summary.id);
+      this.appendLocal("plugin", plugin.manifest.id, "put", asSyncJson(pluginSnapshot(plugin)));
+      return summary;
+    });
+  }
+
+  override removePlugin(reference: string): PluginSummary {
+    return withVaultLock(this.syncVaultDir, () => {
+      const current = super.getPlugin(reference);
+      this.ensurePluginBaseline(current);
+      const summary = super.removePlugin(reference);
+      this.appendLocal("plugin", current.manifest.id, "delete", null);
+      return summary;
+    });
+  }
+
+  override setPluginRestrictedMode(restrictedMode: boolean): PluginSecurityPolicy {
+    return withVaultLock(this.syncVaultDir, () => {
+      this.ensurePluginPolicyBaseline(super.pluginSecurityPolicy());
+      const policy = super.setPluginRestrictedMode(restrictedMode);
+      this.appendLocal("vault", PLUGIN_POLICY_OBJECT_ID, "put", asSyncJson(policy));
+      return policy;
+    });
+  }
+
+  override revokePluginSigner(reference: string): PluginSecurityPolicy {
+    return withVaultLock(this.syncVaultDir, () => {
+      this.ensurePluginPolicyBaseline(super.pluginSecurityPolicy());
+      const policy = super.revokePluginSigner(reference);
+      this.appendLocal("vault", PLUGIN_POLICY_OBJECT_ID, "put", asSyncJson(policy));
+      return policy;
+    });
+  }
+
+  override restorePluginSigner(keyId: string): PluginSecurityPolicy {
+    return withVaultLock(this.syncVaultDir, () => {
+      this.ensurePluginPolicyBaseline(super.pluginSecurityPolicy());
+      const policy = super.restorePluginSigner(keyId);
+      this.appendLocal("vault", PLUGIN_POLICY_OBJECT_ID, "put", asSyncJson(policy));
+      return policy;
+    });
+  }
+
   private isAncestor(changes: Map<string, SyncChange>, ancestor: string, descendant: string): boolean {
     const pending = [...(changes.get(descendant)?.parents ?? [])];
     const seen = new Set<string>();
@@ -1022,10 +1176,32 @@ export class SyncedDocumentVault extends DocumentVault {
       if (info.id !== objectId) throw new Error("Attachment sync snapshot does not match its content ID.");
       return;
     }
+    if (objectType === "plugin") {
+      const existing = super.listPlugins().find((plugin) => plugin.manifestId === objectId);
+      if (operation === "delete") {
+        if (existing) super.removePlugin(existing.id);
+        return;
+      }
+      const snapshot = parsePluginSnapshot(value);
+      if (snapshot.manifest.id !== objectId) {
+        throw new Error("Plugin sync snapshot does not match its manifest identity.");
+      }
+      super.installPlugin({
+        manifest: snapshot.manifest,
+        source: snapshot.source,
+        enabled: snapshot.enabled,
+        ...(existing ? { baseRevision: existing.revision } : {}),
+      });
+      return;
+    }
+    if (objectType === "vault" && objectId === PLUGIN_POLICY_OBJECT_ID && operation === "put") {
+      super.savePluginPolicy(parsePluginPolicySnapshot(value));
+      return;
+    }
     throw new Error(`Live sync application is not implemented for ${objectType} objects.`);
   }
 
-  applyResolved(objectType: "note" | "canvas" | "attachment", objectId: string): SyncApplyResult {
+  applyResolved(objectType: SyncObjectType, objectId: string): SyncApplyResult {
     return withVaultLock(this.syncVaultDir, () => {
       const resolution = this.changeLog.resolve(objectType, objectId);
       if (resolution.status === "missing" || !resolution.winner) {

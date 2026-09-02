@@ -183,14 +183,34 @@ test("a second writer is refused while a live lock is held, and reclaims a stale
   vault.put({ path: "Notes/First.md", body: "# First" });
 
   const lockPath = path.join(vaultDir, ".sbrain.lock");
-  const foreign = (acquiredAt) =>
-    JSON.stringify({ token: "another-process", pid: 999_999, host: "elsewhere", acquiredAt });
+  const foreign = (acquiredAt, pid = 999_999, host = os.hostname()) =>
+    JSON.stringify({ token: "another-process", pid, host, acquiredAt });
 
   fs.writeFileSync(lockPath, foreign(new Date().toISOString()));
   assert.equal(lockHolder(vaultDir).pid, 999_999);
   assert.throws(
     () => vault.put({ path: "Notes/Second.md", body: "# Second" }),
     (error) => error instanceof VaultBusyError && /being written by process 999999/u.test(error.message)
+  );
+
+  fs.writeFileSync(
+    lockPath,
+    foreign(new Date(Date.now() - 120_000).toISOString(), process.pid)
+  );
+  assert.throws(
+    () => vault.put({ path: "Notes/StillLocked.md", body: "# Still locked" }),
+    /being written by process/u,
+    "an old lock owned by a live PID must never be reclaimed"
+  );
+
+  fs.writeFileSync(
+    lockPath,
+    foreign(new Date(Date.now() - 120_000).toISOString(), 999_999, "remote-host")
+  );
+  assert.throws(
+    () => vault.put({ path: "Notes/Remote.md", body: "# Remote" }),
+    /being written by process/u,
+    "a remote-host lock needs explicit recovery because its liveness is unknown"
   );
 
   // A lock left behind by a crashed process must not wedge the vault forever.

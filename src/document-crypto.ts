@@ -1,10 +1,12 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { assertNoSymlinkComponents, assertNotSymlink, writeFileAtomic } from "./fs-safe.js";
+import { assertNoSymlinkComponents, assertNotSymlink, readTextFileLimited, writeFileAtomic } from "./fs-safe.js";
 import { resolveInside } from "./safety.js";
+import { assertStrongPassphrase } from "./passphrase-policy.js";
 
-const SCRYPT_N = 2 ** 15;
+const SCRYPT_N = 2 ** 16;
+const SUPPORTED_SCRYPT_N = new Set([2 ** 15, SCRYPT_N]);
 const KEY_LENGTH = 32;
 const KEY_CHECK_CONTEXT = "secondbrain-vault:document-key:v1";
 
@@ -30,7 +32,7 @@ export interface DocumentKeySession {
 function derive(passphrase: string, salt: Buffer, N: number): Buffer {
   return crypto.scryptSync(passphrase, salt, KEY_LENGTH, {
     N,
-    maxmem: 64 * 1024 * 1024,
+    maxmem: 128 * 1024 * 1024,
   });
 }
 
@@ -48,17 +50,18 @@ export function openDocumentKey(vaultDir: string, passphrase: string): DocumentK
   let manifest: DocumentManifest;
   if (fs.existsSync(manifestPath)) {
     assertNotSymlink(manifestPath);
-    manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as DocumentManifest;
+    manifest = JSON.parse(readTextFileLimited(manifestPath, 64 * 1024, "Document manifest")) as DocumentManifest;
     if (
       manifest.version !== 1 ||
       manifest.kdf?.name !== "scrypt" ||
-      manifest.kdf.N !== SCRYPT_N ||
+      !SUPPORTED_SCRYPT_N.has(manifest.kdf.N) ||
       !manifest.kdf.salt ||
       !/^[a-f0-9]{64}$/u.test(manifest.verifier)
     ) {
       throw new Error("Unsupported or invalid document vault manifest.");
     }
   } else {
+    assertStrongPassphrase(passphrase);
     const salt = crypto.randomBytes(16);
     const key = derive(passphrase, salt, SCRYPT_N);
     manifest = {

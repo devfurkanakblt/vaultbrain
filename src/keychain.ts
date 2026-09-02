@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { readTextFileLimited } from "./fs-safe.js";
 
 const SERVICE = "secondbrain-vault";
 
@@ -73,7 +74,7 @@ const windowsBackend: KeychainBackend = {
   lookup(account) {
     const file = path.join(credentialDir(), `${account}.dpapi`);
     if (!fs.existsSync(file)) return undefined;
-    const blob = fs.readFileSync(file, "utf8").trim();
+    const blob = readTextFileLimited(file, 1024 * 1024, "DPAPI credential").trim();
     try {
       const secret = run(
         "powershell",
@@ -97,12 +98,18 @@ const windowsBackend: KeychainBackend = {
   },
 };
 
-/** macOS Keychain. Note: `security` takes the secret as an argument. */
+/**
+ * macOS Keychain lookup remains available for credentials written by older
+ * releases. New writes fail closed until a native binding can pass the secret
+ * without exposing it in the child process argument vector.
+ */
 const darwinBackend: KeychainBackend = {
   name: "macos-keychain",
   available: () => process.platform === "darwin" && canRun("security", ["-h"]),
-  store(account, secret) {
-    run("security", ["add-generic-password", "-U", "-a", account, "-s", SERVICE, "-w", secret]);
+  store(_account, _secret) {
+    throw new Error(
+      "Remembering new passphrases on macOS is disabled until secure native Keychain input is available."
+    );
   },
   lookup(account) {
     try {

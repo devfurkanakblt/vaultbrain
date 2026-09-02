@@ -210,6 +210,47 @@ test("synced document operations automatically emit note, canvas and attachment 
   fs.rmSync(vaultDir, { recursive: true, force: true });
 });
 
+test("plugin packages and security policy changes synchronize and apply", () => {
+  const sourceDir = tempVault("plugin-source");
+  new SyncedDocumentVault(sourceDir, PASSPHRASE, DEVICE_A).lock();
+  const targetDir = tempVault("plugin-target");
+  fs.rmSync(targetDir, { recursive: true, force: true });
+  fs.cpSync(sourceDir, targetDir, { recursive: true });
+
+  const source = new SyncedDocumentVault(sourceDir, PASSPHRASE, DEVICE_A);
+  const installed = source.installPlugin({
+    manifest: {
+      manifestVersion: 1,
+      id: "sync-example",
+      name: "Sync example",
+      version: "1.0.0",
+      description: "Exercises plugin synchronization.",
+      author: "Vault Brain",
+      capabilities: ["notes:metadata"],
+    },
+    source: "api.notice('ready');",
+    enabled: true,
+  });
+  source.setPluginEnabled(installed.id, false);
+  source.setPluginRestrictedMode(true);
+
+  const pluginChanges = source.changeLog.changes().filter((change) => change.mutation.objectType === "plugin");
+  assert.deepEqual(pluginChanges.map((change) => change.mutation.revision), [1, 2]);
+  assert.equal(source.changeLog.resolve("vault", "plugin-policy").winner.mutation.revision, 2);
+
+  const target = new SyncedDocumentVault(targetDir, PASSPHRASE);
+  target.changeLog.import(source.changeLog.envelopes());
+  assert.equal(target.applyResolved("plugin", "sync-example").applied, 2);
+  assert.equal(target.applyResolved("vault", "plugin-policy").applied, 2);
+  assert.equal(target.getPlugin("sync-example").enabled, false);
+  assert.equal(target.pluginSecurityPolicy().restrictedMode, true);
+
+  source.lock();
+  target.lock();
+  fs.rmSync(sourceDir, { recursive: true, force: true });
+  fs.rmSync(targetDir, { recursive: true, force: true });
+});
+
 test("clean remote changes apply idempotently to the real vault storage", () => {
   const sourceDir = tempVault("apply-source");
   let source = new SyncedDocumentVault(sourceDir, PASSPHRASE, DEVICE_A);

@@ -543,6 +543,35 @@ describe("desktop workspace", () => {
     expect(await screen.findByText(/1 attachment encrypted and stored/u)).toBeInTheDocument();
   });
 
+  it("never renders active HTML attachment content in an iframe", async () => {
+    const html = { ...sampleAttachment, filename: "attack.html", mime: "text/html" };
+    bridgeMock.attachments.mockResolvedValue([html]);
+    bridgeMock.readAttachment.mockResolvedValue({
+      info: html,
+      data: btoa('<script>window.__TAURI_INTERNALS__.invoke("get_note")</script>'),
+    });
+    await unlockWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "Files" }));
+    fireEvent.click(await screen.findByRole("button", { name: /attack\.html/u }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Preview attack.html" });
+    expect(dialog.querySelector("iframe")).toBeNull();
+    expect(within(dialog).getByText(/not rendered inline/u)).toBeInTheDocument();
+  });
+
+  it("renders plain text as inert text rather than browser content", async () => {
+    const text = { ...sampleAttachment, filename: "notes.txt", mime: "text/plain" };
+    bridgeMock.attachments.mockResolvedValue([text]);
+    bridgeMock.readAttachment.mockResolvedValue({ info: text, data: btoa("<b>literal</b>") });
+    await unlockWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "Files" }));
+    fireEvent.click(await screen.findByRole("button", { name: /notes\.txt/u }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Preview notes.txt" });
+    expect(within(dialog).getByText("<b>literal</b>")).toBeInTheDocument();
+    expect(dialog.querySelector("b")?.textContent).not.toBe("literal");
+  });
+
   it("drops canvases and attachments from memory when the vault locks", async () => {
     await unlockWorkspace();
     fireEvent.click(screen.getByRole("button", { name: "Files" }));

@@ -159,6 +159,11 @@ function bootstrap() {
       return;
     }
 
+    if (message.kind === "ping") {
+      port.postMessage({ kind: "emit", event: "heartbeat", payload: message.nonce });
+      return;
+    }
+
     if (message.kind === "invoke") {
       const run = commands.get(String(message.command));
       if (!run) return;

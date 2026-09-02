@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import { listVaultFiles, loadVaultFile } from "./store.js";
-import { assertNotSymlink, writeFileAtomic } from "./fs-safe.js";
+import { assertNotSymlink, readTextFileLimited, writeFileAtomic } from "./fs-safe.js";
 import { resolveInside } from "./safety.js";
+import { decrypt, encrypt, type AnyEncryptedPayload } from "./crypto.js";
 
 export interface SchemaEntry {
   key: string;
@@ -13,12 +14,12 @@ export interface Schema {
   files: Record<string, SchemaEntry[]>;
 }
 
-const SCHEMA_FILENAME = "schema.json";
+const SCHEMA_FILENAME = "schema.enc";
+const LEGACY_SCHEMA_FILENAME = "schema.json";
 
 /**
- * Rebuilds schema.json: key names + descriptions only, values stripped.
- * This is the ONLY artifact meant to be read wholesale by an AI agent or
- * fed into an embedding index — it never contains a secret value.
+ * Rebuilds the encrypted discovery catalog: key names + descriptions only,
+ * values stripped. MCP decrypts it in-process and applies live grants.
  */
 export function buildSchema(vaultDir: string, passphrase: string): Schema {
   const files = listVaultFiles(vaultDir);
@@ -31,17 +32,26 @@ export function buildSchema(vaultDir: string, passphrase: string): Schema {
 
   writeFileAtomic(
     resolveInside(vaultDir, SCHEMA_FILENAME),
-    JSON.stringify(schema, null, 2),
+    JSON.stringify(encrypt(JSON.stringify(schema), passphrase), null, 2),
     { mode: 0o600 }
   );
+
+  // Earlier releases generated a plaintext catalog. Remove it only after the
+  // encrypted replacement has been committed successfully.
+  const legacyPath = resolveInside(vaultDir, LEGACY_SCHEMA_FILENAME);
+  if (fs.existsSync(legacyPath)) {
+    assertNotSymlink(legacyPath);
+    fs.rmSync(legacyPath, { force: true });
+  }
   return schema;
 }
 
-export function readSchema(vaultDir: string): Schema | null {
+export function readSchema(vaultDir: string, passphrase: string): Schema | null {
   const p = resolveInside(vaultDir, SCHEMA_FILENAME);
   if (!fs.existsSync(p)) return null;
   assertNotSymlink(p);
-  return JSON.parse(fs.readFileSync(p, "utf8"));
+  const payload = JSON.parse(readTextFileLimited(p, 64 * 1024 * 1024, "Schema")) as AnyEncryptedPayload;
+  return JSON.parse(decrypt(payload, passphrase)) as Schema;
 }
 
 /** Very simple fuzzy match over key names + descriptions for MVP "fast find". */
@@ -78,10 +88,9 @@ function parseBoundary(value: string | undefined, endOfDay: boolean): Date | nul
 }
 
 /**
- * Timeline browsing without decrypting anything: auto-generated note keys
- * carry their own timestamp, so date-range filtering runs entirely over
- * schema.json. This is the "daily notes" equivalent — recall by when,
- * not just by what — at zero exposure.
+ * Auto-generated note keys carry their own timestamp, so after the encrypted
+ * schema catalog is unlocked, date-range filtering does not decrypt note
+ * values. This is the "daily notes" equivalent — recall by when, not by what.
  */
 export function filterNotesByDate(
   schema: Schema,

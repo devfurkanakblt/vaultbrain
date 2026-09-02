@@ -56,6 +56,11 @@ const program = new Command();
 
 function openDocumentVault(vaultDir: string, passphrase: string): DocumentVault {
   const deviceId = program.opts().syncDevice as string | undefined;
+  if (deviceId && !program.opts().experimentalTrustedSync) {
+    throw new Error(
+      "Sync is experimental and trusted-device/local-transport only. Re-run with --experimental-trusted-sync to acknowledge this boundary."
+    );
+  }
   return deviceId
     ? new SyncedDocumentVault(vaultDir, passphrase, deviceId)
     : new DocumentVault(vaultDir, passphrase);
@@ -67,7 +72,11 @@ program
     "secondbrain-vault — an .env-style, least-exposure personal data store for the AI age."
   )
   .option("--vault <dir>", "vault directory", DEFAULT_VAULT_DIR)
-  .option("--sync-device <uuid>", "automatically capture document writes for this sync device");
+  .option("--sync-device <uuid>", "automatically capture document writes for this sync device")
+  .option(
+    "--experimental-trusted-sync",
+    "acknowledge that sync supports trusted devices and local transport only"
+  );
 
 program
   .command("init")
@@ -99,7 +108,7 @@ program
     appendAudit(dir, { actor: "cli-direct-write", file, key }, passphrase);
     buildSchema(dir, passphrase);
     console.log(`Stored ${key} in ${file}.kv.enc (encrypted).`);
-    console.log(`Safe, value-free schema refreshed.`);
+    console.log(`Encrypted, value-free schema refreshed.`);
   });
 
 program
@@ -119,15 +128,16 @@ program
 
 program
   .command("timeline")
-  .description("browse journal notes by date range — safe index only, no decryption")
+  .description("browse journal notes by date range after unlocking the encrypted catalog")
   .option("--category <file>", "limit to one category")
   .option("--from <iso-date>", "inclusive lower bound")
   .option("--to <iso-date>", "inclusive upper bound")
-  .action((opts) => {
+  .action(async (opts) => {
     const dir = program.opts().vault;
-    const schema = readSchema(dir);
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const schema = readSchema(dir, passphrase);
     if (!schema) {
-      console.log("No schema.json yet — run 'sbrain index' first.");
+      console.log("No encrypted schema yet — run 'sbrain index' first.");
       return;
     }
     const hits = filterNotesByDate(schema, { file: opts.category, from: opts.from, to: opts.to });
@@ -158,11 +168,12 @@ program
 program
   .command("list")
   .description("show all key names + descriptions (no values) — safe to read directly")
-  .action(() => {
+  .action(async () => {
     const dir = program.opts().vault;
-    const schema = readSchema(dir);
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const schema = readSchema(dir, passphrase);
     if (!schema) {
-      console.log("No schema.json yet — run 'sbrain index' first.");
+      console.log("No encrypted schema yet — run 'sbrain index' first.");
       return;
     }
     for (const [file, entries] of Object.entries(schema.files)) {
@@ -173,12 +184,13 @@ program
 
 program
   .command("search <query>")
-  .description("fuzzy-search key names + descriptions (fast path, no decryption needed)")
-  .action((query) => {
+  .description("fuzzy-search key names + descriptions in the encrypted fast-path catalog")
+  .action(async (query) => {
     const dir = program.opts().vault;
-    const schema = readSchema(dir);
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const schema = readSchema(dir, passphrase);
     if (!schema) {
-      console.log("No schema.json yet — run 'sbrain index' first.");
+      console.log("No encrypted schema yet — run 'sbrain index' first.");
       return;
     }
     const hits = searchSchema(schema, query);
@@ -191,13 +203,13 @@ program
 
 program
   .command("index")
-  .description("rebuild schema.json (key names + descriptions only, zero secret values) across the vault")
+  .description("rebuild the encrypted key-name and description catalog across the vault")
   .action(async () => {
     const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
     const dir = program.opts().vault;
     const schema = buildSchema(dir, passphrase);
     const total = Object.values(schema.files).reduce((n, arr) => n + arr.length, 0);
-    console.log(`Indexed ${total} keys across ${listVaultFiles(dir).length} files -> ${dir}/schema.json`);
+    console.log(`Indexed ${total} keys across ${listVaultFiles(dir).length} files -> ${dir}/schema.enc`);
   });
 
 const docs = program
@@ -716,6 +728,14 @@ const sync = program
   .command("sync")
   .description("encrypted immutable change log and deterministic conflict inspection");
 
+sync.hook("preAction", () => {
+  if (!program.opts().experimentalTrustedSync) {
+    throw new Error(
+      "Sync is experimental and is not safe for untrusted relays or compromised devices. Re-run with --experimental-trusted-sync only for trusted-device/local-transport use."
+    );
+  }
+});
+
 sync
   .command("device-id")
   .description("generate a new local device identity (enrollment is added in the next slice)")
@@ -1108,7 +1128,7 @@ plugins
     if (mode !== "on" && mode !== "off") throw new Error("Restricted mode must be 'on' or 'off'.");
     const dir = program.opts().vault;
     const passphrase = await getPassphrase({ vaultDir: dir });
-    new DocumentVault(dir, passphrase).setPluginRestrictedMode(mode === "on");
+    openDocumentVault(dir, passphrase).setPluginRestrictedMode(mode === "on");
     console.log(`Restricted mode is ${mode}.`);
   });
 
@@ -1118,7 +1138,7 @@ plugins
   .action(async (reference) => {
     const dir = program.opts().vault;
     const passphrase = await getPassphrase({ vaultDir: dir });
-    const policy = new DocumentVault(dir, passphrase).revokePluginSigner(reference);
+    const policy = openDocumentVault(dir, passphrase).revokePluginSigner(reference);
     console.log(`Signer revoked. ${policy.revokedSigners.length} signer(s) are now blocked.`);
   });
 
@@ -1128,7 +1148,7 @@ plugins
   .action(async (keyId) => {
     const dir = program.opts().vault;
     const passphrase = await getPassphrase({ vaultDir: dir });
-    const policy = new DocumentVault(dir, passphrase).restorePluginSigner(keyId);
+    const policy = openDocumentVault(dir, passphrase).restorePluginSigner(keyId);
     console.log(`Signer restored. ${policy.revokedSigners.length} signer(s) remain blocked.`);
   });
 
@@ -1139,7 +1159,7 @@ plugins
   .action(async (manifestPath, sourcePath, opts) => {
     const dir = program.opts().vault;
     const passphrase = await getPassphrase({ vaultDir: dir });
-    const installed = new DocumentVault(dir, passphrase).installPlugin({
+    const installed = openDocumentVault(dir, passphrase).installPlugin({
       manifest: JSON.parse(fs.readFileSync(manifestPath, "utf8")),
       source: fs.readFileSync(sourcePath, "utf8"),
       enabled: opts.enable === true,
@@ -1159,7 +1179,7 @@ plugins
   .action(async (reference) => {
     const dir = program.opts().vault;
     const passphrase = await getPassphrase({ vaultDir: dir });
-    const changed = new DocumentVault(dir, passphrase).setPluginEnabled(reference, true);
+    const changed = openDocumentVault(dir, passphrase).setPluginEnabled(reference, true);
     console.log(`${changed.name} is enabled.`);
   });
 
@@ -1169,7 +1189,7 @@ plugins
   .action(async (reference) => {
     const dir = program.opts().vault;
     const passphrase = await getPassphrase({ vaultDir: dir });
-    const changed = new DocumentVault(dir, passphrase).setPluginEnabled(reference, false);
+    const changed = openDocumentVault(dir, passphrase).setPluginEnabled(reference, false);
     console.log(`${changed.name} is disabled.`);
   });
 
@@ -1179,7 +1199,7 @@ plugins
   .action(async (reference) => {
     const dir = program.opts().vault;
     const passphrase = await getPassphrase({ vaultDir: dir });
-    const removed = new DocumentVault(dir, passphrase).removePlugin(reference);
+    const removed = openDocumentVault(dir, passphrase).removePlugin(reference);
     console.log(`Removed ${removed.name}.`);
   });
 
@@ -1218,15 +1238,15 @@ program
 program
   .command("mcp")
   .description("MODE 2 — start the MCP server for AI-agent-assisted, scoped, audited access")
-  .action(async () => {
+  .requiredOption("--agent <name>", "owner-configured grant identity for this MCP process")
+  .action(async (opts) => {
     const dir = program.opts().vault;
     if (!grantsExist(dir)) {
-      console.error(
-        "Note: this vault has no grant policy, so any agent that starts this server sees every key. " +
-          "Run 'sbrain grant add <agent> --scope ...' to govern it."
+      throw new Error(
+        "MCP access is disabled until you create a policy with 'sbrain grant add <agent> --scope ...'."
       );
     }
-    await startMcpServer(dir);
+    await startMcpServer(dir, opts.agent);
   });
 
 program
