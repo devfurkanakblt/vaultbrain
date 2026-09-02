@@ -77,7 +77,9 @@ Each phase must ship a usable vertical slice and keep older vaults readable.
 - [x] Owner-signed device enrollment and sequence-bounded removal
   - [x] Ed25519 proof-of-possession requests, signed certificates and encrypted registry exchange
   - [x] Per-change device signatures, authority pinning, rollback rejection and revocation cutoffs
-- [ ] Epoch-based content-key rotation and trusted freshness checkpoints
-- [ ] Untrusted relay server and self-hosted option
+- [ ] Epoch-based content-key rotation
+- [x] Owner-signed freshness checkpoints with explicit first-pin verification
+- [x] Authenticated opaque relay server and self-hosted option
 - [ ] Desktop multi-device release, then iOS/Android clients
-- [ ] External security audit, recovery drill and stable 1.0 format
+- [x] Automated encrypted-backup plus relay catch-up recovery drill
+- [ ] External security audit and stable 1.0 format

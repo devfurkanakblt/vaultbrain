@@ -34,6 +34,7 @@ const CHANGE_KEY_CONTEXT = "secondbrain-vault:sync-change-key:v1";
 const CHANGE_AAD_PREFIX = "secondbrain-vault:sync-change:v1:";
 const APPLIED_AAD = "secondbrain-vault:sync-applied:v1";
 const DEVICE_REGISTRY_AAD = "secondbrain-vault:sync-device-registry:v1";
+const FRESHNESS_CHECKPOINT_AAD = "secondbrain-vault:sync-freshness-checkpoint:v1";
 const AUTHORITY_KEY_AAD = "secondbrain-vault:sync-authority-key:v1";
 const DEVICE_KEY_AAD_PREFIX = "secondbrain-vault:sync-device-key:v1:";
 const MAX_CHANGE_BYTES = 8 * 1024 * 1024;
@@ -133,6 +134,29 @@ export interface SignedSyncDeviceRegistry {
 }
 
 export interface EncryptedSyncDeviceRegistry {
+  version: 1;
+  payload: DocumentPayload;
+}
+
+export interface SyncFreshnessCheckpointBody {
+  version: 1;
+  sequence: number;
+  authorityFingerprint: string;
+  registryRevision: number;
+  epoch: number;
+  changeCount: number;
+  heads: string[];
+  createdAt: string;
+  previousCheckpoint: string | null;
+}
+
+export interface SignedSyncFreshnessCheckpoint {
+  id: string;
+  body: SyncFreshnessCheckpointBody;
+  signature: string;
+}
+
+export interface EncryptedSyncFreshnessCheckpoint {
   version: 1;
   payload: DocumentPayload;
 }
@@ -454,6 +478,34 @@ function validateEnvelope(value: unknown): EncryptedSyncChange {
   return structuredClone(envelope);
 }
 
+/** Structural validation available to an opaque relay that does not hold vault keys. */
+export function validateRelayEnvelope(value: unknown): EncryptedSyncChange {
+  return validateEnvelope(value);
+}
+
+/** Structural validation for encrypted control artifacts whose plaintext remains relay-opaque. */
+export function validateRelayArtifactEnvelope(
+  value: unknown,
+): EncryptedSyncDeviceRegistry | EncryptedSyncFreshnessCheckpoint {
+  const envelope = value as EncryptedSyncDeviceRegistry | EncryptedSyncFreshnessCheckpoint | undefined;
+  if (!envelope || typeof envelope !== "object" || Array.isArray(envelope) || envelope.version !== 1) {
+    throw new Error("Unsupported or invalid encrypted sync control artifact.");
+  }
+  const payload = envelope.payload as DocumentPayload | undefined;
+  if (
+    !payload ||
+    payload.version !== 1 ||
+    typeof payload.ciphertext !== "string" ||
+    payload.ciphertext.length > Math.ceil((MAX_DEVICE_REGISTRY_BYTES * 4) / 3) + 16
+  ) {
+    throw new Error("Invalid encrypted sync control payload.");
+  }
+  canonicalBase64(payload.iv, 12, "nonce");
+  canonicalBase64(payload.authTag, 16, "authentication tag");
+  canonicalBase64(payload.ciphertext, undefined, "ciphertext");
+  return structuredClone(envelope);
+}
+
 function canonicalTimestamp(value: unknown, label: string): string {
   const timestamp = typeof value === "string" ? Date.parse(value) : Number.NaN;
   if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString() !== value) {
@@ -643,7 +695,7 @@ function validateSignedDeviceRegistry(value: unknown): SignedSyncDeviceRegistry 
   return { body, signature };
 }
 
-function registryFingerprint(registry: SignedSyncDeviceRegistry): string {
+export function syncRegistryFingerprint(registry: SignedSyncDeviceRegistry): string {
   return crypto.createHash("sha256").update(Buffer.from(registry.body.authorityPublicKey, "base64")).digest("hex");
 }
 
@@ -807,6 +859,156 @@ function signAuthorizedChange(
   return validateSyncChangeBody(unsigned);
 }
 
+function checkpointPath(rootDir: string): string {
+  return resolveInside(rootDir, path.join("sync", "checkpoint.enc"));
+}
+
+function checkpointBodyPayload(body: SyncFreshnessCheckpointBody): SyncJson {
+  return structuredClone(body) as unknown as SyncJson;
+}
+
+function checkpointId(body: SyncFreshnessCheckpointBody, signature: string): string {
+  return crypto
+    .createHash("sha256")
+    .update(canonicalSyncJson({ body, signature } as unknown as SyncJson))
+    .digest("hex");
+}
+
+function validateSignedCheckpoint(
+  value: unknown,
+  registry: SignedSyncDeviceRegistry,
+): SignedSyncFreshnessCheckpoint {
+  const checkpoint = value as SignedSyncFreshnessCheckpoint | undefined;
+  const raw = checkpoint?.body;
+  if (!checkpoint || typeof checkpoint !== "object" || Array.isArray(checkpoint) || !raw || raw.version !== 1) {
+    throw new Error("Unsupported or invalid sync freshness checkpoint.");
+  }
+  if (!Array.isArray(raw.heads) || raw.heads.length > MAX_PARENTS) {
+    throw new Error(`A freshness checkpoint may contain at most ${MAX_PARENTS} heads.`);
+  }
+  const heads = raw.heads.map((id) => {
+    if (typeof id !== "string" || !CHANGE_ID.test(id)) throw new Error("Checkpoint contains an invalid head ID.");
+    return id;
+  });
+  if (new Set(heads).size !== heads.length || [...heads].sort().some((id, index) => id !== heads[index])) {
+    throw new Error("Checkpoint heads must be unique and sorted.");
+  }
+  const body: SyncFreshnessCheckpointBody = {
+    version: 1,
+    sequence: integer(raw.sequence, 1, "Checkpoint sequence"),
+    authorityFingerprint:
+      typeof raw.authorityFingerprint === "string" && CHANGE_ID.test(raw.authorityFingerprint)
+        ? raw.authorityFingerprint
+        : (() => {
+            throw new Error("Checkpoint authority fingerprint is invalid.");
+          })(),
+    registryRevision: integer(raw.registryRevision, 1, "Checkpoint registry revision"),
+    epoch: integer(raw.epoch, 1, "Checkpoint epoch"),
+    changeCount: integer(raw.changeCount, 0, "Checkpoint change count"),
+    heads,
+    createdAt: canonicalTimestamp(raw.createdAt, "Checkpoint creation time"),
+    previousCheckpoint:
+      raw.previousCheckpoint === null
+        ? null
+        : typeof raw.previousCheckpoint === "string" && CHANGE_ID.test(raw.previousCheckpoint)
+          ? raw.previousCheckpoint
+          : (() => {
+              throw new Error("Checkpoint predecessor is invalid.");
+            })(),
+  };
+  if ((body.sequence === 1) !== (body.previousCheckpoint === null)) {
+    throw new Error("Only the first freshness checkpoint may omit its predecessor.");
+  }
+  if (body.authorityFingerprint !== syncRegistryFingerprint(registry)) {
+    throw new Error("Freshness checkpoint uses a different enrollment authority.");
+  }
+  if (body.registryRevision > registry.body.revision || body.epoch > registry.body.epoch) {
+    throw new Error("Freshness checkpoint refers to a registry state that is not installed.");
+  }
+  const authorityKey = publicKeyFromBase64(registry.body.authorityPublicKey, "Authority public key");
+  const signature = verifyCanonical(
+    checkpointBodyPayload(body),
+    checkpoint.signature,
+    authorityKey,
+    "Freshness checkpoint signature",
+  );
+  const id = typeof checkpoint.id === "string" && CHANGE_ID.test(checkpoint.id) ? checkpoint.id : "";
+  if (id !== checkpointId(body, signature)) throw new Error("Freshness checkpoint ID does not match its content.");
+  return { id, body, signature };
+}
+
+function encryptedCheckpoint(
+  checkpoint: SignedSyncFreshnessCheckpoint,
+  vaultKey: Buffer,
+): EncryptedSyncFreshnessCheckpoint {
+  return {
+    version: 1,
+    payload: encryptDocument(
+      canonicalSyncJson(checkpoint as unknown as SyncJson),
+      vaultKey,
+      FRESHNESS_CHECKPOINT_AAD,
+    ),
+  };
+}
+
+function readCheckpoint(
+  rootDir: string,
+  vaultKey: Buffer,
+  registry: SignedSyncDeviceRegistry,
+): SignedSyncFreshnessCheckpoint | undefined {
+  const filePath = checkpointPath(rootDir);
+  if (!fs.existsSync(filePath)) return undefined;
+  assertNotSymlink(filePath);
+  const envelope = JSON.parse(
+    readTextFileLimited(filePath, 1024 * 1024, "Sync freshness checkpoint"),
+  ) as EncryptedSyncFreshnessCheckpoint;
+  if (!envelope || envelope.version !== 1 || !envelope.payload) {
+    throw new Error("Unsupported or invalid encrypted freshness checkpoint.");
+  }
+  return validateSignedCheckpoint(
+    JSON.parse(decryptDocument(envelope.payload, vaultKey, FRESHNESS_CHECKPOINT_AAD)),
+    registry,
+  );
+}
+
+function saveCheckpoint(
+  rootDir: string,
+  vaultKey: Buffer,
+  registry: SignedSyncDeviceRegistry,
+  checkpoint: SignedSyncFreshnessCheckpoint,
+): void {
+  const normalized = validateSignedCheckpoint(checkpoint, registry);
+  writeFileAtomic(checkpointPath(rootDir), JSON.stringify(encryptedCheckpoint(normalized, vaultKey)), { mode: 0o600 });
+}
+
+function assertCheckpointHistory(
+  checkpoint: SignedSyncFreshnessCheckpoint,
+  changes: readonly SyncChange[],
+): void {
+  const verification = validateChangeSet(changes);
+  const byId = new Map(changes.map((change) => [change.id, change]));
+  for (const head of checkpoint.body.heads) {
+    if (!byId.has(head)) throw new Error(`Freshness checkpoint head ${head} is missing from sync history.`);
+  }
+  const reachable = new Set<string>();
+  const visit = (id: string): void => {
+    if (reachable.has(id)) return;
+    const change = byId.get(id);
+    if (!change) throw new Error(`Freshness checkpoint history is missing change ${id}.`);
+    reachable.add(id);
+    for (const parent of change.parents) visit(parent);
+  };
+  for (const head of checkpoint.body.heads) visit(head);
+  if (reachable.size !== checkpoint.body.changeCount) {
+    throw new Error(
+      `Freshness checkpoint commits ${checkpoint.body.changeCount} changes, but ${reachable.size} are reachable.`,
+    );
+  }
+  if (checkpoint.body.changeCount > verification.changes) {
+    throw new Error("Freshness checkpoint is ahead of the available sync history.");
+  }
+}
+
 export class SyncDeviceManager {
   private readonly session: DocumentKeySession;
   private closed = false;
@@ -837,7 +1039,7 @@ export class SyncDeviceManager {
 
   fingerprint(): string | undefined {
     const registry = this.state();
-    return registry ? registryFingerprint(registry) : undefined;
+    return registry ? syncRegistryFingerprint(registry) : undefined;
   }
 
   initializeOwner(
@@ -1013,6 +1215,21 @@ export class SyncDeviceManager {
     return encryptedRegistry(registry, this.key());
   }
 
+  inspectRegistry(value: unknown): SignedSyncDeviceRegistry {
+    const envelope = value as EncryptedSyncDeviceRegistry | undefined;
+    if (!envelope || envelope.version !== 1 || !envelope.payload) {
+      throw new Error("Unsupported or invalid encrypted sync device registry bundle.");
+    }
+    const incoming = validateSignedDeviceRegistry(
+      JSON.parse(decryptDocument(envelope.payload, this.key(), DEVICE_REGISTRY_AAD)),
+    );
+    const current = readDeviceRegistry(this.session.rootDir, this.key());
+    if (current && current.body.authorityPublicKey !== incoming.body.authorityPublicKey) {
+      throw new Error("Incoming sync registry uses a different enrollment authority.");
+    }
+    return structuredClone(incoming);
+  }
+
   importRegistry(value: unknown, expectedAuthorityFingerprint?: string): SignedSyncDeviceRegistry {
     return withVaultLock(this.vaultDir, () => {
       const envelope = value as EncryptedSyncDeviceRegistry | undefined;
@@ -1023,7 +1240,7 @@ export class SyncDeviceManager {
         JSON.parse(decryptDocument(envelope.payload, this.key(), DEVICE_REGISTRY_AAD)),
       );
       const current = readDeviceRegistry(this.session.rootDir, this.key());
-      const fingerprint = registryFingerprint(incoming);
+      const fingerprint = syncRegistryFingerprint(incoming);
       if (current) {
         if (current.body.authorityPublicKey !== incoming.body.authorityPublicKey) {
           throw new Error("Incoming sync registry uses a different enrollment authority.");
@@ -1048,6 +1265,126 @@ export class SyncDeviceManager {
       saveDeviceRegistry(this.session.rootDir, this.key(), incoming);
       return structuredClone(incoming);
     });
+  }
+
+  createCheckpoint(
+    changes: readonly SyncChange[],
+    now = new Date().toISOString(),
+  ): SignedSyncFreshnessCheckpoint {
+    return withVaultLock(this.vaultDir, () => {
+      const registry = readDeviceRegistry(this.session.rootDir, this.key());
+      if (!registry) throw new Error("Sync device enrollment is not initialized.");
+      validateChangeSet(changes);
+      validateAuthorizedChanges(changes, registry);
+      const authorityKey = readPrivateKey(
+        authorityKeyPath(this.session.rootDir),
+        this.key(),
+        AUTHORITY_KEY_AAD,
+        "Sync enrollment authority private key",
+      );
+      const current = readCheckpoint(this.session.rootDir, this.key(), registry);
+      const parentIds = new Set(changes.flatMap((change) => change.parents));
+      const body: SyncFreshnessCheckpointBody = {
+        version: 1,
+        sequence: (current?.body.sequence ?? 0) + 1,
+        authorityFingerprint: syncRegistryFingerprint(registry),
+        registryRevision: registry.body.revision,
+        epoch: registry.body.epoch,
+        changeCount: changes.length,
+        heads: changes.map((change) => change.id).filter((id) => !parentIds.has(id)).sort(),
+        createdAt: canonicalTimestamp(now, "Checkpoint creation time"),
+        previousCheckpoint: current?.id ?? null,
+      };
+      const signature = signCanonical(checkpointBodyPayload(body), authorityKey);
+      const checkpoint = validateSignedCheckpoint(
+        { id: checkpointId(body, signature), body, signature },
+        registry,
+      );
+      assertCheckpointHistory(checkpoint, changes);
+      saveCheckpoint(this.session.rootDir, this.key(), registry, checkpoint);
+      return structuredClone(checkpoint);
+    });
+  }
+
+  exportCheckpoint(): EncryptedSyncFreshnessCheckpoint {
+    const registry = readDeviceRegistry(this.session.rootDir, this.key());
+    if (!registry) throw new Error("Sync device enrollment is not initialized.");
+    const checkpoint = readCheckpoint(this.session.rootDir, this.key(), registry);
+    if (!checkpoint) throw new Error("No sync freshness checkpoint has been created.");
+    return encryptedCheckpoint(checkpoint, this.key());
+  }
+
+  checkpoint(): SignedSyncFreshnessCheckpoint | undefined {
+    const registry = readDeviceRegistry(this.session.rootDir, this.key());
+    if (!registry) return undefined;
+    const checkpoint = readCheckpoint(this.session.rootDir, this.key(), registry);
+    return checkpoint ? structuredClone(checkpoint) : undefined;
+  }
+
+  inspectCheckpoint(value: unknown): SignedSyncFreshnessCheckpoint {
+    const registry = readDeviceRegistry(this.session.rootDir, this.key());
+    if (!registry) throw new Error("Sync device enrollment is not initialized.");
+    const envelope = value as EncryptedSyncFreshnessCheckpoint | undefined;
+    if (!envelope || envelope.version !== 1 || !envelope.payload) {
+      throw new Error("Unsupported or invalid encrypted freshness checkpoint bundle.");
+    }
+    return structuredClone(
+      validateSignedCheckpoint(
+        JSON.parse(decryptDocument(envelope.payload, this.key(), FRESHNESS_CHECKPOINT_AAD)),
+        registry,
+      ),
+    );
+  }
+
+  importCheckpoint(
+    value: unknown,
+    changes: readonly SyncChange[],
+    expectedCheckpointId?: string,
+  ): SignedSyncFreshnessCheckpoint {
+    return withVaultLock(this.vaultDir, () => {
+      const registry = readDeviceRegistry(this.session.rootDir, this.key());
+      if (!registry) throw new Error("Sync device enrollment is not initialized.");
+      const envelope = value as EncryptedSyncFreshnessCheckpoint | undefined;
+      if (!envelope || envelope.version !== 1 || !envelope.payload) {
+        throw new Error("Unsupported or invalid encrypted freshness checkpoint bundle.");
+      }
+      const incoming = validateSignedCheckpoint(
+        JSON.parse(decryptDocument(envelope.payload, this.key(), FRESHNESS_CHECKPOINT_AAD)),
+        registry,
+      );
+      assertCheckpointHistory(incoming, changes);
+      const current = readCheckpoint(this.session.rootDir, this.key(), registry);
+      if (!current) {
+        if (!expectedCheckpointId || !CHANGE_ID.test(expectedCheckpointId)) {
+          throw new Error("First checkpoint import requires the expected 64-character checkpoint ID.");
+        }
+        if (incoming.id !== expectedCheckpointId) {
+          throw new Error("Incoming freshness checkpoint does not match the expected checkpoint ID.");
+        }
+      } else if (incoming.body.sequence < current.body.sequence) {
+        throw new Error("Incoming freshness checkpoint is a rollback.");
+      } else if (incoming.body.sequence === current.body.sequence) {
+        if (incoming.id !== current.id) throw new Error("Incoming freshness checkpoint forks the current sequence.");
+        return structuredClone(current);
+      } else if (
+        incoming.body.sequence !== current.body.sequence + 1 ||
+        incoming.body.previousCheckpoint !== current.id
+      ) {
+        throw new Error("Incoming freshness checkpoint does not extend the pinned checkpoint chain.");
+      }
+      saveCheckpoint(this.session.rootDir, this.key(), registry, incoming);
+      return structuredClone(incoming);
+    });
+  }
+
+  verifyCheckpoint(changes: readonly SyncChange[]): SignedSyncFreshnessCheckpoint {
+    const registry = readDeviceRegistry(this.session.rootDir, this.key());
+    if (!registry) throw new Error("Sync device enrollment is not initialized.");
+    validateAuthorizedChanges(changes, registry);
+    const checkpoint = readCheckpoint(this.session.rootDir, this.key(), registry);
+    if (!checkpoint) throw new Error("No sync freshness checkpoint is pinned.");
+    assertCheckpointHistory(checkpoint, changes);
+    return structuredClone(checkpoint);
   }
 }
 

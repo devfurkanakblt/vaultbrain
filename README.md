@@ -526,6 +526,9 @@ per-device chains, causal parents and explicit conflict inspection. Exported
 JSON contains only keyed opaque IDs and AES-GCM ciphertext. Enrolled devices
 sign every new change with a separate Ed25519 key; the owner-signed encrypted
 registry pins device certificates and revocation sequence cutoffs.
+Owner-signed freshness checkpoints commit to the verified causal heads and
+change count. An authenticated self-hosted relay stores only opaque immutable
+ciphertext, with request, storage and object-count quotas.
 
 Pass `--sync-device <uuid>` to a document or plugin command to capture its note,
 canvas, attachment, plugin-package or plugin-policy mutation automatically. A
@@ -566,16 +569,28 @@ sbrain --experimental-trusted-sync sync apply note <note-id>
 # Example automatically captured edit.
 sbrain --experimental-trusted-sync --sync-device <device-id> \
   docs put Plans/Launch.md --body "Ready"
+
+# Publish a known-good checkpoint and push it with the encrypted change log.
+export SBRAIN_RELAY_TOKEN='<at-least-32-random-bytes>'
+sbrain --experimental-trusted-sync sync checkpoint create
+sbrain --experimental-trusted-sync sync relay push https://relay.example
+
+# First contact pins fingerprints obtained through a trusted channel.
+sbrain --experimental-trusted-sync --vault ./restored-vault \
+  sync relay pull https://relay.example \
+  --authority <owner-authority-sha256> \
+  --checkpoint <owner-checkpoint-sha256>
 ```
 
 Unresolved heads fail before live storage is touched. Synchronized attachment
 snapshots currently share the 8 MiB change limit (about 6 MiB of raw bytes);
 larger blob transport, epoch content-key rotation, independently witnessed
-freshness, relay transport and mobile clients remain Phase 6 work. A full vault
-copy must never carry another device's `documents/sync/identity` directory;
-private identity keys are local-only and are absent from sync exports. See the
-[sync protocol design](docs/superpowers/specs/2026-08-31-encrypted-sync-change-protocol-design.md)
-for the format and conflict rules.
+freshness and mobile clients remain Phase 6 work. The relay is not key escrow:
+first-device recovery needs an encrypted vault backup containing the original
+key-derivation metadata. A normal device clone must never carry another
+device's `documents/sync/identity` directory; private identity keys are local-only
+and absent from sync exports. See the [sync protocol design](docs/superpowers/specs/2026-08-31-encrypted-sync-change-protocol-design.md)
+and [relay operations guide](docs/SYNC-RELAY.md).
 
 ## The "fast find" layer
 
@@ -609,11 +624,13 @@ cost scales with the number of _keys_, not the size of your notes.
 
 ## Roadmap
 
-Phases 0–5 are implemented. Phase 6 now has the encrypted immutable change log
-and live note/canvas/attachment/plugin-package/plugin-policy capture and
-application, plus owner-signed device enrollment and removal. Epoch key
-rotation, relay transport, multi-device desktop and mobile remain. The
-maintained checklist is in [`docs/ROADMAP.md`](docs/ROADMAP.md).
+Phases 0–5 are implemented. Phase 6 now has the encrypted immutable change log,
+live note/canvas/attachment/plugin capture and application, owner-signed device
+enrollment and removal, owner-signed freshness checkpoints, an authenticated
+opaque self-hosted relay and an automated recovery drill. Epoch content-key
+rotation, multi-device desktop/mobile releases, independent review and a stable
+1.0 format remain. The maintained checklist is in
+[`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## License
 

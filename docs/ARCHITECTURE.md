@@ -285,9 +285,30 @@ idempotent, and unresolved heads fail before touching live storage. Attachment
 bytes are carried inside v1 snapshots and consequently share the 8 MiB change
 limit; larger-attachment blob transport remains a later slice.
 
-Plugin transaction capture, enrollment and rotation, relay transport and
-compaction checkpoints remain later Phase 6 slices. The format contract and
-threat analysis are recorded in
+Plugin package/policy transactions use the same causal capture and application
+path. Each active device has a separate Ed25519 signing key and an owner-signed
+certificate. The encrypted registry pins the enrollment authority, rejects
+revision rollback/forks and records a sequence cutoff when a device is revoked.
+
+An owner-signed encrypted freshness checkpoint commits to the registry revision,
+epoch, causal heads and complete reachable change count. Its ID and predecessor
+form a separately pinned chain. Import rejects a checkpoint rollback or fork and
+proves every committed head and ancestor exists locally before accepting it.
+The first checkpoint ID must arrive through a trusted channel; without an
+independent witness, a relay can still hide updates newer than the last checkpoint
+known to the client.
+
+`src/sync-relay.ts` is an optional self-hosted HTTP transport. It authenticates
+with a high-entropy bearer token, accepts only opaque IDs and structurally valid
+encrypted envelopes, performs immutable content-addressed writes, and enforces
+request/storage/count/page/time limits. It has no vault key. Relay availability
+and deletion remain outside the confidentiality/integrity boundary, while signed
+registries, per-device changes and pinned checkpoints provide client-side trust.
+Operational details and recovery limits are in `docs/SYNC-RELAY.md`.
+
+Epoch content-key rotation, independently witnessed freshness, desktop/mobile
+product integration and external cryptographic review remain later Phase 6 work.
+The original format contract and threat analysis are recorded in
 `docs/superpowers/specs/2026-08-31-encrypted-sync-change-protocol-design.md`.
 
 ## Durability and session lifecycle

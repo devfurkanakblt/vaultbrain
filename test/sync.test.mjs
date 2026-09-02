@@ -253,6 +253,62 @@ test("a stolen vault key cannot forge an enrolled device signature", () => {
   fs.rmSync(vaultDir, { recursive: true, force: true });
 });
 
+test("signed freshness checkpoints reject rollback and selective relay withholding", () => {
+  const ownerDir = tempVault("checkpoint-owner");
+  const ownerManager = new SyncDeviceManager(ownerDir, PASSPHRASE);
+  ownerManager.initializeOwner("Owner", DEVICE_A, "2026-09-03T11:00:00.000Z");
+  const ownerLog = new SyncChangeLog(ownerDir, PASSPHRASE);
+  ownerLog.append(DEVICE_A, noteMutation(null, 1, "first"), "2026-09-03T11:01:00.000Z");
+  const firstCheckpoint = ownerManager.createCheckpoint(
+    ownerLog.changes(),
+    "2026-09-03T11:02:00.000Z",
+  );
+  const firstBundle = ownerManager.exportCheckpoint();
+
+  const receiverDir = tempVault("checkpoint-receiver");
+  fs.rmSync(receiverDir, { recursive: true, force: true });
+  fs.cpSync(ownerDir, receiverDir, { recursive: true });
+  fs.rmSync(path.join(receiverDir, "documents", "sync", "identity"), { recursive: true, force: true });
+
+  const second = ownerLog.append(
+    DEVICE_A,
+    noteMutation(1, 2, "second"),
+    "2026-09-03T11:03:00.000Z",
+  );
+  const secondCheckpoint = ownerManager.createCheckpoint(
+    ownerLog.changes(),
+    "2026-09-03T11:04:00.000Z",
+  );
+  assert.equal(secondCheckpoint.body.previousCheckpoint, firstCheckpoint.id);
+  const secondBundle = ownerManager.exportCheckpoint();
+  assert.throws(
+    () => ownerManager.importCheckpoint(firstBundle, ownerLog.changes()),
+    /rollback/iu,
+  );
+
+  const receiverLog = new SyncChangeLog(receiverDir, PASSPHRASE);
+  receiverLog.import(ownerLog.envelopes());
+  const receiverManager = new SyncDeviceManager(receiverDir, PASSPHRASE);
+  const imported = receiverManager.importCheckpoint(secondBundle, receiverLog.changes());
+  assert.equal(imported.id, secondCheckpoint.id);
+  receiverManager.verifyCheckpoint(receiverLog.changes());
+
+  fs.rmSync(
+    path.join(receiverDir, "documents", "sync", "changes", `${second.id}.change.enc`),
+  );
+  assert.throws(
+    () => receiverManager.verifyCheckpoint(receiverLog.changes()),
+    /checkpoint head .* is missing/iu,
+  );
+
+  receiverManager.close();
+  receiverLog.close();
+  ownerLog.close();
+  ownerManager.close();
+  fs.rmSync(ownerDir, { recursive: true, force: true });
+  fs.rmSync(receiverDir, { recursive: true, force: true });
+});
+
 test("concurrent device edits remain visible and a causal merge resolves them", () => {
   const vaultA = tempVault("device-a");
   const firstLog = new SyncChangeLog(vaultA, PASSPHRASE);

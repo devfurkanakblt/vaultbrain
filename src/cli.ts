@@ -40,13 +40,16 @@ import {
   SyncChangeLog,
   SyncDeviceManager,
   SyncedDocumentVault,
+  syncRegistryFingerprint,
   type EncryptedSyncChange,
   type EncryptedSyncDeviceRegistry,
+  type EncryptedSyncFreshnessCheckpoint,
   type SyncJson,
   type SyncMutation,
   type SyncObjectType,
   type SyncOperation,
 } from "./sync.js";
+import { startSyncRelay, SyncRelayClient } from "./sync-relay.js";
 import {
   createFromTemplate,
   openDailyNote,
@@ -77,7 +80,7 @@ program
   .option("--sync-device <uuid>", "automatically capture document writes for this sync device")
   .option(
     "--experimental-trusted-sync",
-    "acknowledge that sync supports trusted devices and local transport only"
+    "acknowledge the experimental sync format and trusted-device boundary"
   );
 
 program
@@ -730,10 +733,19 @@ const sync = program
   .command("sync")
   .description("encrypted immutable change log and deterministic conflict inspection");
 
+function relayToken(): string {
+  const token = process.env.SBRAIN_RELAY_TOKEN;
+  if (!token) throw new Error("Set SBRAIN_RELAY_TOKEN to a random secret containing at least 32 bytes.");
+  if (Buffer.byteLength(token, "utf8") < 32) {
+    throw new Error("SBRAIN_RELAY_TOKEN must contain at least 32 bytes.");
+  }
+  return token;
+}
+
 sync.hook("preAction", () => {
   if (!program.opts().experimentalTrustedSync) {
     throw new Error(
-      "Sync is experimental and is not safe for untrusted relays or compromised devices. Re-run with --experimental-trusted-sync only for trusted-device/local-transport use."
+      "Sync format compatibility is experimental and enrolled devices remain trusted. Re-run with --experimental-trusted-sync to acknowledge this boundary."
     );
   }
 });
@@ -892,6 +904,234 @@ syncDevices
       const registry = manager.revoke(deviceId, cutoff);
       console.log(`Revoked ${deviceId} after sequence ${cutoff}; registry revision ${registry.body.revision}.`);
     } finally {
+      manager.close();
+    }
+  });
+
+const syncCheckpoint = sync
+  .command("checkpoint")
+  .description("owner-signed freshness checkpoints for relay rollback detection");
+
+syncCheckpoint
+  .command("create")
+  .description("sign and pin the complete currently verified sync history")
+  .action(async () => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const log = new SyncChangeLog(dir, passphrase);
+    let changes;
+    try {
+      changes = log.changes();
+    } finally {
+      log.close();
+    }
+    const manager = new SyncDeviceManager(dir, passphrase);
+    try {
+      const checkpoint = manager.createCheckpoint(changes);
+      console.log(
+        `Created checkpoint ${checkpoint.id} at sequence ${checkpoint.body.sequence} for ${checkpoint.body.changeCount} changes.`,
+      );
+    } finally {
+      manager.close();
+    }
+  });
+
+syncCheckpoint
+  .command("export")
+  .description("write the encrypted signed checkpoint bundle to stdout")
+  .action(async () => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const manager = new SyncDeviceManager(dir, passphrase);
+    try {
+      process.stdout.write(`${JSON.stringify(manager.exportCheckpoint(), null, 2)}\n`);
+    } finally {
+      manager.close();
+    }
+  });
+
+syncCheckpoint
+  .command("import <source>")
+  .description("verify and pin a checkpoint against the complete local sync history")
+  .option("--expected <sha256>", "expected checkpoint ID for the first import")
+  .action(async (source, opts) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const parsed: unknown = JSON.parse(
+      readTextFileLimited(path.resolve(source), 2 * 1024 * 1024, "Sync freshness checkpoint bundle"),
+    );
+    const log = new SyncChangeLog(dir, passphrase);
+    let changes;
+    try {
+      changes = log.changes();
+    } finally {
+      log.close();
+    }
+    const manager = new SyncDeviceManager(dir, passphrase);
+    try {
+      const checkpoint = manager.importCheckpoint(
+        parsed as EncryptedSyncFreshnessCheckpoint,
+        changes,
+        opts.expected,
+      );
+      console.log(`Pinned freshness checkpoint ${checkpoint.id} at sequence ${checkpoint.body.sequence}.`);
+    } finally {
+      manager.close();
+    }
+  });
+
+syncCheckpoint
+  .command("verify")
+  .description("prove the pinned checkpoint is present in the local causal history")
+  .action(async () => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const log = new SyncChangeLog(dir, passphrase);
+    let changes;
+    try {
+      changes = log.changes();
+    } finally {
+      log.close();
+    }
+    const manager = new SyncDeviceManager(dir, passphrase);
+    try {
+      const checkpoint = manager.verifyCheckpoint(changes);
+      console.log(
+        `Verified checkpoint ${checkpoint.id}: ${checkpoint.body.changeCount} committed changes are present.`,
+      );
+    } finally {
+      manager.close();
+    }
+  });
+
+const syncRelay = sync
+  .command("relay")
+  .description("authenticated opaque relay transport for encrypted sync objects");
+
+syncRelay
+  .command("serve <storage>")
+  .description("run a self-hosted relay; the bearer token is read from SBRAIN_RELAY_TOKEN")
+  .option("--host <address>", "listen address", "127.0.0.1")
+  .option("--port <number>", "listen port", "8787")
+  .action(async (storage, opts) => {
+    const port = Number(opts.port);
+    if (!Number.isSafeInteger(port) || port < 0 || port > 65_535) {
+      throw new Error("Relay port must be an integer between 0 and 65535.");
+    }
+    const relay = await startSyncRelay({
+      storageDir: path.resolve(storage),
+      token: relayToken(),
+      host: opts.host,
+      port,
+    });
+    console.log(`Sync relay listening at ${relay.url}.`);
+    console.log("The relay stores opaque encrypted objects and cannot recover a lost vault key.");
+    await new Promise<void>((resolve, reject) => {
+      let closing = false;
+      const stop = (): void => {
+        if (closing) return;
+        closing = true;
+        void relay.close().then(resolve, reject);
+      };
+      process.once("SIGINT", stop);
+      process.once("SIGTERM", stop);
+    });
+  });
+
+syncRelay
+  .command("push <url>")
+  .description("upload encrypted changes, device registry and pinned checkpoint")
+  .action(async (url) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const manager = new SyncDeviceManager(dir, passphrase);
+    const log = new SyncChangeLog(dir, passphrase);
+    try {
+      const vaultId = manager.fingerprint();
+      if (!vaultId) throw new Error("Initialize sync device enrollment before using a relay.");
+      const client = new SyncRelayClient(url, relayToken(), vaultId);
+      const changes = await client.uploadChanges(log.envelopes());
+      const registryArtifact = await client.uploadArtifact("registry", manager.exportRegistry());
+      let checkpointArtifact: string | null = null;
+      if (manager.checkpoint()) {
+        checkpointArtifact = await client.uploadArtifact("checkpoint", manager.exportCheckpoint());
+      }
+      console.log(JSON.stringify({ changes, registryArtifact, checkpointArtifact }, null, 2));
+    } finally {
+      log.close();
+      manager.close();
+    }
+  });
+
+syncRelay
+  .command("pull <url>")
+  .description("verify and import encrypted relay state without trusting the relay")
+  .option("--authority <sha256>", "expected enrollment authority on the first pull")
+  .option("--checkpoint <sha256>", "expected freshness checkpoint on the first pull")
+  .action(async (url, opts) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const manager = new SyncDeviceManager(dir, passphrase);
+    let log: SyncChangeLog | undefined;
+    try {
+      const currentAuthority = manager.fingerprint();
+      const expectedAuthority = currentAuthority ?? opts.authority;
+      if (!expectedAuthority || !/^[a-f0-9]{64}$/u.test(expectedAuthority)) {
+        throw new Error("First relay pull requires --authority with the expected 64-character fingerprint.");
+      }
+      const client = new SyncRelayClient(url, relayToken(), expectedAuthority);
+      const registryBundles = await client.downloadArtifacts("registry");
+      const registries = registryBundles
+        .map((value) => ({ value, registry: manager.inspectRegistry(value) }))
+        .filter(({ registry }) => syncRegistryFingerprint(registry) === expectedAuthority)
+        .sort((left, right) => right.registry.body.revision - left.registry.body.revision);
+      const newest = registries[0];
+      if (!newest) throw new Error("Relay has no registry for the expected enrollment authority.");
+      manager.importRegistry(newest.value, currentAuthority ? undefined : expectedAuthority);
+
+      log = new SyncChangeLog(dir, passphrase);
+      const imported = log.import(await client.downloadChanges());
+      const changes = log.changes();
+
+      const checkpointBundles = await client.downloadArtifacts("checkpoint");
+      const checkpoints = checkpointBundles
+        .map((value) => ({ value, checkpoint: manager.inspectCheckpoint(value) }))
+        .sort((left, right) => left.checkpoint.body.sequence - right.checkpoint.body.sequence);
+      let pinned = manager.checkpoint();
+      if (!pinned && opts.checkpoint) {
+        if (!/^[a-f0-9]{64}$/u.test(opts.checkpoint)) {
+          throw new Error("Expected checkpoint must be a 64-character lowercase hexadecimal ID.");
+        }
+        const expected = checkpoints.find(({ checkpoint }) => checkpoint.id === opts.checkpoint);
+        if (!expected) throw new Error("Relay does not contain the expected freshness checkpoint.");
+        pinned = manager.importCheckpoint(expected.value, changes, opts.checkpoint);
+      } else if (pinned) {
+        while (true) {
+          const extensions = checkpoints.filter(
+            ({ checkpoint }) =>
+              checkpoint.body.sequence === pinned!.body.sequence + 1 &&
+              checkpoint.body.previousCheckpoint === pinned!.id,
+          );
+          if (extensions.length > 1) throw new Error("Relay contains a forked freshness checkpoint sequence.");
+          if (extensions.length === 0) break;
+          pinned = manager.importCheckpoint(extensions[0].value, changes);
+        }
+      }
+      if (pinned) manager.verifyCheckpoint(changes);
+      console.log(
+        JSON.stringify(
+          {
+            registryRevision: newest.registry.body.revision,
+            changes: imported,
+            checkpoint: pinned?.id ?? null,
+            checkpointWarning: pinned ? null : "No checkpoint was pinned; use --checkpoint on the first pull.",
+          },
+          null,
+          2,
+        ),
+      );
+    } finally {
+      log?.close();
       manager.close();
     }
   });
