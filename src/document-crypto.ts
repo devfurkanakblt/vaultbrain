@@ -4,11 +4,11 @@ import path from "node:path";
 import { assertNoSymlinkComponents, assertNotSymlink, readTextFileLimited, writeFileAtomic } from "./fs-safe.js";
 import { resolveInside } from "./safety.js";
 import { assertStrongPassphrase } from "./passphrase-policy.js";
+import { AAD } from "./format-version.js";
 
 const SCRYPT_N = 2 ** 16;
 const SUPPORTED_SCRYPT_N = new Set([2 ** 15, SCRYPT_N]);
 const KEY_LENGTH = 32;
-const KEY_CHECK_CONTEXT = "secondbrain-vault:document-key:v1";
 
 export interface DocumentManifest {
   version: 1;
@@ -37,7 +37,7 @@ function derive(passphrase: string, salt: Buffer, N: number): Buffer {
 }
 
 function verifier(key: Buffer): string {
-  return crypto.createHmac("sha256", key).update(KEY_CHECK_CONTEXT).digest("hex");
+  return crypto.createHmac("sha256", key).update(AAD.documentKeyCheck).digest("hex");
 }
 
 export function openDocumentKey(vaultDir: string, passphrase: string): DocumentKeySession {

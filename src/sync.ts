@@ -28,15 +28,13 @@ import {
   type PluginSecurityPolicy,
   type PluginSummary,
 } from "./documents.js";
+import {
+  AAD,
+  canonicalBase64,
+  syncChangeAad,
+  syncDeviceKeyAad,
+} from "./format-version.js";
 
-const CHANGE_ID_CONTEXT = "secondbrain-vault:sync-change-id:v1";
-const CHANGE_KEY_CONTEXT = "secondbrain-vault:sync-change-key:v1";
-const CHANGE_AAD_PREFIX = "secondbrain-vault:sync-change:v1:";
-const APPLIED_AAD = "secondbrain-vault:sync-applied:v1";
-const DEVICE_REGISTRY_AAD = "secondbrain-vault:sync-device-registry:v1";
-const FRESHNESS_CHECKPOINT_AAD = "secondbrain-vault:sync-freshness-checkpoint:v1";
-const AUTHORITY_KEY_AAD = "secondbrain-vault:sync-authority-key:v1";
-const DEVICE_KEY_AAD_PREFIX = "secondbrain-vault:sync-device-key:v1:";
 const MAX_CHANGE_BYTES = 8 * 1024 * 1024;
 const MAX_ENVELOPE_BYTES = 12 * 1024 * 1024;
 const MAX_DEVICE_REGISTRY_BYTES = 8 * 1024 * 1024;
@@ -417,14 +415,14 @@ function changeAuthorizationPayload(body: SyncChangeBody): Buffer {
 function changeId(body: SyncChangeBody, key: Buffer): string {
   return crypto
     .createHmac("sha256", key)
-    .update(CHANGE_ID_CONTEXT)
+    .update(AAD.syncChangeId)
     .update("\0")
     .update(canonicalSyncJson(body as unknown as SyncJson))
     .digest("hex");
 }
 
 function changeEncryptionKey(key: Buffer, id: string): Buffer {
-  return crypto.createHmac("sha256", key).update(CHANGE_KEY_CONTEXT).update("\0").update(id).digest();
+  return crypto.createHmac("sha256", key).update(AAD.syncChangeKey).update("\0").update(id).digest();
 }
 
 export function sealSyncChange(body: SyncChangeBody, key: Buffer): EncryptedSyncChange {
@@ -436,23 +434,11 @@ export function sealSyncChange(body: SyncChangeBody, key: Buffer): EncryptedSync
     return {
       version: 1,
       id,
-      payload: encryptDocument(canonical, envelopeKey, `${CHANGE_AAD_PREFIX}${id}`),
+      payload: encryptDocument(canonical, envelopeKey, syncChangeAad(id)),
     };
   } finally {
     envelopeKey.fill(0);
   }
-}
-
-function canonicalBase64(value: unknown, expectedBytes: number | undefined, label: string): string {
-  if (typeof value !== "string" || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value)) {
-    throw new Error(`Encrypted sync payload has malformed ${label}.`);
-  }
-  const decoded = Buffer.from(value, "base64");
-  if (expectedBytes !== undefined && decoded.length !== expectedBytes) {
-    throw new Error(`Encrypted sync payload has invalid ${label} length.`);
-  }
-  if (decoded.toString("base64") !== value) throw new Error(`Encrypted sync payload has non-canonical ${label}.`);
-  return value;
 }
 
 function validateEnvelope(value: unknown): EncryptedSyncChange {
@@ -741,14 +727,14 @@ function readDeviceRegistry(rootDir: string, vaultKey: Buffer): SignedSyncDevice
   if (!envelope || envelope.version !== 1 || !envelope.payload) {
     throw new Error("Unsupported or invalid encrypted sync device registry.");
   }
-  const plaintext = decryptDocument(envelope.payload, vaultKey, DEVICE_REGISTRY_AAD);
+  const plaintext = decryptDocument(envelope.payload, vaultKey, AAD.syncDeviceRegistry);
   return validateSignedDeviceRegistry(JSON.parse(plaintext));
 }
 
 function encryptedRegistry(registry: SignedSyncDeviceRegistry, vaultKey: Buffer): EncryptedSyncDeviceRegistry {
   return {
     version: 1,
-    payload: encryptDocument(canonicalSyncJson(registry as unknown as SyncJson), vaultKey, DEVICE_REGISTRY_AAD),
+    payload: encryptDocument(canonicalSyncJson(registry as unknown as SyncJson), vaultKey, AAD.syncDeviceRegistry),
   };
 }
 
@@ -842,7 +828,7 @@ function signAuthorizedChange(
   const privateKey = readPrivateKey(
     deviceKeyPath(rootDir, body.deviceId),
     vaultKey,
-    `${DEVICE_KEY_AAD_PREFIX}${body.deviceId}`,
+    syncDeviceKeyAad(body.deviceId),
     "Sync device private key",
   );
   if (exportPublicKey(crypto.createPublicKey(privateKey)) !== record.certificate.publicKey) {
@@ -946,7 +932,7 @@ function encryptedCheckpoint(
     payload: encryptDocument(
       canonicalSyncJson(checkpoint as unknown as SyncJson),
       vaultKey,
-      FRESHNESS_CHECKPOINT_AAD,
+      AAD.syncFreshnessCheckpoint,
     ),
   };
 }
@@ -966,7 +952,7 @@ function readCheckpoint(
     throw new Error("Unsupported or invalid encrypted freshness checkpoint.");
   }
   return validateSignedCheckpoint(
-    JSON.parse(decryptDocument(envelope.payload, vaultKey, FRESHNESS_CHECKPOINT_AAD)),
+    JSON.parse(decryptDocument(envelope.payload, vaultKey, AAD.syncFreshnessCheckpoint)),
     registry,
   );
 }
@@ -1084,12 +1070,12 @@ export class SyncDeviceManager {
         },
         authority.privateKey,
       );
-      savePrivateKey(authorityKeyPath(this.session.rootDir), authority.privateKey, this.key(), AUTHORITY_KEY_AAD);
+      savePrivateKey(authorityKeyPath(this.session.rootDir), authority.privateKey, this.key(), AAD.syncAuthorityKey);
       savePrivateKey(
         deviceKeyPath(this.session.rootDir, deviceId),
         device.privateKey,
         this.key(),
-        `${DEVICE_KEY_AAD_PREFIX}${deviceId}`,
+        syncDeviceKeyAad(deviceId),
       );
       saveDeviceRegistry(this.session.rootDir, this.key(), registry);
       return structuredClone(registry);
@@ -1128,7 +1114,7 @@ export class SyncDeviceManager {
         deviceKeyPath(this.session.rootDir, deviceId),
         pair.privateKey,
         this.key(),
-        `${DEVICE_KEY_AAD_PREFIX}${deviceId}`,
+        syncDeviceKeyAad(deviceId),
       );
       return validateEnrollmentRequest(request);
     });
@@ -1145,7 +1131,7 @@ export class SyncDeviceManager {
       const authorityKey = readPrivateKey(
         authorityKeyPath(this.session.rootDir),
         this.key(),
-        AUTHORITY_KEY_AAD,
+        AAD.syncAuthorityKey,
         "Sync enrollment authority private key",
       );
       if (exportPublicKey(crypto.createPublicKey(authorityKey)) !== registry.body.authorityPublicKey) {
@@ -1189,7 +1175,7 @@ export class SyncDeviceManager {
       const authorityKey = readPrivateKey(
         authorityKeyPath(this.session.rootDir),
         this.key(),
-        AUTHORITY_KEY_AAD,
+        AAD.syncAuthorityKey,
         "Sync enrollment authority private key",
       );
       const revokedAt = canonicalTimestamp(now, "Device revocation time");
@@ -1221,7 +1207,7 @@ export class SyncDeviceManager {
       throw new Error("Unsupported or invalid encrypted sync device registry bundle.");
     }
     const incoming = validateSignedDeviceRegistry(
-      JSON.parse(decryptDocument(envelope.payload, this.key(), DEVICE_REGISTRY_AAD)),
+      JSON.parse(decryptDocument(envelope.payload, this.key(), AAD.syncDeviceRegistry)),
     );
     const current = readDeviceRegistry(this.session.rootDir, this.key());
     if (current && current.body.authorityPublicKey !== incoming.body.authorityPublicKey) {
@@ -1237,7 +1223,7 @@ export class SyncDeviceManager {
         throw new Error("Unsupported or invalid encrypted sync device registry bundle.");
       }
       const incoming = validateSignedDeviceRegistry(
-        JSON.parse(decryptDocument(envelope.payload, this.key(), DEVICE_REGISTRY_AAD)),
+        JSON.parse(decryptDocument(envelope.payload, this.key(), AAD.syncDeviceRegistry)),
       );
       const current = readDeviceRegistry(this.session.rootDir, this.key());
       const fingerprint = syncRegistryFingerprint(incoming);
@@ -1279,7 +1265,7 @@ export class SyncDeviceManager {
       const authorityKey = readPrivateKey(
         authorityKeyPath(this.session.rootDir),
         this.key(),
-        AUTHORITY_KEY_AAD,
+        AAD.syncAuthorityKey,
         "Sync enrollment authority private key",
       );
       const current = readCheckpoint(this.session.rootDir, this.key(), registry);
@@ -1330,7 +1316,7 @@ export class SyncDeviceManager {
     }
     return structuredClone(
       validateSignedCheckpoint(
-        JSON.parse(decryptDocument(envelope.payload, this.key(), FRESHNESS_CHECKPOINT_AAD)),
+        JSON.parse(decryptDocument(envelope.payload, this.key(), AAD.syncFreshnessCheckpoint)),
         registry,
       ),
     );
@@ -1349,7 +1335,7 @@ export class SyncDeviceManager {
         throw new Error("Unsupported or invalid encrypted freshness checkpoint bundle.");
       }
       const incoming = validateSignedCheckpoint(
-        JSON.parse(decryptDocument(envelope.payload, this.key(), FRESHNESS_CHECKPOINT_AAD)),
+        JSON.parse(decryptDocument(envelope.payload, this.key(), AAD.syncFreshnessCheckpoint)),
         registry,
       );
       assertCheckpointHistory(incoming, changes);
@@ -1393,7 +1379,7 @@ export function openSyncChange(value: unknown, key: Buffer): SyncChange {
   const envelopeKey = changeEncryptionKey(key, envelope.id);
   let plaintext: string;
   try {
-    plaintext = decryptDocument(envelope.payload, envelopeKey, `${CHANGE_AAD_PREFIX}${envelope.id}`);
+    plaintext = decryptDocument(envelope.payload, envelopeKey, syncChangeAad(envelope.id));
   } finally {
     envelopeKey.fill(0);
   }
@@ -1721,7 +1707,7 @@ export class SyncChangeLog {
     const payload = JSON.parse(
       readTextFileLimited(this.appliedPath, 64 * 1024 * 1024, "Sync application state")
     ) as DocumentPayload;
-    const parsed = JSON.parse(decryptDocument(payload, this.key(), APPLIED_AAD)) as SyncAppliedState;
+    const parsed = JSON.parse(decryptDocument(payload, this.key(), AAD.syncApplied)) as SyncAppliedState;
     if (parsed?.version !== 1 || !parsed.objects || typeof parsed.objects !== "object") {
       throw new Error("Unsupported or invalid sync application state.");
     }
@@ -1741,7 +1727,7 @@ export class SyncChangeLog {
   }
 
   private saveAppliedState(state: SyncAppliedState): void {
-    const payload = encryptDocument(JSON.stringify(state), this.key(), APPLIED_AAD);
+    const payload = encryptDocument(JSON.stringify(state), this.key(), AAD.syncApplied);
     writeFileAtomic(this.appliedPath, JSON.stringify(payload), { mode: 0o600 });
   }
 

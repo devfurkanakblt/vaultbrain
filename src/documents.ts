@@ -29,6 +29,17 @@ import { resolveInside } from "./safety.js";
 import { applyFrontmatter, parseFrontmatter, stringifyFrontmatter } from "./frontmatter.js";
 import { withVaultLock } from "./vault-lock.js";
 import {
+  AAD,
+  attachmentChunkAad,
+  attachmentManifestAad,
+  canvasAad,
+  canvasHistoryAad,
+  noteAad,
+  noteHistoryAad,
+  pluginAad,
+  pluginStoreAad,
+} from "./format-version.js";
+import {
   SemanticNoteIndex,
   type EmbeddingAdapter,
   type SemanticSearchHit,
@@ -316,54 +327,8 @@ export interface AttachmentInfo {
   createdAt: string;
 }
 
-const INDEX_AAD = "secondbrain-vault:document-index:v1";
-const PLUGIN_POLICY_AAD = "secondbrain-vault:plugin-policy:v1";
 const ATTACHMENT_CHUNK_SIZE = 1024 * 1024;
 const MAX_ATTACHMENT_SIZE = 250 * 1024 * 1024;
-
-function noteAad(id: string): string {
-  return `secondbrain-vault:note:v1:${id}`;
-}
-
-function historyAad(id: string, revision: number): string {
-  return `secondbrain-vault:note-history:v1:${id}:${revision}`;
-}
-
-/**
- * The AAD names the object type, so decrypting a canvas object as a note fails
- * GCM authentication outright. Type confusion between the two sibling object
- * types is therefore caught cryptographically: no separate check is needed, and
- * none can be bypassed.
- */
-function canvasAad(id: string): string {
-  return `secondbrain-vault:canvas:v1:${id}`;
-}
-
-/** Same type-confusion argument as `canvasAad`, for the third object type. */
-function pluginAad(id: string): string {
-  return `secondbrain-vault:plugin:v1:${id}`;
-}
-
-/**
- * A plugin's own settings live in a separate object from its code, so writing a
- * setting never rewrites the code — and a reader that only wants the settings
- * never decrypts the code at all.
- */
-function pluginStoreAad(id: string): string {
-  return `secondbrain-vault:plugin-store:v1:${id}`;
-}
-
-function canvasHistoryAad(id: string, revision: number): string {
-  return `secondbrain-vault:canvas-history:v1:${id}:${revision}`;
-}
-
-function attachmentManifestAad(id: string): string {
-  return `secondbrain-vault:attachment-manifest:v1:${id}`;
-}
-
-function attachmentChunkAad(id: string, index: number): string {
-  return `secondbrain-vault:attachment-chunk:v1:${id}:${index}`;
-}
 
 function normalizeText(value: string): string {
   return value.normalize("NFKC").toLocaleLowerCase("en-US");
@@ -575,7 +540,7 @@ export class DocumentVault {
       readTextFileLimited(indexPath, 512 * 1024 * 1024, "Document index")
     ) as DocumentPayload;
     const parsed = JSON.parse(
-      decryptDocument(payload, this.session.key, INDEX_AAD)
+      decryptDocument(payload, this.session.key, AAD.documentIndex)
     ) as DocumentIndex | LegacyDocumentIndex;
     if (!Number.isInteger(parsed.version) || parsed.version < 1 || parsed.version > 2) {
       throw new Error("Unsupported or invalid document index.");
@@ -746,7 +711,7 @@ export class DocumentVault {
     this.assertUnlocked();
     this.notesCache = undefined;
     index.generatedAt = new Date().toISOString();
-    const payload = encryptDocument(JSON.stringify(index), this.session.key, INDEX_AAD);
+    const payload = encryptDocument(JSON.stringify(index), this.session.key, AAD.documentIndex);
     writeFileAtomic(this.indexPath(), JSON.stringify(payload), { mode: 0o600 });
     this.indexCache = index;
   }
@@ -803,7 +768,7 @@ export class DocumentVault {
     const payload = encryptDocument(
       JSON.stringify(note),
       this.session.key,
-      historyAad(note.id, note.revision)
+      noteHistoryAad(note.id, note.revision)
     );
     writeFileAtomic(historyPath, JSON.stringify(payload), { mode: 0o600 });
   }
@@ -830,7 +795,7 @@ export class DocumentVault {
       readTextFileLimited(historyPath, 40 * 1024 * 1024, "Note revision")
     ) as DocumentPayload;
     const note = JSON.parse(
-      decryptDocument(payload, this.session.key, historyAad(id, revision))
+      decryptDocument(payload, this.session.key, noteHistoryAad(id, revision))
     ) as NoteDocument;
     if (note.id !== id || note.revision !== revision) throw new Error("Invalid revision object.");
     return note;
@@ -1394,7 +1359,7 @@ export class DocumentVault {
       readTextFileLimited(filePath, 4 * 1024 * 1024, "Plugin policy")
     ) as DocumentPayload;
     const raw = JSON.parse(
-      decryptDocument(payload, this.session.key, PLUGIN_POLICY_AAD)
+      decryptDocument(payload, this.session.key, AAD.pluginPolicy)
     ) as Partial<PluginSecurityPolicy>;
     if (raw.version !== 1 || typeof raw.restrictedMode !== "boolean" || !Array.isArray(raw.revokedSigners)) {
       throw new Error("Invalid plugin security policy.");
@@ -1412,7 +1377,7 @@ export class DocumentVault {
       restrictedMode: policy.restrictedMode,
       revokedSigners: [...new Set(policy.revokedSigners)].sort(),
     };
-    const payload = encryptDocument(JSON.stringify(normalized), this.session.key, PLUGIN_POLICY_AAD);
+    const payload = encryptDocument(JSON.stringify(normalized), this.session.key, AAD.pluginPolicy);
     writeFileAtomic(this.pluginPolicyPath(), JSON.stringify(payload), { mode: 0o600 });
   }
 
@@ -2022,7 +1987,7 @@ export class DocumentVault {
     }
     const id = crypto
       .createHmac("sha256", this.session.key)
-      .update("secondbrain-vault:attachment-id:v1\0", "utf8")
+      .update(AAD.attachmentId, "utf8")
       .update(data)
       .digest("hex");
     if (fs.existsSync(this.attachmentManifestPath(id))) return this.readAttachmentManifest(id);
@@ -2073,7 +2038,7 @@ export class DocumentVault {
     const data = Buffer.concat(parts);
     const actualId = crypto
       .createHmac("sha256", this.session.key)
-      .update("secondbrain-vault:attachment-id:v1\0", "utf8")
+      .update(AAD.attachmentId, "utf8")
       .update(data)
       .digest("hex");
     if (data.length !== info.size || actualId !== id) throw new Error("Attachment integrity check failed.");
