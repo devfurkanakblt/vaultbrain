@@ -32,7 +32,8 @@ class FakeWorker {
 
   lastReply() {
     return this.sent.filter((message) => (message as { kind: string }).kind === "reply").at(-1) as
-      { ok: boolean; error?: string; value?: unknown } | undefined;
+      | { ok: boolean; error?: string; value?: unknown }
+      | undefined;
   }
 }
 
@@ -70,16 +71,7 @@ function harness(overrides: Partial<PluginSummary> = {}) {
     onStateChanged,
     createWorker: () => ({ worker: worker as unknown as Worker, objectUrl: "test:worker" }),
   });
-  return {
-    host,
-    worker,
-    call,
-    onNotice,
-    onCommandsChanged,
-    onPanelsChanged,
-    onStateChanged,
-    summary: summary(overrides),
-  };
+  return { host, worker, call, onNotice, onCommandsChanged, onPanelsChanged, onStateChanged, summary: summary(overrides) };
 }
 
 async function request(worker: FakeWorker, method: string, params: Record<string, unknown> = {}) {
@@ -111,12 +103,7 @@ describe("plugin host", () => {
   });
 
   it("refuses a method that is not in the capability table at all", async () => {
-    const {
-      host,
-      worker,
-      call,
-      summary: installed,
-    } = harness({
+    const { host, worker, call, summary: installed } = harness({
       capabilities: ["notes:read", "notes:write", "storage", "commands", "ui:notice", "ui:panel"],
     });
     await host.sync([{ summary: installed, source: "// noop" }]);
@@ -128,12 +115,7 @@ describe("plugin host", () => {
   });
 
   it("drops a capability name this build does not know rather than honouring it", async () => {
-    const {
-      host,
-      worker,
-      call,
-      summary: installed,
-    } = harness({
+    const { host, worker, call, summary: installed } = harness({
       capabilities: ["notes:read", "network:all"],
     });
     await host.sync([{ summary: installed, source: "// noop" }]);
@@ -178,13 +160,7 @@ describe("plugin host", () => {
   });
 
   it("takes a plugin's commands and panels away when it is disabled", async () => {
-    const {
-      host,
-      worker,
-      onCommandsChanged,
-      onPanelsChanged,
-      summary: installed,
-    } = harness({
+    const { host, worker, onCommandsChanged, onPanelsChanged, summary: installed } = harness({
       capabilities: ["commands", "ui:panel"],
     });
     await host.sync([{ summary: installed, source: "// noop" }]);

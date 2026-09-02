@@ -55,10 +55,7 @@ describe("theme tokens", () => {
     localStorage.setItem("vbrain:theme", "{not json");
     expect(loadTheme()).toEqual(DEFAULT_THEME);
 
-    localStorage.setItem(
-      "vbrain:theme",
-      JSON.stringify({ preset: "archive", accent: "chartreuse", readingSize: 900, editorFont: "comic" }),
-    );
+    localStorage.setItem("vbrain:theme", JSON.stringify({ preset: "archive", accent: "chartreuse", readingSize: 900, editorFont: "comic" }));
     expect(loadTheme()).toEqual(DEFAULT_THEME);
   });
 

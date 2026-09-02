@@ -53,19 +53,7 @@ beforeEach(() => localStorage.clear());
 
 describe("sections", () => {
   it("keeps every control of the panel reachable", () => {
-    renderPanel({
-      backlinks: [
-        {
-          id: "note-c",
-          path: "Atlas/Roadmap.md",
-          title: "Roadmap",
-          aliases: [],
-          tags: [],
-          updatedAt: "2026-08-30T09:00:00.000Z",
-          revision: 1,
-        },
-      ],
-    });
+    renderPanel({ backlinks: [{ id: "note-c", path: "Atlas/Roadmap.md", title: "Roadmap", aliases: [], tags: [], updatedAt: "2026-08-30T09:00:00.000Z", revision: 1 }] });
 
     expect(screen.getByLabelText("Copy status")).toBeInTheDocument();
     expect(screen.getByLabelText("Remove alias North star")).toBeInTheDocument();
@@ -86,8 +74,7 @@ describe("sections", () => {
   it("folds and unfolds every card from the panel bar", () => {
     renderPanel();
     const labels = [/^PROPERTIES/u, /^ALIASES/u, /^OUTLINE/u, /^BACKLINKS/u, /^UNLINKED MENTIONS/u];
-    const expanded = () =>
-      labels.map((label) => screen.getByRole("button", { name: label }).getAttribute("aria-expanded"));
+    const expanded = () => labels.map((label) => screen.getByRole("button", { name: label }).getAttribute("aria-expanded"));
     expect(expanded()).toEqual(["true", "true", "true", "true", "true"]);
 
     fireEvent.click(screen.getByRole("button", { name: "Collapse every section" }));
@@ -169,11 +156,7 @@ describe("unlinked mentions", () => {
   });
 
   it("reports a failed link instead of pretending it worked", async () => {
-    renderPanel({
-      onLink: vi.fn(async () => {
-        throw new Error("vault is locked");
-      }),
-    });
+    renderPanel({ onLink: vi.fn(async () => { throw new Error("vault is locked"); }) });
     fireEvent.click(screen.getByRole("button", { name: "Link 2 mentions in Notes" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("vault is locked");
   });

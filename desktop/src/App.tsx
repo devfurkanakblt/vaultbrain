@@ -52,26 +52,7 @@ import { ThemeEditor } from "./ThemeEditor";
 import { WorkspacesDialog } from "./Workspaces";
 import { applyTheme, clearTheme, DEFAULT_THEME, loadTheme, saveTheme, type ThemeSettings } from "./theme";
 import { useVirtualWindow } from "./virtual";
-import type {
-  AttachmentInfo,
-  Backlink,
-  Bookmark,
-  CanvasSummary,
-  DeletedNote,
-  KnowledgeGraph as GraphData,
-  NoteDocument,
-  NoteSummary,
-  PluginSecurityPolicy,
-  PluginSummary,
-  PropertyRow,
-  SavedView,
-  SaveState,
-  SearchHit,
-  UnlinkedMention,
-  VaultInfo,
-  WorkspaceLayout,
-  WorkspaceState,
-} from "./types";
+import type { AttachmentInfo, Backlink, Bookmark, CanvasSummary, DeletedNote, KnowledgeGraph as GraphData, NoteDocument, NoteSummary, PluginSecurityPolicy, PluginSummary, PropertyRow, SavedView, SaveState, SearchHit, UnlinkedMention, VaultInfo, WorkspaceLayout, WorkspaceState } from "./types";
 
 const MarkdownEditor = lazy(() => import("./Editor").then((module) => ({ default: module.MarkdownEditor })));
 const MarkdownPreview = lazy(() => import("./Preview"));
@@ -97,13 +78,8 @@ function relativeTime(iso: string) {
 
 function summarize(note: NoteDocument): NoteSummary {
   return {
-    id: note.id,
-    path: note.path,
-    title: note.title,
-    aliases: note.aliases,
-    tags: note.tags,
-    updatedAt: note.updatedAt,
-    revision: note.revision,
+    id: note.id, path: note.path, title: note.title, aliases: note.aliases,
+    tags: note.tags, updatedAt: note.updatedAt, revision: note.revision,
   };
 }
 
@@ -156,13 +132,7 @@ function rememberVault(path: string) {
   }
 }
 
-function LockScreen({
-  notice,
-  onUnlock,
-}: {
-  notice: string;
-  onUnlock: (path: string, passphrase: string) => Promise<void>;
-}) {
+function LockScreen({ notice, onUnlock }: { notice: string; onUnlock: (path: string, passphrase: string) => Promise<void> }) {
   const history = useMemo(readVaultHistory, []);
   const [path, setPath] = useState(() => history[0] ?? DEFAULT_VAULT_PATH);
   const [passphrase, setPassphrase] = useState("");
@@ -216,20 +186,9 @@ function LockScreen({
           <LockKeyhole size={30} strokeWidth={1.45} />
         </div>
         <p className="eyebrow">VAULT BRAIN / LOCAL ARCHIVE</p>
-        <h1>
-          Your thoughts,
-          <br />
-          <em>under seal.</em>
-        </h1>
-        <p className="unlock-copy">
-          A fast workspace that stays yours. Unlocking happens on this device; the key never enters the interface.
-        </p>
-        {notice && (
-          <p className="lock-notice" role="status">
-            <ShieldCheck size={14} />
-            {notice}
-          </p>
-        )}
+        <h1>Your thoughts,<br /><em>under seal.</em></h1>
+        <p className="unlock-copy">A fast workspace that stays yours. Unlocking happens on this device; the key never enters the interface.</p>
+        {notice && <p className="lock-notice" role="status"><ShieldCheck size={14} />{notice}</p>}
         <form onSubmit={submit}>
           <div className="field-with-action">
             <label>
@@ -260,9 +219,8 @@ function LockScreen({
               <p className="vault-hint" id="vault-unfamiliar">
                 <FilePlus2 size={13} />
                 <span>
-                  This device has not opened <b>{target}</b> before. If a vault already lives there, your passphrase
-                  opens it. If not, a new empty vault is created and sealed with the passphrase you type — so check the
-                  path before continuing.
+                  This device has not opened <b>{target}</b> before. If a vault already lives there, your passphrase opens it. If not,
+                  a new empty vault is created and sealed with the passphrase you type — so check the path before continuing.
                 </span>
               </p>
             </div>
@@ -272,13 +230,7 @@ function LockScreen({
               <span className="vault-recents-label">Switch to</span>
               <div className="vault-recent-list">
                 {elsewhere.map((entry) => (
-                  <button
-                    key={entry}
-                    type="button"
-                    className="vault-recent"
-                    onClick={() => setPath(entry)}
-                    title={entry}
-                  >
+                  <button key={entry} type="button" className="vault-recent" onClick={() => setPath(entry)} title={entry}>
                     <FolderOpen size={12} />
                     <span>{entry}</span>
                   </button>
@@ -288,29 +240,15 @@ function LockScreen({
           )}
           <label>
             <span>Passphrase</span>
-            <input
-              type="password"
-              value={passphrase}
-              onChange={(event) => setPassphrase(event.target.value)}
-              autoFocus
-              autoComplete="current-password"
-            />
+            <input type="password" value={passphrase} onChange={(event) => setPassphrase(event.target.value)} autoFocus autoComplete="current-password" />
           </label>
-          {error && (
-            <p className="form-error" role="alert">
-              {error}
-            </p>
-          )}
+          {error && <p className="form-error" role="alert">{error}</p>}
           <button className="unlock-button" disabled={busy || !path || !passphrase}>
             <span>{busy ? "Deriving session key…" : "Unlock workspace"}</span>
-            <span className="button-mark">
-              {busy ? <CircleDot className="spin" size={18} /> : <ShieldCheck size={18} />}
-            </span>
+            <span className="button-mark">{busy ? <CircleDot className="spin" size={18} /> : <ShieldCheck size={18} />}</span>
           </button>
         </form>
-        <div className="trust-line">
-          <span /> AES-256-GCM · LOCAL ONLY · AUDITED ACCESS
-        </div>
+        <div className="trust-line"><span /> AES-256-GCM · LOCAL ONLY · AUDITED ACCESS</div>
       </section>
     </main>
   );
@@ -350,11 +288,7 @@ export function App() {
   const [templateOpen, setTemplateOpen] = useState(false);
   const [templates, setTemplates] = useState<NoteSummary[]>([]);
   const [plugins, setPlugins] = useState<PluginSummary[]>([]);
-  const [pluginPolicy, setPluginPolicy] = useState<PluginSecurityPolicy>({
-    version: 1,
-    restrictedMode: false,
-    revokedSigners: [],
-  });
+  const [pluginPolicy, setPluginPolicy] = useState<PluginSecurityPolicy>({ version: 1, restrictedMode: false, revokedSigners: [] });
   const [pluginStates, setPluginStates] = useState<PluginRuntimeState[]>([]);
   const [pluginCommands, setPluginCommands] = useState<RegisteredCommand[]>([]);
   const [pluginPanels, setPluginPanels] = useState<PluginPanel[]>([]);
@@ -369,21 +303,16 @@ export function App() {
   const [themeOpen, setThemeOpen] = useState(false);
   const saveTimer = useRef<number | undefined>(undefined);
 
-  const treeRows = useMemo<TreeRow[]>(
-    () =>
-      folders(notes).flatMap(([folder, items]) => {
-        const open = expanded.has(folder);
-        const head: TreeRow = { kind: "folder", key: `folder:${folder}`, folder, count: items.length, open };
-        return open ? [head, ...items.map((note): TreeRow => ({ kind: "note", key: note.id, note }))] : [head];
-      }),
-    [expanded, notes],
-  );
+  const treeRows = useMemo<TreeRow[]>(() => folders(notes).flatMap(([folder, items]) => {
+    const open = expanded.has(folder);
+    const head: TreeRow = { kind: "folder", key: `folder:${folder}`, folder, count: items.length, open };
+    return open ? [head, ...items.map((note): TreeRow => ({ kind: "note", key: note.id, note }))] : [head];
+  }), [expanded, notes]);
   const tree = useVirtualWindow<HTMLElement>(treeRows.length, TREE_ROW_HEIGHT);
 
   useEffect(() => {
     applyTheme(theme);
-    if (JSON.stringify(theme) === JSON.stringify(DEFAULT_THEME)) clearTheme();
-    else saveTheme(theme);
+    if (JSON.stringify(theme) === JSON.stringify(DEFAULT_THEME)) clearTheme(); else saveTheme(theme);
   }, [theme]);
 
   const refreshList = useCallback(async () => setNotes(await vaultBridge.listNotes()), []);
@@ -459,17 +388,12 @@ export function App() {
     setPlugins(listed);
     setPluginPolicy(policy);
     const runnable = await Promise.all(
-      listed
-        .filter((plugin) => plugin.enabled)
-        .map(async (summary) => ({
-          summary,
-          source: (await vaultBridge.getPlugin(summary.id)).source,
-        })),
+      listed.filter((plugin) => plugin.enabled).map(async (summary) => ({
+        summary,
+        source: (await vaultBridge.getPlugin(summary.id)).source,
+      }))
     );
-    await host().sync([
-      ...runnable,
-      ...listed.filter((plugin) => !plugin.enabled).map((summary) => ({ summary, source: "" })),
-    ]);
+    await host().sync([...runnable, ...listed.filter((plugin) => !plugin.enabled).map((summary) => ({ summary, source: "" }))]);
     return listed;
   }, [host]);
 
@@ -482,11 +406,9 @@ export function App() {
   }, []);
 
   const rememberTab = useCallback((note: NoteDocument) => {
-    setOpenTabs((current) =>
-      current.some((tab) => tab.id === note.id)
-        ? current.map((tab) => (tab.id === note.id ? summarize(note) : tab))
-        : [...current, summarize(note)],
-    );
+    setOpenTabs((current) => current.some((tab) => tab.id === note.id)
+      ? current.map((tab) => tab.id === note.id ? summarize(note) : tab)
+      : [...current, summarize(note)]);
   }, []);
 
   const persistActive = useCallback(async () => {
@@ -518,61 +440,50 @@ export function App() {
     if (listed[0]) await openNote(listed[0].id);
   }
 
-  const openNote = useCallback(
-    async (reference: string) => {
-      if (active && active.id !== reference && !(await persistActive())) return;
-      const note = await vaultBridge.getNote(reference);
+  const openNote = useCallback(async (reference: string) => {
+    if (active && active.id !== reference && !(await persistActive())) return;
+    const note = await vaultBridge.getNote(reference);
+    setActive(note);
+    rememberTab(note);
+    setSaveState("saved");
+    const [links, named] = await Promise.all([vaultBridge.backlinks(note.id), vaultBridge.unlinkedMentions(note.id)]);
+    setBacklinks(links);
+    setMentions(named);
+  }, [active, persistActive, rememberTab]);
+
+  const openInSplit = useCallback(async (reference: string) => {
+    const note = await vaultBridge.getNote(reference);
+    setSecondary(note);
+    rememberTab(note);
+  }, [rememberTab]);
+
+  const closeTab = useCallback(async (id: string) => {
+    const index = openTabs.findIndex((tab) => tab.id === id);
+    if (index < 0) return;
+    if (active?.id === id && !(await persistActive())) return;
+    const remaining = openTabs.filter((tab) => tab.id !== id);
+    setOpenTabs(remaining);
+    if (secondary?.id === id) setSecondary(undefined);
+    if (active?.id !== id) return;
+    const fallback = remaining[index] ?? remaining[index - 1];
+    if (fallback) {
+      const note = await vaultBridge.getNote(fallback.id);
       setActive(note);
-      rememberTab(note);
       setSaveState("saved");
-      const [links, named] = await Promise.all([vaultBridge.backlinks(note.id), vaultBridge.unlinkedMentions(note.id)]);
-      setBacklinks(links);
-      setMentions(named);
-    },
-    [active, persistActive, rememberTab],
-  );
-
-  const openInSplit = useCallback(
-    async (reference: string) => {
-      const note = await vaultBridge.getNote(reference);
-      setSecondary(note);
-      rememberTab(note);
-    },
-    [rememberTab],
-  );
-
-  const closeTab = useCallback(
-    async (id: string) => {
-      const index = openTabs.findIndex((tab) => tab.id === id);
-      if (index < 0) return;
-      if (active?.id === id && !(await persistActive())) return;
-      const remaining = openTabs.filter((tab) => tab.id !== id);
-      setOpenTabs(remaining);
-      if (secondary?.id === id) setSecondary(undefined);
-      if (active?.id !== id) return;
-      const fallback = remaining[index] ?? remaining[index - 1];
-      if (fallback) {
-        const note = await vaultBridge.getNote(fallback.id);
-        setActive(note);
-        setSaveState("saved");
-        setBacklinks(await vaultBridge.backlinks(note.id));
-      } else {
-        setActive(undefined);
-        setBacklinks([]);
-        setSaveState("saved");
-      }
-    },
-    [active, openTabs, persistActive, secondary],
-  );
+      setBacklinks(await vaultBridge.backlinks(note.id));
+    } else {
+      setActive(undefined);
+      setBacklinks([]);
+      setSaveState("saved");
+    }
+  }, [active, openTabs, persistActive, secondary]);
 
   const mutateActive = useCallback((change: Partial<NoteDocument>) => {
-    setActive((current) => (current ? { ...current, ...change } : current));
+    setActive((current) => current ? { ...current, ...change } : current);
     setSaveState("dirty");
   }, []);
 
-  const saveNow = useCallback(async () => {
-    await persistActive();
-  }, [persistActive]);
+  const saveNow = useCallback(async () => { await persistActive(); }, [persistActive]);
 
   const openDaily = useCallback(async () => {
     try {
@@ -595,61 +506,31 @@ export function App() {
     }
   }, []);
 
-  const lock = useCallback(
-    async (reason: LockReason = "manual") => {
-      if (active && (saveState === "dirty" || saveState === "error")) {
-        setSaveState("saving");
-        try {
-          await vaultBridge.saveNote(active);
-        } catch {
-          setSaveState("error");
-          return;
-        }
+  const lock = useCallback(async (reason: LockReason = "manual") => {
+    if (active && (saveState === "dirty" || saveState === "error")) {
+      setSaveState("saving");
+      try {
+        await vaultBridge.saveNote(active);
+      } catch {
+        setSaveState("error");
+        return;
       }
-      await clearOwnedClipboard();
-      await vaultBridge.lock();
-      setVault(undefined);
-      setNotes([]);
-      setActive(undefined);
-      setSecondary(undefined);
-      setOpenTabs([]);
-      setBacklinks([]);
-      setMentions([]);
-      setBookmarks([]);
-      setLayouts([]);
-      setWorkspacesOpen(false);
-      setQuery("");
-      setResults([]);
-      setNotice("");
-      setSearchOpen(false);
-      setPaletteOpen(false);
-      setQuickOpen(false);
-      setNewOpen(false);
-      setThemeOpen(false);
-      setRenameOpen(false);
-      setHistoryOpen(false);
-      setTrashOpen(false);
-      setTemplateOpen(false);
-      setTemplates([]);
-      pluginHost.current?.stopAll();
-      setPlugins([]);
-      setPluginStates([]);
-      setPluginCommands([]);
-      setPluginPanels([]);
-      setWorkspaceView("notes");
-      setGraph({ nodes: [], edges: [] });
-      setPropertyRows([]);
-      setSavedViews([]);
-      setCanvases([]);
-      setAttachments([]);
-      setLockNotice(
-        reason === "inactivity"
-          ? `Locked automatically after ${idleMinutes} minute${idleMinutes === 1 ? "" : "s"} without activity. The clipboard was cleared too.`
-          : "",
-      );
-    },
-    [active, idleMinutes, saveState],
-  );
+    }
+    await clearOwnedClipboard();
+    await vaultBridge.lock();
+    setVault(undefined); setNotes([]); setActive(undefined); setSecondary(undefined); setOpenTabs([]);
+    setBacklinks([]); setMentions([]); setBookmarks([]); setLayouts([]); setWorkspacesOpen(false);
+    setQuery(""); setResults([]); setNotice("");
+    setSearchOpen(false); setPaletteOpen(false); setQuickOpen(false); setNewOpen(false); setThemeOpen(false);
+    setRenameOpen(false); setHistoryOpen(false); setTrashOpen(false); setTemplateOpen(false); setTemplates([]);
+    pluginHost.current?.stopAll();
+    setPlugins([]); setPluginStates([]); setPluginCommands([]); setPluginPanels([]);
+    setWorkspaceView("notes"); setGraph({ nodes: [], edges: [] }); setPropertyRows([]); setSavedViews([]);
+    setCanvases([]); setAttachments([]);
+    setLockNotice(reason === "inactivity"
+      ? `Locked automatically after ${idleMinutes} minute${idleMinutes === 1 ? "" : "s"} without activity. The clipboard was cleared too.`
+      : "");
+  }, [active, idleMinutes, saveState]);
 
   useEffect(() => {
     if (saveState !== "dirty") return;
@@ -658,7 +539,8 @@ export function App() {
     return () => window.clearTimeout(saveTimer.current);
   }, [active?.body, active?.title, saveNow, saveState]);
 
-  // Two frames let the note-entry transition begin from a painted state.
+  // Two frames: the first paints the entry state, the second releases it so
+  // the transition has a real style change to animate from.
   useEffect(() => {
     if (!active?.id) return;
     setEntering(true);
@@ -698,56 +580,19 @@ export function App() {
     const handler = (event: KeyboardEvent) => {
       const control = event.ctrlKey || event.metaKey;
       const key = event.key.toLowerCase();
-      if (control && key === "k") {
-        event.preventDefault();
-        setPaletteOpen((value) => !value);
-      }
-      if (control && event.shiftKey && key === "f") {
-        event.preventDefault();
-        setSearchOpen(true);
-      }
-      if (control && key === "o") {
-        event.preventDefault();
-        setQuickOpen(true);
-      }
-      if (control && key === "s") {
-        event.preventDefault();
-        void saveNow();
-      }
-      if (control && key === "n") {
-        event.preventDefault();
-        setNewOpen(true);
-      }
-      if (control && key === "e") {
-        event.preventDefault();
-        setMode((value) => (value === "write" ? "read" : "write"));
-      }
-      if (control && key === "l") {
-        event.preventDefault();
-        void lock();
-      }
-      if (control && key === "\\") {
-        event.preventDefault();
-        if (active) void openInSplit(active.id);
-      }
-      if (control && key === "w") {
-        event.preventDefault();
-        if (active) void closeTab(active.id);
-      }
-      if (control && key === "d") {
-        event.preventDefault();
-        void openDaily();
-      }
+      if (control && key === "k") { event.preventDefault(); setPaletteOpen((value) => !value); }
+      if (control && event.shiftKey && key === "f") { event.preventDefault(); setSearchOpen(true); }
+      if (control && key === "o") { event.preventDefault(); setQuickOpen(true); }
+      if (control && key === "s") { event.preventDefault(); void saveNow(); }
+      if (control && key === "n") { event.preventDefault(); setNewOpen(true); }
+      if (control && key === "e") { event.preventDefault(); setMode((value) => value === "write" ? "read" : "write"); }
+      if (control && key === "l") { event.preventDefault(); void lock(); }
+      if (control && key === "\\") { event.preventDefault(); if (active) void openInSplit(active.id); }
+      if (control && key === "w") { event.preventDefault(); if (active) void closeTab(active.id); }
+      if (control && key === "d") { event.preventDefault(); void openDaily(); }
       if (event.key === "Escape") {
-        setPaletteOpen(false);
-        setSearchOpen(false);
-        setNewOpen(false);
-        setQuickOpen(false);
-        setThemeOpen(false);
-        setRenameOpen(false);
-        setHistoryOpen(false);
-        setTrashOpen(false);
-        setTemplateOpen(false);
+        setPaletteOpen(false); setSearchOpen(false); setNewOpen(false); setQuickOpen(false); setThemeOpen(false);
+        setRenameOpen(false); setHistoryOpen(false); setTrashOpen(false); setTemplateOpen(false);
       }
     };
     window.addEventListener("keydown", handler);
@@ -755,10 +600,7 @@ export function App() {
   }, [active, closeTab, lock, openDaily, openInSplit, saveNow]);
 
   useEffect(() => {
-    if (!query.trim()) {
-      setResults([]);
-      return;
-    }
+    if (!query.trim()) { setResults([]); return; }
     const timer = window.setTimeout(async () => setResults(await vaultBridge.search(query)), 120);
     return () => window.clearTimeout(timer);
   }, [query]);
@@ -781,26 +623,18 @@ export function App() {
   }, [active?.body]);
 
   /** Reveal a heading in whichever view is showing the note. */
-  const revealHeading = useCallback(
-    (item: OutlineItem, index: number) => {
-      if (mode === "write") {
-        revealToken.current += 1;
-        setReveal({ line: item.line, token: revealToken.current });
-        return;
-      }
-      documentBody.current
-        ?.querySelectorAll("h1, h2, h3, h4")
-        .item(index)
-        ?.scrollIntoView({ behavior: "smooth", block: "start" });
-    },
-    [mode],
-  );
+  const revealHeading = useCallback((item: OutlineItem, index: number) => {
+    if (mode === "write") {
+      revealToken.current += 1;
+      setReveal({ line: item.line, token: revealToken.current });
+      return;
+    }
+    documentBody.current?.querySelectorAll("h1, h2, h3, h4").item(index)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [mode]);
 
   async function create(path: string, title: string) {
     const note = await vaultBridge.createNote(path, title);
-    await refreshList();
-    await openNote(note.id);
-    setNewOpen(false);
+    await refreshList(); await openNote(note.id); setNewOpen(false);
   }
 
   // Every lifecycle write lands as a new revision in the vault, so the tree,
@@ -819,8 +653,7 @@ export function App() {
   }
 
   async function deleteActive() {
-    if (!active || !window.confirm(`Delete “${active.title}”? Its encrypted history is kept, so it can be restored.`))
-      return;
+    if (!active || !window.confirm(`Delete “${active.title}”? Its encrypted history is kept, so it can be restored.`)) return;
     const removed = await vaultBridge.deleteNote(active.id);
     const remaining = openTabs.filter((tab) => tab.id !== removed.id);
     setOpenTabs(remaining);
@@ -887,7 +720,7 @@ export function App() {
   async function installPlugin(manifest: unknown, source: string) {
     const installed = await vaultBridge.installPlugin(
       manifest as Parameters<typeof vaultBridge.installPlugin>[0],
-      source,
+      source
     );
     await refreshPlugins();
     setNotice(`Installed ${installed.name}. It stays off until you turn it on.`);
@@ -980,19 +813,13 @@ export function App() {
   async function openLayout(layout: WorkspaceLayout) {
     if (!(await persistActive())) return;
     const known = new Map(notes.map((note) => [note.id, note]));
-    setOpenTabs(
-      layout.tabs.flatMap((id) => {
-        const note = known.get(id);
-        return note ? [note] : [];
-      }),
-    );
+    setOpenTabs(layout.tabs.flatMap((id) => { const note = known.get(id); return note ? [note] : []; }));
     setSecondary(undefined);
     if (layout.active && known.has(layout.active)) await openNote(layout.active);
     if (layout.secondary && known.has(layout.secondary)) await openInSplit(layout.secondary);
     setWorkspaceView("notes");
     // Only the views this build knows about; a stored view name is not a cast.
-    if (layout.view === "graph" || layout.view === "properties" || layout.view === "canvas" || layout.view === "files")
-      await showWorkspace(layout.view);
+    if (layout.view === "graph" || layout.view === "properties" || layout.view === "canvas" || layout.view === "files") await showWorkspace(layout.view);
     setWorkspacesOpen(false);
     setNotice(`Opened the "${layout.name}" workspace.`);
   }
@@ -1017,11 +844,7 @@ export function App() {
     const next = IDLE_CHOICES[(IDLE_CHOICES.indexOf(idleMinutes) + 1) % IDLE_CHOICES.length];
     setIdleMinutes(next);
     localStorage.setItem("vbrain:idle-lock", String(next));
-    setNotice(
-      next
-        ? `Auto-lock set to ${next} minute${next === 1 ? "" : "s"} of inactivity.`
-        : "Auto-lock disabled for this device.",
-    );
+    setNotice(next ? `Auto-lock set to ${next} minute${next === 1 ? "" : "s"} of inactivity.` : "Auto-lock disabled for this device.");
   }
 
   async function promoteSplit() {
@@ -1036,648 +859,263 @@ export function App() {
   return (
     <main className={`workspace-shell ${workspaceView !== "notes" || !rightOpen ? "without-context" : ""}`}>
       <header className="topbar" data-tauri-drag-region>
-        <div className="brand-mark">
-          <span>VB</span>
-        </div>
+        <div className="brand-mark"><span>VB</span></div>
         <button className="vault-switch" title="Current encrypted vault">
-          <Archive size={15} />
-          <span>{vault.name}</span>
-          <ChevronDown size={13} />
+          <Archive size={15} /><span>{vault.name}</span><ChevronDown size={13} />
         </button>
-        <div className="topbar-center">
-          <ShieldCheck size={14} />
-          <span>Unlocked locally</span>
-          <i />
-        </div>
+        <div className="topbar-center"><ShieldCheck size={14} /><span>Unlocked locally</span><i /></div>
         <div className="top-actions">
-          <button onClick={() => setQuickOpen(true)} title="Quick switcher (Ctrl+O)">
-            <FileText size={17} />
-          </button>
-          <button onClick={() => setSearchOpen(true)} title="Search vault (Ctrl+Shift+F)">
-            <Search size={17} />
-          </button>
-          <button onClick={() => setPaletteOpen(true)} className="command-trigger">
-            <Command size={15} />
-            <kbd>⌘ K</kbd>
-          </button>
-          <button onClick={() => void lock()} title="Lock vault">
-            <LockKeyhole size={17} />
-          </button>
+          <button onClick={() => setQuickOpen(true)} title="Quick switcher (Ctrl+O)"><FileText size={17} /></button>
+          <button onClick={() => setSearchOpen(true)} title="Search vault (Ctrl+Shift+F)"><Search size={17} /></button>
+          <button onClick={() => setPaletteOpen(true)} className="command-trigger"><Command size={15} /><kbd>⌘ K</kbd></button>
+          <button onClick={() => void lock()} title="Lock vault"><LockKeyhole size={17} /></button>
         </div>
       </header>
 
       <aside className="nav-panel">
-        <div className="nav-heading">
-          <span>ARCHIVE</span>
-          <button onClick={() => setNewOpen(true)} title="New note">
-            <FilePlus2 size={16} />
-          </button>
-        </div>
+        <div className="nav-heading"><span>ARCHIVE</span><button onClick={() => setNewOpen(true)} title="New note"><FilePlus2 size={16} /></button></div>
         <div className="workspace-modes" role="group" aria-label="Workspace view">
-          <button className={workspaceView === "notes" ? "active" : ""} onClick={() => void showWorkspace("notes")}>
-            <FileText size={14} />
-            <span>Notes</span>
-          </button>
-          <button className={workspaceView === "graph" ? "active" : ""} onClick={() => void showWorkspace("graph")}>
-            <Network size={14} />
-            <span>Graph</span>
-          </button>
-          <button
-            className={workspaceView === "properties" ? "active" : ""}
-            onClick={() => void showWorkspace("properties")}
-          >
-            <TableProperties size={14} />
-            <span>Data</span>
-          </button>
-          <button className={workspaceView === "canvas" ? "active" : ""} onClick={() => void showWorkspace("canvas")}>
-            <FolderKanban size={14} />
-            <span>Canvas</span>
-          </button>
-          <button className={workspaceView === "files" ? "active" : ""} onClick={() => void showWorkspace("files")}>
-            <Paperclip size={14} />
-            <span>Files</span>
-          </button>
-          <button className={workspaceView === "plugins" ? "active" : ""} onClick={() => void showWorkspace("plugins")}>
-            <Puzzle size={14} />
-            <span>Plugins</span>
-          </button>
+          <button className={workspaceView === "notes" ? "active" : ""} onClick={() => void showWorkspace("notes")}><FileText size={14} /><span>Notes</span></button>
+          <button className={workspaceView === "graph" ? "active" : ""} onClick={() => void showWorkspace("graph")}><Network size={14} /><span>Graph</span></button>
+          <button className={workspaceView === "properties" ? "active" : ""} onClick={() => void showWorkspace("properties")}><TableProperties size={14} /><span>Data</span></button>
+          <button className={workspaceView === "canvas" ? "active" : ""} onClick={() => void showWorkspace("canvas")}><FolderKanban size={14} /><span>Canvas</span></button>
+          <button className={workspaceView === "files" ? "active" : ""} onClick={() => void showWorkspace("files")}><Paperclip size={14} /><span>Files</span></button>
+          <button className={workspaceView === "plugins" ? "active" : ""} onClick={() => void showWorkspace("plugins")}><Puzzle size={14} /><span>Plugins</span></button>
         </div>
-        <button className="quick-find" onClick={() => setSearchOpen(true)}>
-          <Search size={15} />
-          <span>Find anything…</span>
-          <kbd>⇧⌘F</kbd>
-        </button>
-        {bookmarks.length > 0 && (
-          <div className="bookmark-block">
-            <div className="nav-subheading">
-              <span>BOOKMARKS</span>
-              <i>{bookmarks.length}</i>
-            </div>
-            <nav aria-label="Bookmarked notes">
-              {bookmarks.map((bookmark) => (
-                <button
-                  key={bookmark.id}
-                  className={
-                    active?.id === bookmark.id && workspaceView === "notes" ? "bookmark-row active" : "bookmark-row"
-                  }
-                  onClick={() => {
-                    setWorkspaceView("notes");
-                    void openNote(bookmark.id);
-                  }}
-                >
-                  <Star size={12} />
-                  {bookmark.label || bookmark.id}
-                </button>
-              ))}
-            </nav>
-          </div>
-        )}
+        <button className="quick-find" onClick={() => setSearchOpen(true)}><Search size={15} /><span>Find anything…</span><kbd>⇧⌘F</kbd></button>
+        {bookmarks.length > 0 && <div className="bookmark-block">
+          <div className="nav-subheading"><span>BOOKMARKS</span><i>{bookmarks.length}</i></div>
+          <nav aria-label="Bookmarked notes">{bookmarks.map((bookmark) => <button
+            key={bookmark.id}
+            className={active?.id === bookmark.id && workspaceView === "notes" ? "bookmark-row active" : "bookmark-row"}
+            onClick={() => { setWorkspaceView("notes"); void openNote(bookmark.id); }}
+          ><Star size={12} />{bookmark.label || bookmark.id}</button>)}</nav>
+        </div>}
         <nav className="file-tree" aria-label="Vault notes" ref={tree.ref} onScroll={tree.onScroll}>
           <div style={{ height: tree.topPad }} aria-hidden="true" />
-          {treeRows.slice(tree.start, tree.end).map((row) =>
-            row.kind === "folder" ? (
-              <button
-                key={row.key}
-                className="folder-row"
-                aria-expanded={row.open}
-                onClick={() =>
-                  setExpanded((current) => {
-                    const next = new Set(current);
-                    if (row.open) next.delete(row.folder);
-                    else next.add(row.folder);
-                    return next;
-                  })
-                }
-              >
+          {treeRows.slice(tree.start, tree.end).map((row) => row.kind === "folder"
+            ? <button key={row.key} className="folder-row" aria-expanded={row.open} onClick={() => setExpanded((current) => {
+                const next = new Set(current);
+                if (row.open) next.delete(row.folder);
+                else next.add(row.folder);
+                return next;
+              })}>
                 {row.open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-                {row.open ? <FolderOpen size={15} /> : <Folder size={15} />}
-                <span>{row.folder}</span>
-                <i>{row.count}</i>
+                {row.open ? <FolderOpen size={15} /> : <Folder size={15} />}<span>{row.folder}</span><i>{row.count}</i>
               </button>
-            ) : (
-              <button
-                key={row.key}
-                className={active?.id === row.note.id && workspaceView === "notes" ? "note-row active" : "note-row"}
-                onClick={() => {
-                  setWorkspaceView("notes");
-                  void openNote(row.note.id);
-                }}
-              >
-                <FileText size={14} />
-                <span>{row.note.title}</span>
-                {row.note.tags.includes("evergreen") && <Sparkles size={12} />}
-              </button>
-            ),
-          )}
+            : <button key={row.key} className={active?.id === row.note.id && workspaceView === "notes" ? "note-row active" : "note-row"} onClick={() => { setWorkspaceView("notes"); void openNote(row.note.id); }}>
+                <FileText size={14} /><span>{row.note.title}</span>{row.note.tags.includes("evergreen") && <Sparkles size={12} />}
+              </button>)}
           <div style={{ height: tree.bottomPad }} aria-hidden="true" />
         </nav>
         <div className="nav-footer">
           <div className="footer-controls">
-            <button
-              className="idle-lock"
-              onClick={cycleIdleLock}
-              title="Lock the vault after a period without activity"
-            >
-              <Clock size={12} />
-              <span>Auto-lock</span>
-              <b>{idleMinutes ? `${idleMinutes}m` : "off"}</b>
+            <button className="idle-lock" onClick={cycleIdleLock} title="Lock the vault after a period without activity">
+              <Clock size={12} /><span>Auto-lock</span><b>{idleMinutes ? `${idleMinutes}m` : "off"}</b>
             </button>
-            <button className="theme-open" onClick={() => setThemeOpen(true)} title="Customize theme">
-              <Palette size={12} />
-            </button>
+            <button className="theme-open" onClick={() => setThemeOpen(true)} title="Customize theme"><Palette size={12} /></button>
           </div>
-          <div className="capacity">
-            <span style={{ width: "18%" }} />
-          </div>
-          <p>
-            <b>{notes.length}</b> encrypted notes <span>·</span> local
-          </p>
+          <div className="capacity"><span style={{ width: "18%" }} /></div>
+          <p><b>{notes.length}</b> encrypted notes <span>·</span> local</p>
         </div>
       </aside>
 
-      {workspaceView === "notes" ? (
-        <section className="document-stage">
-          {openTabs.length > 0 && (
-            <div className="tab-strip" role="tablist" aria-label="Open notes">
-              {openTabs.map((tab) => (
-                <span
-                  key={tab.id}
-                  className={`tab ${active?.id === tab.id ? "active" : ""} ${secondary?.id === tab.id ? "in-split" : ""}`}
-                >
+      {workspaceView === "notes" ? <section className="document-stage">
+        {openTabs.length > 0 && <div className="tab-strip" role="tablist" aria-label="Open notes">
+          {openTabs.map((tab) => <span key={tab.id} className={`tab ${active?.id === tab.id ? "active" : ""} ${secondary?.id === tab.id ? "in-split" : ""}`}>
+            <button role="tab" aria-selected={active?.id === tab.id} onClick={() => void openNote(tab.id)} onAuxClick={(event) => { if (event.button === 1) void closeTab(tab.id); }}>
+              <FileText size={12} /><span>{tab.title}</span>
+            </button>
+            <button className="tab-close" aria-label={`Close ${tab.title}`} onClick={() => void closeTab(tab.id)}><X size={11} /></button>
+          </span>)}
+          <button className="tab-add" onClick={() => setNewOpen(true)} aria-label="New note in a tab"><FilePlus2 size={13} /></button>
+        </div>}
+
+        <div className={`stage-panes ${secondary ? "is-split" : ""}`}>
+          <article className={`stage-pane ${entering ? "is-entering" : ""}`} aria-label="Primary pane">
+            {active ? <>
+              <div className="document-toolbar">
+                <div className="breadcrumbs"><span>{active.path.split("/").slice(0, -1).join(" / ") || "Notes"}</span><ChevronRight size={13} /><b>{active.path.split("/").at(-1)}</b></div>
+                <div className="view-toggle" role="group" aria-label="Document view">
+                  <button className={mode === "write" ? "active" : ""} onClick={() => setMode("write")}>Write</button>
+                  <button className={mode === "read" ? "active" : ""} onClick={() => setMode("read")}>Read</button>
+                </div>
+                <div className="toolbar-actions">
                   <button
-                    role="tab"
-                    aria-selected={active?.id === tab.id}
-                    onClick={() => void openNote(tab.id)}
-                    onAuxClick={(event) => {
-                      if (event.button === 1) void closeTab(tab.id);
-                    }}
-                  >
-                    <FileText size={12} />
-                    <span>{tab.title}</span>
-                  </button>
-                  <button className="tab-close" aria-label={`Close ${tab.title}`} onClick={() => void closeTab(tab.id)}>
-                    <X size={11} />
-                  </button>
-                </span>
-              ))}
-              <button className="tab-add" onClick={() => setNewOpen(true)} aria-label="New note in a tab">
-                <FilePlus2 size={13} />
-              </button>
+                    className={bookmarks.some((bookmark) => bookmark.id === active.id) ? "bookmarked" : ""}
+                    onClick={() => void toggleBookmark()}
+                    aria-pressed={bookmarks.some((bookmark) => bookmark.id === active.id)}
+                    title={bookmarks.some((bookmark) => bookmark.id === active.id) ? "Remove bookmark" : "Bookmark this note"}
+                  ><Star size={16} /></button>
+                  <button onClick={() => setRenameOpen(true)} title="Rename or move this note"><PencilLine size={16} /></button>
+                  <button onClick={() => setHistoryOpen(true)} title="Encrypted revision history"><History size={16} /></button>
+                  <button onClick={() => void deleteActive()} title="Delete this note"><Trash2 size={16} /></button>
+                  <button onClick={() => void copyGuarded("Note", active.body)} title="Copy note to a self-clearing clipboard"><Copy size={16} /></button>
+                  <button onClick={() => void openInSplit(active.id)} title="Open in split pane (Ctrl+\)"><Columns2 size={16} /></button>
+                </div>
+              </div>
+              <div className="document-title-wrap">
+                <input className="document-title" value={active.title} onChange={(event) => mutateActive({ title: event.target.value })} aria-label="Note title" />
+                <div className="document-meta"><span>REV {String(active.revision).padStart(2, "0")}</span><i /> <span>{active.body.trim().split(/\s+/u).length} WORDS</span><i /> <span>UPDATED {relativeTime(active.updatedAt).toUpperCase()}</span></div>
+              </div>
+              <div className="document-body" ref={documentBody}>
+                <Suspense fallback={<div className="document-loading">Preparing document…</div>}>
+                  {mode === "write" ? <MarkdownEditor value={active.body} onChange={(body) => mutateActive({ body })} reveal={reveal} /> :
+                    <MarkdownPreview body={active.body} />}
+                </Suspense>
+              </div>
+            </> : <div className="empty-stage"><BookOpen size={32} strokeWidth={1.25} /><h2>The archive is quiet.</h2><p>Select a note to begin.</p></div>}
+          </article>
+
+          {secondary && <article className="stage-pane split-pane" aria-label="Split pane">
+            <div className="document-toolbar">
+              <div className="breadcrumbs"><span>SPLIT</span><ChevronRight size={13} /><b>{secondary.title}</b></div>
+              <div className="toolbar-actions">
+                <button onClick={() => void promoteSplit()} title="Swap this pane with the editor"><ArrowLeftRight size={16} /></button>
+                <button onClick={() => setSecondary(undefined)} aria-label="Close split pane"><X size={16} /></button>
+              </div>
             </div>
-          )}
+            <div className="document-body">
+              <Suspense fallback={<div className="document-loading">Preparing document…</div>}>
+                <MarkdownPreview body={secondary.body} />
+              </Suspense>
+            </div>
+          </article>}
+        </div>
 
-          <div className={`stage-panes ${secondary ? "is-split" : ""}`}>
-            <article className={`stage-pane ${entering ? "is-entering" : ""}`} aria-label="Primary pane">
-              {active ? (
-                <>
-                  <div className="document-toolbar">
-                    <div className="breadcrumbs">
-                      <span>{active.path.split("/").slice(0, -1).join(" / ") || "Notes"}</span>
-                      <ChevronRight size={13} />
-                      <b>{active.path.split("/").at(-1)}</b>
-                    </div>
-                    <div className="view-toggle" role="group" aria-label="Document view">
-                      <button className={mode === "write" ? "active" : ""} onClick={() => setMode("write")}>
-                        Write
-                      </button>
-                      <button className={mode === "read" ? "active" : ""} onClick={() => setMode("read")}>
-                        Read
-                      </button>
-                    </div>
-                    <div className="toolbar-actions">
-                      <button
-                        className={bookmarks.some((bookmark) => bookmark.id === active.id) ? "bookmarked" : ""}
-                        onClick={() => void toggleBookmark()}
-                        aria-pressed={bookmarks.some((bookmark) => bookmark.id === active.id)}
-                        title={
-                          bookmarks.some((bookmark) => bookmark.id === active.id)
-                            ? "Remove bookmark"
-                            : "Bookmark this note"
-                        }
-                      >
-                        <Star size={16} />
-                      </button>
-                      <button onClick={() => setRenameOpen(true)} title="Rename or move this note">
-                        <PencilLine size={16} />
-                      </button>
-                      <button onClick={() => setHistoryOpen(true)} title="Encrypted revision history">
-                        <History size={16} />
-                      </button>
-                      <button onClick={() => void deleteActive()} title="Delete this note">
-                        <Trash2 size={16} />
-                      </button>
-                      <button
-                        onClick={() => void copyGuarded("Note", active.body)}
-                        title="Copy note to a self-clearing clipboard"
-                      >
-                        <Copy size={16} />
-                      </button>
-                      <button onClick={() => void openInSplit(active.id)} title="Open in split pane (Ctrl+\)">
-                        <Columns2 size={16} />
-                      </button>
-                    </div>
-                  </div>
-                  <div className="document-title-wrap">
-                    <input
-                      className="document-title"
-                      value={active.title}
-                      onChange={(event) => mutateActive({ title: event.target.value })}
-                      aria-label="Note title"
-                    />
-                    <div className="document-meta">
-                      <span>REV {String(active.revision).padStart(2, "0")}</span>
-                      <i /> <span>{active.body.trim().split(/\s+/u).length} WORDS</span>
-                      <i /> <span>UPDATED {relativeTime(active.updatedAt).toUpperCase()}</span>
-                    </div>
-                  </div>
-                  <div className="document-body" ref={documentBody}>
-                    <Suspense fallback={<div className="document-loading">Preparing document…</div>}>
-                      {mode === "write" ? (
-                        <MarkdownEditor
-                          value={active.body}
-                          onChange={(body) => mutateActive({ body })}
-                          reveal={reveal}
-                        />
-                      ) : (
-                        <MarkdownPreview body={active.body} />
-                      )}
-                    </Suspense>
-                  </div>
-                </>
-              ) : (
-                <div className="empty-stage">
-                  <BookOpen size={32} strokeWidth={1.25} />
-                  <h2>The archive is quiet.</h2>
-                  <p>Select a note to begin.</p>
-                </div>
-              )}
-            </article>
+        {active && <footer className="statusbar">
+          <div className={`save-state ${saveState}`}><span />{saveState === "saved" ? "Encrypted & saved" : saveState === "saving" ? "Encrypting…" : saveState === "error" ? "Save failed" : "Unsaved changes"}</div>
+          <div><span>UTF-8</span><span>MARKDOWN</span><span>Ln {active.body.split("\n").length}</span></div>
+        </footer>}
+      </section> : workspaceView === "graph" ? <KnowledgeGraph graph={graph} onOpen={openFromKnowledge} />
+      : workspaceView === "canvas" ? <CanvasBoard
+        canvases={canvases}
+        notes={notes}
+        attachments={attachments}
+        onRefresh={refreshAssets}
+        onOpenNote={openFromKnowledge}
+        onNotice={setNotice}
+      />
+      : workspaceView === "files" ? <AttachmentLibrary
+        attachments={attachments}
+        onRefresh={refreshAssets}
+        onNotice={setNotice}
+      />
+      : workspaceView === "plugins" ? <PluginManager
+        plugins={plugins}
+        policy={pluginPolicy}
+        states={pluginStates}
+        onInstall={installPlugin}
+        onToggle={togglePlugin}
+        onRemove={removePlugin}
+        onRestricted={setRestrictedPlugins}
+        onRevoke={revokePluginSigner}
+        onRestore={restorePluginSigner}
+        onNotice={setNotice}
+      />
+      : <PropertyTable
+        rows={propertyRows}
+        views={savedViews}
+        onOpen={openFromKnowledge}
+        onSaveView={async (view) => setSavedViews(await vaultBridge.saveView(view))}
+        onDeleteView={async (id) => setSavedViews(await vaultBridge.deleteView(id))}
+        onEditProperty={editProperty}
+      />}
 
-            {secondary && (
-              <article className="stage-pane split-pane" aria-label="Split pane">
-                <div className="document-toolbar">
-                  <div className="breadcrumbs">
-                    <span>SPLIT</span>
-                    <ChevronRight size={13} />
-                    <b>{secondary.title}</b>
-                  </div>
-                  <div className="toolbar-actions">
-                    <button onClick={() => void promoteSplit()} title="Swap this pane with the editor">
-                      <ArrowLeftRight size={16} />
-                    </button>
-                    <button onClick={() => setSecondary(undefined)} aria-label="Close split pane">
-                      <X size={16} />
-                    </button>
-                  </div>
-                </div>
-                <div className="document-body">
-                  <Suspense fallback={<div className="document-loading">Preparing document…</div>}>
-                    <MarkdownPreview body={secondary.body} />
-                  </Suspense>
-                </div>
-              </article>
-            )}
-          </div>
+      {workspaceView === "notes" && rightOpen && active && <ContextPanel
+        note={active}
+        outline={outline}
+        backlinks={backlinks}
+        mentions={mentions}
+        onOpen={(id) => void openNote(id)}
+        onCopy={(label, value) => void copyGuarded(label, value)}
+        onAliases={(aliases) => mutateActive({ aliases })}
+        onOutline={revealHeading}
+        onClose={() => setRightOpen(false)}
+        onLink={linkMention}
+        panels={pluginPanels} />}
 
-          {active && (
-            <footer className="statusbar">
-              <div className={`save-state ${saveState}`}>
-                <span />
-                {saveState === "saved"
-                  ? "Encrypted & saved"
-                  : saveState === "saving"
-                    ? "Encrypting…"
-                    : saveState === "error"
-                      ? "Save failed"
-                      : "Unsaved changes"}
-              </div>
-              <div>
-                <span>UTF-8</span>
-                <span>MARKDOWN</span>
-                <span>Ln {active.body.split("\n").length}</span>
-              </div>
-            </footer>
-          )}
-        </section>
-      ) : workspaceView === "graph" ? (
-        <KnowledgeGraph graph={graph} onOpen={openFromKnowledge} />
-      ) : workspaceView === "canvas" ? (
-        <CanvasBoard
-          canvases={canvases}
-          notes={notes}
-          attachments={attachments}
-          onRefresh={refreshAssets}
-          onOpenNote={openFromKnowledge}
-          onNotice={setNotice}
-        />
-      ) : workspaceView === "files" ? (
-        <AttachmentLibrary attachments={attachments} onRefresh={refreshAssets} onNotice={setNotice} />
-      ) : workspaceView === "plugins" ? (
-        <PluginManager
-          plugins={plugins}
-          policy={pluginPolicy}
-          states={pluginStates}
-          onInstall={installPlugin}
-          onToggle={togglePlugin}
-          onRemove={removePlugin}
-          onRestricted={setRestrictedPlugins}
-          onRevoke={revokePluginSigner}
-          onRestore={restorePluginSigner}
-          onNotice={setNotice}
-        />
-      ) : (
-        <PropertyTable
-          rows={propertyRows}
-          views={savedViews}
-          onOpen={openFromKnowledge}
-          onSaveView={async (view) => setSavedViews(await vaultBridge.saveView(view))}
-          onDeleteView={async (id) => setSavedViews(await vaultBridge.deleteView(id))}
-          onEditProperty={editProperty}
-        />
-      )}
-
-      {workspaceView === "notes" && rightOpen && active && (
-        <ContextPanel
-          note={active}
-          outline={outline}
-          backlinks={backlinks}
-          mentions={mentions}
-          onOpen={(id) => void openNote(id)}
-          onCopy={(label, value) => void copyGuarded(label, value)}
-          onAliases={(aliases) => mutateActive({ aliases })}
-          onOutline={revealHeading}
-          onClose={() => setRightOpen(false)}
-          onLink={linkMention}
-          panels={pluginPanels}
-        />
-      )}
-
-      {workspaceView === "notes" && !rightOpen && active && (
-        <button
-          className="context-reopen"
-          onClick={() => setRightOpen(true)}
-          aria-label="Show the context panel"
-          title="Show the context panel"
-        >
-          <PanelRightOpen size={15} />
-        </button>
-      )}
+      {workspaceView === "notes" && !rightOpen && active && <button
+        className="context-reopen"
+        onClick={() => setRightOpen(true)}
+        aria-label="Show the context panel"
+        title="Show the context panel"
+      ><PanelRightOpen size={15} /></button>}
 
       {workspaceView === "notes" && !active && <div className="context-reserve" aria-hidden="true" />}
 
-      {notice && (
-        <div className="toast" role="status">
-          <Check size={14} />
-          {notice}
-        </div>
-      )}
+      {notice && <div className="toast" role="status"><Check size={14} />{notice}</div>}
 
-      {quickOpen && (
-        <QuickSwitcher
-          notes={notes}
-          onClose={() => setQuickOpen(false)}
-          onOpen={(id) => {
-            setWorkspaceView("notes");
-            void openNote(id);
-          }}
-          onSplit={(id) => {
-            setWorkspaceView("notes");
-            void openInSplit(id);
-          }}
-        />
-      )}
+      {quickOpen && <QuickSwitcher notes={notes} onClose={() => setQuickOpen(false)}
+        onOpen={(id) => { setWorkspaceView("notes"); void openNote(id); }}
+        onSplit={(id) => { setWorkspaceView("notes"); void openInSplit(id); }} />}
 
-      {searchOpen && (
-        <div className="overlay" onMouseDown={(event) => event.target === event.currentTarget && setSearchOpen(false)}>
-          <section className="search-dialog" role="dialog" aria-modal="true" aria-label="Search vault">
-            <div className="dialog-search">
-              <Search size={20} />
-              <input
-                autoFocus
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="Search titles, text, tags…"
-              />
-              <button onClick={() => setSearchOpen(false)}>
-                <X size={17} />
-              </button>
-            </div>
-            <div className="search-results">
-              {query && !results.length ? (
-                <p className="no-results">No encrypted notes match “{query}”.</p>
-              ) : (
-                results.map((hit) => (
-                  <button
-                    key={hit.id}
-                    onClick={() => {
-                      void openNote(hit.id);
-                      setSearchOpen(false);
-                    }}
-                  >
-                    <div>
-                      <FileText size={15} />
-                      <b>{hit.title}</b>
-                      <span>{hit.path}</span>
-                      <i>{Math.round(hit.score)}</i>
-                    </div>
-                    <p>{hit.excerpt}</p>
-                  </button>
-                ))
-              )}
-            </div>
-            <footer>
-              <span>
-                <kbd>↵</kbd> open
-              </span>
-              <span>
-                <kbd>esc</kbd> close
-              </span>
-              <b>{results.length} results</b>
-            </footer>
-          </section>
-        </div>
-      )}
+      {searchOpen && <div className="overlay" onMouseDown={(event) => event.target === event.currentTarget && setSearchOpen(false)}>
+        <section className="search-dialog" role="dialog" aria-modal="true" aria-label="Search vault">
+          <div className="dialog-search"><Search size={20} /><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search titles, text, tags…" /><button onClick={() => setSearchOpen(false)}><X size={17} /></button></div>
+          <div className="search-results">{query && !results.length ? <p className="no-results">No encrypted notes match “{query}”.</p> : results.map((hit) => <button key={hit.id} onClick={() => { void openNote(hit.id); setSearchOpen(false); }}><div><FileText size={15} /><b>{hit.title}</b><span>{hit.path}</span><i>{Math.round(hit.score)}</i></div><p>{hit.excerpt}</p></button>)}</div>
+          <footer><span><kbd>↵</kbd> open</span><span><kbd>esc</kbd> close</span><b>{results.length} results</b></footer>
+        </section>
+      </div>}
 
-      {paletteOpen && (
-        <div
-          className="overlay palette-overlay"
-          onMouseDown={(event) => event.target === event.currentTarget && setPaletteOpen(false)}
-        >
-          <section className="palette" role="dialog" aria-modal="true" aria-label="Command palette">
-            <div>
-              <Command size={18} />
-              <input autoFocus placeholder="Type a command…" />
-              <kbd>ESC</kbd>
-            </div>
-            {[
-              { icon: FilePlus2, label: "Create new note", keys: "⌘ N", action: () => setNewOpen(true) },
-              { icon: FileText, label: "Quick switch to a note", keys: "⌘ O", action: () => setQuickOpen(true) },
-              { icon: Sun, label: "Open today's daily note", keys: "⌘ D", action: () => void openDaily() },
-              { icon: Sparkles, label: "New note from a template", keys: "", action: () => void showTemplates() },
-              {
-                icon: PencilLine,
-                label: "Rename or move this note",
-                keys: "",
-                action: () => {
-                  if (active) setRenameOpen(true);
-                },
-              },
-              {
-                icon: History,
-                label: "Browse this note's history",
-                keys: "",
-                action: () => {
-                  if (active) setHistoryOpen(true);
-                },
-              },
-              { icon: Trash2, label: "Restore a deleted note", keys: "", action: () => setTrashOpen(true) },
-              { icon: Puzzle, label: "Manage plugins", keys: "", action: () => void showWorkspace("plugins") },
-              ...pluginCommands.map((command) => ({
-                icon: Puzzle,
-                label: `${command.pluginName}: ${command.label}`,
-                keys: "",
-                action: () => host().invoke(command),
-              })),
-              { icon: Search, label: "Search encrypted vault", keys: "⇧⌘ F", action: () => setSearchOpen(true) },
-              {
-                icon: Columns2,
-                label: "Open current note in split pane",
-                keys: "⌘ \\",
-                action: () => {
-                  if (active) void openInSplit(active.id);
-                },
-              },
-              { icon: Network, label: "Open local graph", keys: "", action: () => void showWorkspace("graph") },
-              {
-                icon: TableProperties,
-                label: "Open property view",
-                keys: "",
-                action: () => void showWorkspace("properties"),
-              },
-              {
-                icon: FolderKanban,
-                label: "Open canvas workspace",
-                keys: "",
-                action: () => void showWorkspace("canvas"),
-              },
-              {
-                icon: Paperclip,
-                label: "Open attachment library",
-                keys: "",
-                action: () => void showWorkspace("files"),
-              },
-              {
-                icon: BookOpen,
-                label: mode === "write" ? "Switch to reading view" : "Switch to writing view",
-                keys: "⌘ E",
-                action: () => setMode(mode === "write" ? "read" : "write"),
-              },
-              {
-                icon: rightOpen ? PanelRightClose : PanelRightOpen,
-                label: rightOpen ? "Hide the context panel" : "Show the context panel",
-                action: () => setRightOpen((value) => !value),
-              },
-              {
-                icon: LayoutGrid,
-                label: "Workspaces and saved layouts",
-                keys: "",
-                action: () => setWorkspacesOpen(true),
-              },
-              { icon: Palette, label: "Customize theme", keys: "", action: () => setThemeOpen(true) },
-              { icon: Clock, label: "Change auto-lock delay", keys: "", action: () => cycleIdleLock() },
-              { icon: LockKeyhole, label: "Lock workspace", keys: "⌘ L", action: () => void lock() },
-            ].map((item, index) => (
-              <button
-                key={item.label}
-                className={index === 0 ? "selected" : ""}
-                onClick={() => {
-                  item.action();
-                  setPaletteOpen(false);
-                }}
-              >
-                <item.icon size={16} />
-                <span>{item.label}</span>
-                {item.keys && <kbd>{item.keys}</kbd>}
-              </button>
-            ))}
-          </section>
-        </div>
-      )}
+      {paletteOpen && <div className="overlay palette-overlay" onMouseDown={(event) => event.target === event.currentTarget && setPaletteOpen(false)}>
+        <section className="palette" role="dialog" aria-modal="true" aria-label="Command palette"><div><Command size={18} /><input autoFocus placeholder="Type a command…" /><kbd>ESC</kbd></div>
+          {[
+            { icon: FilePlus2, label: "Create new note", keys: "⌘ N", action: () => setNewOpen(true) },
+            { icon: FileText, label: "Quick switch to a note", keys: "⌘ O", action: () => setQuickOpen(true) },
+            { icon: Sun, label: "Open today's daily note", keys: "⌘ D", action: () => void openDaily() },
+            { icon: Sparkles, label: "New note from a template", keys: "", action: () => void showTemplates() },
+            { icon: PencilLine, label: "Rename or move this note", keys: "", action: () => { if (active) setRenameOpen(true); } },
+            { icon: History, label: "Browse this note's history", keys: "", action: () => { if (active) setHistoryOpen(true); } },
+            { icon: Trash2, label: "Restore a deleted note", keys: "", action: () => setTrashOpen(true) },
+            { icon: Puzzle, label: "Manage plugins", keys: "", action: () => void showWorkspace("plugins") },
+            ...pluginCommands.map((command) => ({
+              icon: Puzzle,
+              label: `${command.pluginName}: ${command.label}`,
+              keys: "",
+              action: () => host().invoke(command),
+            })),
+            { icon: Search, label: "Search encrypted vault", keys: "⇧⌘ F", action: () => setSearchOpen(true) },
+            { icon: Columns2, label: "Open current note in split pane", keys: "⌘ \\", action: () => { if (active) void openInSplit(active.id); } },
+            { icon: Network, label: "Open local graph", keys: "", action: () => void showWorkspace("graph") },
+            { icon: TableProperties, label: "Open property view", keys: "", action: () => void showWorkspace("properties") },
+            { icon: FolderKanban, label: "Open canvas workspace", keys: "", action: () => void showWorkspace("canvas") },
+            { icon: Paperclip, label: "Open attachment library", keys: "", action: () => void showWorkspace("files") },
+            { icon: BookOpen, label: mode === "write" ? "Switch to reading view" : "Switch to writing view", keys: "⌘ E", action: () => setMode(mode === "write" ? "read" : "write") },
+            { icon: rightOpen ? PanelRightClose : PanelRightOpen, label: rightOpen ? "Hide the context panel" : "Show the context panel", action: () => setRightOpen((value) => !value) },
+            { icon: LayoutGrid, label: "Workspaces and saved layouts", keys: "", action: () => setWorkspacesOpen(true) },
+            { icon: Palette, label: "Customize theme", keys: "", action: () => setThemeOpen(true) },
+            { icon: Clock, label: "Change auto-lock delay", keys: "", action: () => cycleIdleLock() },
+            { icon: LockKeyhole, label: "Lock workspace", keys: "⌘ L", action: () => void lock() },
+          ].map((item, index) => <button key={item.label} className={index === 0 ? "selected" : ""} onClick={() => { item.action(); setPaletteOpen(false); }}><item.icon size={16} /><span>{item.label}</span>{item.keys && <kbd>{item.keys}</kbd>}</button>)}
+        </section>
+      </div>}
 
       {themeOpen && <ThemeEditor settings={theme} onChange={setTheme} onClose={() => setThemeOpen(false)} />}
 
       {newOpen && <NewNoteDialog onClose={() => setNewOpen(false)} onCreate={create} />}
-      {renameOpen && active && (
-        <RenameDialog note={active} onClose={() => setRenameOpen(false)} onRename={renameActive} />
-      )}
-      {historyOpen && active && (
-        <HistoryDialog note={active} onClose={() => setHistoryOpen(false)} onRestore={restoreRevision} />
-      )}
+      {renameOpen && active && <RenameDialog note={active} onClose={() => setRenameOpen(false)} onRename={renameActive} />}
+      {historyOpen && active && <HistoryDialog note={active} onClose={() => setHistoryOpen(false)} onRestore={restoreRevision} />}
       {trashOpen && <TrashDialog onClose={() => setTrashOpen(false)} onRestore={restoreDeleted} />}
-      {templateOpen && (
-        <TemplateDialog templates={templates} onClose={() => setTemplateOpen(false)} onCreate={createFromTemplate} />
-      )}
-      {workspacesOpen && (
-        <WorkspacesDialog
-          layouts={layouts}
-          tabCount={openTabs.length}
-          onClose={() => setWorkspacesOpen(false)}
-          onSave={saveLayout}
-          onOpen={openLayout}
-          onDelete={deleteLayout}
-        />
-      )}
+      {templateOpen && <TemplateDialog templates={templates} onClose={() => setTemplateOpen(false)} onCreate={createFromTemplate} />}
+      {workspacesOpen && <WorkspacesDialog
+        layouts={layouts}
+        tabCount={openTabs.length}
+        onClose={() => setWorkspacesOpen(false)}
+        onSave={saveLayout}
+        onOpen={openLayout}
+        onDelete={deleteLayout} />}
     </main>
   );
 }
 
-function NewNoteDialog({
-  onClose,
-  onCreate,
-}: {
-  onClose: () => void;
-  onCreate: (path: string, title: string) => Promise<void>;
-}) {
+function NewNoteDialog({ onClose, onCreate }: { onClose: () => void; onCreate: (path: string, title: string) => Promise<void> }) {
   const [title, setTitle] = useState("");
   const [path, setPath] = useState("Inbox/");
   const [busy, setBusy] = useState(false);
   async function submit(event: React.FormEvent) {
-    event.preventDefault();
-    setBusy(true);
-    try {
-      await onCreate(`${path}${title}`, title);
-    } finally {
-      setBusy(false);
-    }
+    event.preventDefault(); setBusy(true);
+    try { await onCreate(`${path}${title}`, title); } finally { setBusy(false); }
   }
-  return (
-    <div className="overlay" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <form className="new-note-dialog" onSubmit={submit}>
-        <div className="new-note-icon">
-          <FilePlus2 size={20} />
-        </div>
-        <p className="eyebrow">NEW ENCRYPTED NOTE</p>
-        <h2>Give the thought a home.</h2>
-        <label>
-          <span>Title</span>
-          <input
-            autoFocus
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
-            placeholder="Untitled idea"
-          />
-        </label>
-        <label>
-          <span>Folder</span>
-          <input value={path} onChange={(event) => setPath(event.target.value)} />
-        </label>
-        <div>
-          <button type="button" onClick={onClose}>
-            Cancel
-          </button>
-          <button disabled={!title.trim() || busy}>{busy ? "Creating…" : "Create note"}</button>
-        </div>
-      </form>
-    </div>
-  );
+  return <div className="overlay" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><form className="new-note-dialog" onSubmit={submit}><div className="new-note-icon"><FilePlus2 size={20} /></div><p className="eyebrow">NEW ENCRYPTED NOTE</p><h2>Give the thought a home.</h2><label><span>Title</span><input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Untitled idea" /></label><label><span>Folder</span><input value={path} onChange={(event) => setPath(event.target.value)} /></label><div><button type="button" onClick={onClose}>Cancel</button><button disabled={!title.trim() || busy}>{busy ? "Creating…" : "Create note"}</button></div></form></div>;
 }

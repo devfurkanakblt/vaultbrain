@@ -1,15 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type {
-  AttachmentInfo,
-  CanvasDocument,
-  CanvasInput,
-  NoteDocument,
-  PropertyRow,
-  SavedView,
-  SearchHit,
-  WorkspaceState,
-} from "./types";
+import type { AttachmentInfo, CanvasDocument, CanvasInput, NoteDocument, PropertyRow, SavedView, SearchHit, WorkspaceState } from "./types";
 import { DEFAULT_THEME, presetSettings, shade } from "./theme";
 
 const sampleNote: NoteDocument = {
@@ -85,8 +76,7 @@ const secondNote: NoteDocument = {
 function withTwoNotes() {
   bridgeMock.listNotes.mockResolvedValue([{ ...sampleNote }, { ...secondNote }]);
   bridgeMock.getNote.mockImplementation(async (reference: string) =>
-    reference === secondNote.id ? { ...secondNote } : { ...sampleNote },
-  );
+    reference === secondNote.id ? { ...secondNote } : { ...sampleNote });
 }
 
 const sampleAttachment: AttachmentInfo = {
@@ -114,9 +104,7 @@ const sampleCanvas: CanvasDocument = {
 
 function stubClipboard() {
   let held = "";
-  const writeText = vi.fn(async (value: string) => {
-    held = value;
-  });
+  const writeText = vi.fn(async (value: string) => { held = value; });
   const readText = vi.fn(async () => held);
   Object.defineProperty(navigator, "clipboard", { value: { writeText, readText }, configurable: true });
   return { writeText, readText };
@@ -148,36 +136,11 @@ describe("desktop workspace", () => {
     bridgeMock.listNotes.mockResolvedValue([{ ...sampleNote }]);
     bridgeMock.getNote.mockResolvedValue({ ...sampleNote });
     bridgeMock.saveNote.mockImplementation(async (note: NoteDocument) => ({ ...note, revision: note.revision + 1 }));
-    bridgeMock.createNote.mockResolvedValue({
-      ...sampleNote,
-      id: "f377c38e-256a-4337-895a-a29b72ebde78",
-      title: "Fresh thought",
-    });
+    bridgeMock.createNote.mockResolvedValue({ ...sampleNote, id: "f377c38e-256a-4337-895a-a29b72ebde78", title: "Fresh thought" });
     bridgeMock.search.mockResolvedValue([]);
     bridgeMock.backlinks.mockResolvedValue([]);
-    bridgeMock.graph.mockResolvedValue({
-      nodes: [
-        {
-          id: sampleNote.id,
-          title: sampleNote.title,
-          path: sampleNote.path,
-          tags: sampleNote.tags,
-          degree: 0,
-          cluster: 0,
-        },
-      ],
-      edges: [],
-    });
-    bridgeMock.propertyRows.mockResolvedValue([
-      {
-        id: sampleNote.id,
-        path: sampleNote.path,
-        title: sampleNote.title,
-        tags: sampleNote.tags,
-        properties: sampleNote.properties,
-        updatedAt: sampleNote.updatedAt,
-      },
-    ]);
+    bridgeMock.graph.mockResolvedValue({ nodes: [{ id: sampleNote.id, title: sampleNote.title, path: sampleNote.path, tags: sampleNote.tags, degree: 0, cluster: 0 }], edges: [] });
+    bridgeMock.propertyRows.mockResolvedValue([{ id: sampleNote.id, path: sampleNote.path, title: sampleNote.title, tags: sampleNote.tags, properties: sampleNote.properties, updatedAt: sampleNote.updatedAt }]);
     bridgeMock.lock.mockResolvedValue(undefined);
     bridgeMock.savedViews.mockResolvedValue([]);
     bridgeMock.unlinkedMentions.mockResolvedValue([]);
@@ -191,90 +154,48 @@ describe("desktop workspace", () => {
     bridgeMock.saveView.mockImplementation(async (view: SavedView) => [
       { ...view, id: view.id || "view-1", createdAt: sampleNote.createdAt, updatedAt: sampleNote.updatedAt },
     ]);
-    bridgeMock.canvases.mockResolvedValue([
-      {
-        id: sampleCanvas.id,
-        path: sampleCanvas.path,
-        title: sampleCanvas.title,
-        nodeCount: 0,
-        edgeCount: 0,
-        updatedAt: sampleCanvas.updatedAt,
-        revision: sampleCanvas.revision,
-      },
-    ]);
+    bridgeMock.canvases.mockResolvedValue([{
+      id: sampleCanvas.id, path: sampleCanvas.path, title: sampleCanvas.title,
+      nodeCount: 0, edgeCount: 0, updatedAt: sampleCanvas.updatedAt, revision: sampleCanvas.revision,
+    }]);
     bridgeMock.getCanvas.mockResolvedValue({ ...sampleCanvas });
     bridgeMock.saveCanvas.mockImplementation(async (input: CanvasInput) => ({
-      ...sampleCanvas,
-      ...input,
-      title: input.title ?? sampleCanvas.title,
-      nodeCount: input.nodes.length,
-      edgeCount: input.edges.length,
+      ...sampleCanvas, ...input, title: input.title ?? sampleCanvas.title,
+      nodeCount: input.nodes.length, edgeCount: input.edges.length,
       revision: (input.baseRevision ?? 0) + 1,
     }));
     bridgeMock.renameNote.mockImplementation(async (_reference: string, path: string, title?: string) => ({
-      ...sampleNote,
-      path: path.endsWith(".md") ? path : `${path}.md`,
-      title: title ?? sampleNote.title,
-      revision: sampleNote.revision + 1,
+      ...sampleNote, path: path.endsWith(".md") ? path : `${path}.md`,
+      title: title ?? sampleNote.title, revision: sampleNote.revision + 1,
     }));
     bridgeMock.deleteNote.mockResolvedValue({
-      id: sampleNote.id,
-      path: sampleNote.path,
-      title: sampleNote.title,
-      aliases: sampleNote.aliases,
-      tags: sampleNote.tags,
-      updatedAt: sampleNote.updatedAt,
-      revision: sampleNote.revision,
+      id: sampleNote.id, path: sampleNote.path, title: sampleNote.title, aliases: sampleNote.aliases,
+      tags: sampleNote.tags, updatedAt: sampleNote.updatedAt, revision: sampleNote.revision,
     });
-    bridgeMock.deletedNotes.mockResolvedValue([
-      {
-        id: "b7d9e2a6-4f13-4a55-9c2e-0f3a1d5b7c88",
-        path: "Inbox/Removed.md",
-        title: "Removed thought",
-        revision: 4,
-        updatedAt: sampleNote.updatedAt,
-      },
-    ]);
+    bridgeMock.deletedNotes.mockResolvedValue([{
+      id: "b7d9e2a6-4f13-4a55-9c2e-0f3a1d5b7c88", path: "Inbox/Removed.md",
+      title: "Removed thought", revision: 4, updatedAt: sampleNote.updatedAt,
+    }]);
     bridgeMock.noteRevisions.mockResolvedValue([
       { revision: 7, updatedAt: sampleNote.updatedAt, current: true },
       { revision: 6, updatedAt: "2026-08-29T08:00:00.000Z", current: false },
     ]);
     bridgeMock.noteRevision.mockImplementation(async (_reference: string, revision: number) => ({
-      ...sampleNote,
-      revision,
-      body: `# Product principles\n\nRevision ${revision} text.`,
+      ...sampleNote, revision, body: `# Product principles\n\nRevision ${revision} text.`,
     }));
     bridgeMock.restoreRevision.mockImplementation(async (_reference: string, revision: number) => ({
-      ...sampleNote,
-      revision: 8,
-      body: `# Product principles\n\nRevision ${revision} text.`,
+      ...sampleNote, revision: 8, body: `# Product principles\n\nRevision ${revision} text.`,
     }));
-    bridgeMock.templates.mockResolvedValue([
-      {
-        id: "3a0f8f2d-19b2-4f61-9d2a-7c8b5e2f1a04",
-        path: "Templates/Meeting.md",
-        title: "Meeting",
-        aliases: [],
-        tags: ["template"],
-        updatedAt: sampleNote.updatedAt,
-        revision: 2,
-      },
-    ]);
+    bridgeMock.templates.mockResolvedValue([{
+      id: "3a0f8f2d-19b2-4f61-9d2a-7c8b5e2f1a04", path: "Templates/Meeting.md", title: "Meeting",
+      aliases: [], tags: ["template"], updatedAt: sampleNote.updatedAt, revision: 2,
+    }]);
     bridgeMock.createFromTemplate.mockResolvedValue({
-      ...sampleNote,
-      id: "9f2b1c34-77aa-4a0e-bd51-1c6f8a3d2b90",
-      path: "Meetings/Kickoff.md",
-      title: "Kickoff",
-      revision: 1,
+      ...sampleNote, id: "9f2b1c34-77aa-4a0e-bd51-1c6f8a3d2b90",
+      path: "Meetings/Kickoff.md", title: "Kickoff", revision: 1,
     });
     bridgeMock.dailyNote.mockResolvedValue({
-      note: {
-        ...sampleNote,
-        id: "5c1a7e90-88fd-4f2b-9f0c-2a4e6b8d1c33",
-        path: "Daily/2026-08-30.md",
-        title: "2026-08-30",
-        revision: 1,
-      },
+      note: { ...sampleNote, id: "5c1a7e90-88fd-4f2b-9f0c-2a4e6b8d1c33", path: "Daily/2026-08-30.md", title: "2026-08-30", revision: 1 },
       created: true,
     });
     bridgeMock.attachments.mockResolvedValue([{ ...sampleAttachment }]);
@@ -282,12 +203,8 @@ describe("desktop workspace", () => {
     bridgeMock.readAttachment.mockResolvedValue({ info: { ...sampleAttachment }, data: "AQID" });
     bridgeMock.deleteAttachment.mockResolvedValue({ ...sampleAttachment });
     bridgeMock.updateNoteProperty.mockImplementation(async (id: string, key: string, value: unknown) => ({
-      id,
-      path: sampleNote.path,
-      title: sampleNote.title,
-      tags: sampleNote.tags,
-      properties: { ...sampleNote.properties, [key]: value },
-      updatedAt: sampleNote.updatedAt,
+      id, path: sampleNote.path, title: sampleNote.title, tags: sampleNote.tags,
+      properties: { ...sampleNote.properties, [key]: value }, updatedAt: sampleNote.updatedAt,
     }));
   });
 
@@ -364,9 +281,7 @@ describe("desktop workspace", () => {
     fireEvent.change(screen.getByLabelText("Note title"), { target: { value: "Sharper principles" } });
     expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
     fireEvent.keyDown(window, { key: "s", ctrlKey: true });
-    await waitFor(() =>
-      expect(bridgeMock.saveNote).toHaveBeenCalledWith(expect.objectContaining({ title: "Sharper principles" })),
-    );
+    await waitFor(() => expect(bridgeMock.saveNote).toHaveBeenCalledWith(expect.objectContaining({ title: "Sharper principles" })));
 
     fireEvent.click(screen.getByTitle("Lock vault"));
     await screen.findByRole("button", { name: /unlock workspace/i });
@@ -382,9 +297,7 @@ describe("desktop workspace", () => {
     await screen.findByDisplayValue("Least exposure");
 
     expect(bridgeMock.saveNote).toHaveBeenCalledWith(expect.objectContaining({ title: "Unsaved principle" }));
-    expect(bridgeMock.saveNote.mock.invocationCallOrder[0]).toBeLessThan(
-      bridgeMock.getNote.mock.invocationCallOrder.at(-1)!,
-    );
+    expect(bridgeMock.saveNote.mock.invocationCallOrder[0]).toBeLessThan(bridgeMock.getNote.mock.invocationCallOrder.at(-1)!);
   });
 
   it("opens value-minimized graph and typed property views", async () => {
@@ -410,12 +323,8 @@ describe("desktop workspace", () => {
     bridgeMock.graph.mockResolvedValue({
       nodes,
       edges: [
-        { source: "graph-0", target: "graph-1" },
-        { source: "graph-1", target: "graph-2" },
-        { source: "graph-2", target: "graph-0" },
-        { source: "graph-3", target: "graph-4" },
-        { source: "graph-4", target: "graph-5" },
-        { source: "graph-5", target: "graph-3" },
+        { source: "graph-0", target: "graph-1" }, { source: "graph-1", target: "graph-2" }, { source: "graph-2", target: "graph-0" },
+        { source: "graph-3", target: "graph-4" }, { source: "graph-4", target: "graph-5" }, { source: "graph-5", target: "graph-3" },
       ],
     });
     await unlockWorkspace();
@@ -438,9 +347,7 @@ describe("desktop workspace", () => {
 
     fireEvent.change(within(table).getByLabelText("View name"), { target: { value: "Living notes" } });
     fireEvent.click(within(table).getByRole("button", { name: "Save view" }));
-    await waitFor(() =>
-      expect(bridgeMock.saveView).toHaveBeenCalledWith(expect.objectContaining({ name: "Living notes" })),
-    );
+    await waitFor(() => expect(bridgeMock.saveView).toHaveBeenCalledWith(expect.objectContaining({ name: "Living notes" })));
     expect(await within(table).findByRole("option", { name: "Living notes" })).toBeInTheDocument();
 
     fireEvent.doubleClick(within(table).getByText("living"));
@@ -448,9 +355,7 @@ describe("desktop workspace", () => {
     fireEvent.change(cell, { target: { value: "archived" } });
     fireEvent.keyDown(cell, { key: "Enter" });
 
-    await waitFor(() =>
-      expect(bridgeMock.updateNoteProperty).toHaveBeenCalledWith(sampleNote.id, "status", "archived"),
-    );
+    await waitFor(() => expect(bridgeMock.updateNoteProperty).toHaveBeenCalledWith(sampleNote.id, "status", "archived"));
     expect(await within(table).findByText("archived")).toBeInTheDocument();
   });
 
@@ -459,13 +364,9 @@ describe("desktop workspace", () => {
     expect(screen.queryByRole("navigation", { name: "Bookmarked notes" })).toBeNull();
 
     fireEvent.click(screen.getByTitle("Bookmark this note"));
-    await waitFor(() =>
-      expect(bridgeMock.saveWorkspaceState).toHaveBeenCalledWith(
-        expect.objectContaining({
-          bookmarks: [expect.objectContaining({ id: sampleNote.id, label: sampleNote.title })],
-        }),
-      ),
-    );
+    await waitFor(() => expect(bridgeMock.saveWorkspaceState).toHaveBeenCalledWith(expect.objectContaining({
+      bookmarks: [expect.objectContaining({ id: sampleNote.id, label: sampleNote.title })],
+    })));
 
     const pinned = await screen.findByRole("navigation", { name: "Bookmarked notes" });
     expect(within(pinned).getByRole("button", { name: "Product principles" })).toBeInTheDocument();
@@ -488,19 +389,9 @@ describe("desktop workspace", () => {
     fireEvent.change(within(dialog).getByLabelText("Workspace name"), { target: { value: "Morning review" } });
     fireEvent.click(within(dialog).getByRole("button", { name: /save 2 open tabs/iu }));
 
-    await waitFor(() =>
-      expect(bridgeMock.saveWorkspaceState).toHaveBeenCalledWith(
-        expect.objectContaining({
-          layouts: [
-            expect.objectContaining({
-              name: "Morning review",
-              tabs: [sampleNote.id, secondNote.id],
-              active: secondNote.id,
-            }),
-          ],
-        }),
-      ),
-    );
+    await waitFor(() => expect(bridgeMock.saveWorkspaceState).toHaveBeenCalledWith(expect.objectContaining({
+      layouts: [expect.objectContaining({ name: "Morning review", tabs: [sampleNote.id, secondNote.id], active: secondNote.id })],
+    })));
     expect(await within(dialog).findByRole("button", { name: "Open Morning review" })).toBeInTheDocument();
 
     fireEvent.click(within(dialog).getByRole("button", { name: "Open Morning review" }));
@@ -527,9 +418,7 @@ describe("desktop workspace", () => {
     fireEvent.change(screen.getByLabelText("Note title"), { target: { value: "Closing draft" } });
     fireEvent.click(screen.getByRole("button", { name: "Close Product principles" }));
 
-    await waitFor(() =>
-      expect(bridgeMock.saveNote).toHaveBeenCalledWith(expect.objectContaining({ title: "Closing draft" })),
-    );
+    await waitFor(() => expect(bridgeMock.saveNote).toHaveBeenCalledWith(expect.objectContaining({ title: "Closing draft" })));
     expect(await screen.findByText("The archive is quiet.")).toBeInTheDocument();
   });
 
@@ -597,9 +486,7 @@ describe("desktop workspace", () => {
   it("renders only a window of a large vault's file tree", async () => {
     const notes = manyNotes(4000);
     bridgeMock.listNotes.mockResolvedValue(notes);
-    bridgeMock.getNote.mockImplementation(
-      async (reference: string) => notes.find((note) => note.id === reference) ?? notes[0],
-    );
+    bridgeMock.getNote.mockImplementation(async (reference: string) => notes.find((note) => note.id === reference) ?? notes[0]);
     await unlockWorkspace("Note 0");
 
     const tree = screen.getByRole("navigation", { name: "Vault notes" });
@@ -615,12 +502,7 @@ describe("desktop workspace", () => {
 
   it("renders only a window of the property view for a large vault", async () => {
     const rows: PropertyRow[] = manyNotes(3000).map((note) => ({
-      id: note.id,
-      path: note.path,
-      title: note.title,
-      tags: [],
-      properties: { status: "living" },
-      updatedAt: note.updatedAt,
+      id: note.id, path: note.path, title: note.title, tags: [], properties: { status: "living" }, updatedAt: note.updatedAt,
     }));
     bridgeMock.propertyRows.mockResolvedValue(rows);
     await unlockWorkspace();
@@ -640,9 +522,7 @@ describe("desktop workspace", () => {
     const editor = await screen.findByRole("dialog", { name: "Theme editor" });
 
     fireEvent.click(within(editor).getByRole("button", { name: /slate/i }));
-    await waitFor(() =>
-      expect(document.documentElement.style.getPropertyValue("--paper")).toBe(presetSettings("slate").surface),
-    );
+    await waitFor(() => expect(document.documentElement.style.getPropertyValue("--paper")).toBe(presetSettings("slate").surface));
 
     fireEvent.change(within(editor).getByLabelText("Accent hex"), { target: { value: "#ff8800" } });
     await waitFor(() => expect(document.documentElement.style.getPropertyValue("--acid")).toBe("#ff8800"));
@@ -732,9 +612,7 @@ describe("desktop workspace", () => {
     fireEvent.change(within(dialog).getByLabelText("Title"), { target: { value: "Principles" } });
     fireEvent.click(within(dialog).getByRole("button", { name: "Move note" }));
 
-    await waitFor(() =>
-      expect(bridgeMock.renameNote).toHaveBeenCalledWith(sampleNote.id, "Archive/Principles", "Principles"),
-    );
+    await waitFor(() => expect(bridgeMock.renameNote).toHaveBeenCalledWith(sampleNote.id, "Archive/Principles", "Principles"));
     expect(await screen.findByDisplayValue("Principles")).toBeInTheDocument();
     expect(await screen.findByText(/Moved to Archive\/Principles\.md/u)).toBeInTheDocument();
   });
@@ -786,22 +664,13 @@ describe("desktop workspace", () => {
     expect(await within(dialog).findByText("Removed thought")).toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole("button", { name: /restore/i }));
 
-    await waitFor(() =>
-      expect(bridgeMock.restoreRevision).toHaveBeenCalledWith("b7d9e2a6-4f13-4a55-9c2e-0f3a1d5b7c88", 4),
-    );
+    await waitFor(() => expect(bridgeMock.restoreRevision).toHaveBeenCalledWith("b7d9e2a6-4f13-4a55-9c2e-0f3a1d5b7c88", 4));
   });
 
   it("renders a template into a new note with caller variables", async () => {
-    const rendered = {
-      ...sampleNote,
-      id: "9f2b1c34-77aa-4a0e-bd51-1c6f8a3d2b90",
-      path: "Meetings/Kickoff.md",
-      title: "Kickoff",
-      revision: 1,
-    };
+    const rendered = { ...sampleNote, id: "9f2b1c34-77aa-4a0e-bd51-1c6f8a3d2b90", path: "Meetings/Kickoff.md", title: "Kickoff", revision: 1 };
     bridgeMock.getNote.mockImplementation(async (reference: string) =>
-      reference === rendered.id ? { ...rendered } : { ...sampleNote },
-    );
+      reference === rendered.id ? { ...rendered } : { ...sampleNote });
     await unlockWorkspace();
     fireEvent.keyDown(window, { key: "k", ctrlKey: true });
     const palette = await screen.findByRole("dialog", { name: "Command palette" });
@@ -814,28 +683,17 @@ describe("desktop workspace", () => {
     fireEvent.change(within(dialog).getByLabelText("Variables"), { target: { value: "client=Acme\nowner = You" } });
     fireEvent.click(within(dialog).getByRole("button", { name: "Create note" }));
 
-    await waitFor(() =>
-      expect(bridgeMock.createFromTemplate).toHaveBeenCalledWith(
-        "3a0f8f2d-19b2-4f61-9d2a-7c8b5e2f1a04",
-        "Meetings/Kickoff",
-        "Kickoff",
-        { client: "Acme", owner: "You" },
-      ),
-    );
+    await waitFor(() => expect(bridgeMock.createFromTemplate).toHaveBeenCalledWith(
+      "3a0f8f2d-19b2-4f61-9d2a-7c8b5e2f1a04", "Meetings/Kickoff", "Kickoff",
+      { client: "Acme", owner: "You" },
+    ));
     expect(await screen.findByDisplayValue("Kickoff")).toBeInTheDocument();
   });
 
   it("opens today's daily note from the keyboard", async () => {
-    const daily = {
-      ...sampleNote,
-      id: "5c1a7e90-88fd-4f2b-9f0c-2a4e6b8d1c33",
-      path: "Daily/2026-08-30.md",
-      title: "2026-08-30",
-      revision: 1,
-    };
+    const daily = { ...sampleNote, id: "5c1a7e90-88fd-4f2b-9f0c-2a4e6b8d1c33", path: "Daily/2026-08-30.md", title: "2026-08-30", revision: 1 };
     bridgeMock.getNote.mockImplementation(async (reference: string) =>
-      reference === daily.id ? { ...daily } : { ...sampleNote },
-    );
+      reference === daily.id ? { ...daily } : { ...sampleNote });
     await unlockWorkspace();
     fireEvent.keyDown(window, { key: "d", ctrlKey: true });
 

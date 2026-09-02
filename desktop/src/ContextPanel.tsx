@@ -1,19 +1,6 @@
 import { useState } from "react";
 import type { ReactNode } from "react";
-import {
-  ChevronDown,
-  ChevronsDownUp,
-  ChevronsUpDown,
-  Copy,
-  Hash,
-  Link2,
-  PanelRightClose,
-  Plus,
-  Puzzle,
-  Sparkles,
-  Tag,
-  X,
-} from "lucide-react";
+import { ChevronDown, ChevronsDownUp, ChevronsUpDown, Copy, Hash, Link2, PanelRightClose, Plus, Puzzle, Sparkles, Tag, X } from "lucide-react";
 import type { PluginPanel } from "./plugins/protocol";
 import type { Backlink, NoteDocument, UnlinkedMention } from "./types";
 
@@ -42,13 +29,7 @@ function readFolded(): Record<string, boolean> {
  * and marks it inert, so a folded section cannot be reached by keyboard while
  * still animating open and closed.
  */
-function Section({
-  label,
-  badge,
-  folded,
-  onToggle,
-  children,
-}: {
+function Section({ label, badge, folded, onToggle, children }: {
   label: string;
   badge: ReactNode;
   folded: boolean;
@@ -66,9 +47,7 @@ function Section({
       </button>
       <div className="context-card-slot">
         <div className="context-card-clip">
-          <div className="context-card-inner" inert={folded}>
-            {children}
-          </div>
+          <div className="context-card-inner" inert={folded}>{children}</div>
         </div>
       </div>
     </section>
@@ -82,19 +61,7 @@ export interface OutlineItem {
   line: number;
 }
 
-export function ContextPanel({
-  note,
-  outline,
-  backlinks,
-  mentions,
-  onOpen,
-  onCopy,
-  onAliases,
-  onOutline,
-  onClose,
-  onLink,
-  panels = [],
-}: {
+export function ContextPanel({ note, outline, backlinks, mentions, onOpen, onCopy, onAliases, onOutline, onClose, onLink, panels = [] }: {
   note: NoteDocument;
   outline: OutlineItem[];
   backlinks: Backlink[];
@@ -155,201 +122,81 @@ export function ContextPanel({
     }
   }
 
-  const sectionKeys = [
-    "properties",
-    "aliases",
-    "outline",
-    "backlinks",
-    "mentions",
-    ...panels.map((panel) => `plugin:${panel.pluginId}`),
-  ];
+  const sectionKeys = ["properties", "aliases", "outline", "backlinks", "mentions", ...panels.map((panel) => `plugin:${panel.pluginId}`)];
   const everyFolded = sectionKeys.every((key) => folded[key]);
 
-  return (
-    <aside className="context-panel">
-      <header className="context-panel-bar">
+  return <aside className="context-panel">
+    <header className="context-panel-bar">
+      <button
+        type="button"
+        className="context-panel-action"
+        onClick={toggleAll}
+        aria-label={everyFolded ? "Expand every section" : "Collapse every section"}
+        title={everyFolded ? "Expand every section" : "Collapse every section"}
+      >{everyFolded ? <ChevronsUpDown size={15} /> : <ChevronsDownUp size={15} />}</button>
+      <button
+        type="button"
+        className="context-panel-action"
+        onClick={onClose}
+        aria-label="Hide the context panel"
+        title="Hide the context panel"
+      ><PanelRightClose size={15} /></button>
+    </header>
+    <Section label="PROPERTIES" badge={<i>{Object.keys(note.properties).length}</i>} folded={!!folded.properties} onToggle={() => toggle("properties")}>
+      <dl className="property-list">{Object.entries(note.properties).map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{String(value)}</dd>
+        <button className="property-copy" aria-label={`Copy ${key}`} title="Copy to a self-clearing clipboard" onClick={() => onCopy(key, String(value))}><Copy size={11} /></button>
+      </div>)}</dl>
+      <div className="tag-list">{note.tags.map((tag) => <span key={tag}><Hash size={11} />{tag}</span>)}</div>
+    </Section>
+
+    <Section label="ALIASES" badge={<i>{note.aliases.length}</i>} folded={!!folded.aliases} onToggle={() => toggle("aliases")}>
+      <div className="alias-list">{note.aliases.map((alias) => <span key={alias}><Tag size={11} />{alias}
+        <button aria-label={`Remove alias ${alias}`} onClick={() => onAliases(note.aliases.filter((item) => item !== alias))}><X size={11} /></button>
+      </span>)}</div>
+      <div className="alias-add">
+        <input
+          aria-label="New alias"
+          value={draft}
+          placeholder="Another name for this note…"
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); addAlias(); } }}
+        />
+        <button onClick={addAlias} aria-label="Add alias"><Plus size={13} /></button>
+      </div>
+      <p className="context-hint">A note answers to every alias in search, links and the switcher.</p>
+    </Section>
+
+    <Section label="OUTLINE" badge={<i>{outline.length}</i>} folded={!!folded.outline} onToggle={() => toggle("outline")}>
+      <ol className="outline-list">{outline.map((item, index) => <li key={`${item.text}-${index}`} style={{ paddingLeft: `${(item.level - 1) * 12}px` }}>
+        <button type="button" onClick={() => onOutline(item, index)}>{item.text}</button>
+      </li>)}</ol>
+    </Section>
+
+    <Section label="BACKLINKS" badge={<i>{backlinks.length}</i>} folded={!!folded.backlinks} onToggle={() => toggle("backlinks")}>
+      <div className="backlink-list">{backlinks.length ? backlinks.map((item) => <button key={item.id} onClick={() => onOpen(item.id)}><Link2 size={13} /><span><b>{item.title}</b><small>{item.path}</small></span></button>) : <p>No notes point here yet.</p>}</div>
+    </Section>
+
+    <Section label="UNLINKED MENTIONS" badge={<i>{mentions.length}</i>} folded={!!folded.mentions} onToggle={() => toggle("mentions")}>
+      {error && <p className="context-error" role="alert">{error}</p>}
+      <div className="mention-list">{mentions.length ? mentions.map((mention) => <div key={mention.id} className="mention">
+        <button className="mention-open" onClick={() => onOpen(mention.id)}><Sparkles size={13} /><span><b>{mention.title}</b><small>{mention.excerpt}</small></span></button>
         <button
-          type="button"
-          className="context-panel-action"
-          onClick={toggleAll}
-          aria-label={everyFolded ? "Expand every section" : "Collapse every section"}
-          title={everyFolded ? "Expand every section" : "Collapse every section"}
-        >
-          {everyFolded ? <ChevronsUpDown size={15} /> : <ChevronsDownUp size={15} />}
-        </button>
-        <button
-          type="button"
-          className="context-panel-action"
-          onClick={onClose}
-          aria-label="Hide the context panel"
-          title="Hide the context panel"
-        >
-          <PanelRightClose size={15} />
-        </button>
-      </header>
-      <Section
-        label="PROPERTIES"
-        badge={<i>{Object.keys(note.properties).length}</i>}
-        folded={!!folded.properties}
-        onToggle={() => toggle("properties")}
-      >
-        <dl className="property-list">
-          {Object.entries(note.properties).map(([key, value]) => (
-            <div key={key}>
-              <dt>{key}</dt>
-              <dd>{String(value)}</dd>
-              <button
-                className="property-copy"
-                aria-label={`Copy ${key}`}
-                title="Copy to a self-clearing clipboard"
-                onClick={() => onCopy(key, String(value))}
-              >
-                <Copy size={11} />
-              </button>
-            </div>
-          ))}
-        </dl>
-        <div className="tag-list">
-          {note.tags.map((tag) => (
-            <span key={tag}>
-              <Hash size={11} />
-              {tag}
-            </span>
-          ))}
-        </div>
-      </Section>
+          className="mention-link"
+          disabled={linking === mention.id}
+          onClick={() => void link(mention.id)}
+          aria-label={`Link ${mention.count} mention${mention.count === 1 ? "" : "s"} in ${mention.title}`}
+        >{linking === mention.id ? "Linking…" : `Link ${mention.count}×`}</button>
+      </div>) : <p>Nothing names this note in passing.</p>}</div>
+    </Section>
 
-      <Section
-        label="ALIASES"
-        badge={<i>{note.aliases.length}</i>}
-        folded={!!folded.aliases}
-        onToggle={() => toggle("aliases")}
-      >
-        <div className="alias-list">
-          {note.aliases.map((alias) => (
-            <span key={alias}>
-              <Tag size={11} />
-              {alias}
-              <button
-                aria-label={`Remove alias ${alias}`}
-                onClick={() => onAliases(note.aliases.filter((item) => item !== alias))}
-              >
-                <X size={11} />
-              </button>
-            </span>
-          ))}
-        </div>
-        <div className="alias-add">
-          <input
-            aria-label="New alias"
-            value={draft}
-            placeholder="Another name for this note…"
-            onChange={(event) => setDraft(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                addAlias();
-              }
-            }}
-          />
-          <button onClick={addAlias} aria-label="Add alias">
-            <Plus size={13} />
-          </button>
-        </div>
-        <p className="context-hint">A note answers to every alias in search, links and the switcher.</p>
-      </Section>
-
-      <Section
-        label="OUTLINE"
-        badge={<i>{outline.length}</i>}
-        folded={!!folded.outline}
-        onToggle={() => toggle("outline")}
-      >
-        <ol className="outline-list">
-          {outline.map((item, index) => (
-            <li key={`${item.text}-${index}`} style={{ paddingLeft: `${(item.level - 1) * 12}px` }}>
-              <button type="button" onClick={() => onOutline(item, index)}>
-                {item.text}
-              </button>
-            </li>
-          ))}
-        </ol>
-      </Section>
-
-      <Section
-        label="BACKLINKS"
-        badge={<i>{backlinks.length}</i>}
-        folded={!!folded.backlinks}
-        onToggle={() => toggle("backlinks")}
-      >
-        <div className="backlink-list">
-          {backlinks.length ? (
-            backlinks.map((item) => (
-              <button key={item.id} onClick={() => onOpen(item.id)}>
-                <Link2 size={13} />
-                <span>
-                  <b>{item.title}</b>
-                  <small>{item.path}</small>
-                </span>
-              </button>
-            ))
-          ) : (
-            <p>No notes point here yet.</p>
-          )}
-        </div>
-      </Section>
-
-      <Section
-        label="UNLINKED MENTIONS"
-        badge={<i>{mentions.length}</i>}
-        folded={!!folded.mentions}
-        onToggle={() => toggle("mentions")}
-      >
-        {error && (
-          <p className="context-error" role="alert">
-            {error}
-          </p>
-        )}
-        <div className="mention-list">
-          {mentions.length ? (
-            mentions.map((mention) => (
-              <div key={mention.id} className="mention">
-                <button className="mention-open" onClick={() => onOpen(mention.id)}>
-                  <Sparkles size={13} />
-                  <span>
-                    <b>{mention.title}</b>
-                    <small>{mention.excerpt}</small>
-                  </span>
-                </button>
-                <button
-                  className="mention-link"
-                  disabled={linking === mention.id}
-                  onClick={() => void link(mention.id)}
-                  aria-label={`Link ${mention.count} mention${mention.count === 1 ? "" : "s"} in ${mention.title}`}
-                >
-                  {linking === mention.id ? "Linking…" : `Link ${mention.count}×`}
-                </button>
-              </div>
-            ))
-          ) : (
-            <p>Nothing names this note in passing.</p>
-          )}
-        </div>
-      </Section>
-
-      {panels.map((panel) => (
-        <Section
-          key={panel.pluginId}
-          label={panel.title.toUpperCase()}
-          badge={<Puzzle size={12} />}
-          folded={!!folded[`plugin:${panel.pluginId}`]}
-          onToggle={() => toggle(`plugin:${panel.pluginId}`)}
-        >
-          <pre className="plugin-panel" title={`Contributed by ${panel.pluginName}`}>
-            {panel.body}
-          </pre>
-        </Section>
-      ))}
-    </aside>
-  );
+    {panels.map((panel) => <Section
+      key={panel.pluginId}
+      label={panel.title.toUpperCase()}
+      badge={<Puzzle size={12} />}
+      folded={!!folded[`plugin:${panel.pluginId}`]}
+      onToggle={() => toggle(`plugin:${panel.pluginId}`)}
+    >
+      <pre className="plugin-panel" title={`Contributed by ${panel.pluginName}`}>{panel.body}</pre>
+    </Section>)}
+  </aside>;
 }

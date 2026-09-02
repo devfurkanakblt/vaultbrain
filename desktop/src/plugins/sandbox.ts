@@ -28,9 +28,12 @@
  * has no name for. All it can reach is the frozen bridge left on `self`.
  */
 export function sandboxSource(pluginSource: string): string {
-  return [`(${bootstrap.toString()})();`, ";(function (vbrain) {", pluginSource, "\n})(self.__vbrainBridge);"].join(
-    "\n",
-  );
+  return [
+    `(${bootstrap.toString()})();`,
+    ";(function (vbrain) {",
+    pluginSource,
+    "\n})(self.__vbrainBridge);",
+  ].join("\n");
 }
 
 function bootstrap() {
@@ -69,7 +72,10 @@ function bootstrap() {
   }
 
   let nextId = 1;
-  const pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
+  const pending = new Map<
+    number,
+    { resolve: (value: unknown) => void; reject: (error: Error) => void }
+  >();
   const commands = new Map<string, () => unknown>();
 
   const port = self as unknown as {
@@ -171,6 +177,6 @@ function bootstrap() {
       kind: "emit",
       event: "ready",
       payload: { sandboxIncomplete: scope.__vbrainSandboxIncomplete === true },
-    }),
+    })
   );
 }
