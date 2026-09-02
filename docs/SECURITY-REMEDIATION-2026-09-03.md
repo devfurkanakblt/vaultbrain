@@ -10,7 +10,7 @@ Bu belge `SECURITY-AUDIT-2026-09-02.md` bulgularına uygulanan düzeltmeleri ve 
 | SEC-02 | Kapandı                 | Her eklenti örneğine Rust tarafından token verilir. Her ayrıcalıklı çağrıda plugin kimliği, revision, enabled durumu, signer policy ve capability diskten yeniden doğrulanır.                                                                                                                                                                                            |
 | SEC-03 | Kapandı                 | HTML/SVG/PDF/audio/video iframe önizlemesi kaldırıldı. Yalnızca magic-byte doğrulanmış raster görseller ve React tarafından metin olarak render edilen sınırlı plaintext türleri inline gösterilir. İndirme `application/octet-stream` kullanır.                                                                                                                         |
 | SEC-04 | Kapandı                 | Grant dosyası olmayan kasa MCP için varsayılan reddedilir. `mcp --agent` zorunludur ve agent'ın grant policy içinde bulunması gerekir.                                                                                                                                                                                                                                   |
-| SEC-05 | Kapılı / mimari iş açık | Sync yalnızca açık `--experimental-trusted-sync` onayıyla çalışır. Change byte/count/depth/parent/toplam-store limitleri ve eklenti paket/politika transaction capture+apply desteği eklendi. Device enrollment, asymmetric identity, revocation, epoch rotation ve güvenilir freshness checkpoint henüz uygulanmadı.                                                    |
+| SEC-05 | Büyük ölçüde azaltıldı / kapılı | Sync yalnızca açık `--experimental-trusted-sync` onayıyla çalışır. Change limitleri ve eklenti transaction capture+apply yanında owner-signed Ed25519 enrollment, ayrı cihaz anahtarıyla change imzası, authority pinning, registry rollback reddi ve sequence-bounded revocation eklendi. Epoch tabanlı content-key rotation ile güvenilir freshness checkpoint henüz uygulanmadı. |
 | SEC-06 | Büyük ölçüde azaltıldı  | Append kasa kilidiyle serileştirildi; HMAC'li head/sayaç, log veya head silme-truncate kontrolü, boyut limitleri ve süreli/zeroize edilen key cache eklendi. Tüm audit artefact'larının birlikte silinmesini kanıtlayacak harici sealed head/OS event log hâlâ gerekir.                                                                                                  |
 | SEC-07 | Kapandı                 | Discovery catalog `schema.enc` olarak şifrelenir. Başarılı index rebuild eski `schema.json` dosyasını kaldırır.                                                                                                                                                                                                                                                          |
 | SEC-08 | Kısmi                   | Yeni kasalarda en az 12 karakter, basit common/repetition kontrolü ve 1024 karakter üst sınırı uygulanır. Yeni scrypt work factor `N=65536`; eski `N=32768` kasalar okunur. Argon2id benchmark, kapsamlı breached-password kontrolü ve otomatik rewrap migration ayrıca tasarlanmalıdır.                                                                                 |
@@ -23,7 +23,7 @@ Bu belge `SECURITY-AUDIT-2026-09-02.md` bulgularına uygulanan düzeltmeleri ve 
 
 ## Doğrulama
 
-- `npm run quality`: lint, format, TypeScript, **99 Node testi**, **83 desktop testi** ve production UI build geçti.
+- `npm run quality`: lint, format, TypeScript, **103 Node testi**, **83 desktop testi** ve production UI build geçti.
 - `npm run quality:rust`: clippy `-D warnings` ve **41 Rust testi** geçti.
 - Son değişikliklerden sonra temiz Rust hedefinde clippy `-D warnings` ve **41 Rust testinin tamamı** tekrar geçti.
 - `npm audit --audit-level=high`: **0 vulnerability**.
@@ -32,4 +32,4 @@ Bu belge `SECURITY-AUDIT-2026-09-02.md` bulgularına uygulanan düzeltmeleri ve 
 
 ## Release engelleri
 
-Güvenilmeyen relay/multi-device sync güvenli ilan edilmemelidir. Authenticode olmadan Windows installer “publisher-signed” olarak dağıtılmamalıdır. SEC-05'in cihaz güven modeli ve SEC-06'nın harici sealed-head tasarımı ayrı threat-model/design çalışması gerektirir.
+Güvenilmeyen relay/multi-device sync, epoch rotation ve harici freshness checkpoint tamamlanmadan güvenli ilan edilmemelidir. Authenticode olmadan Windows installer “publisher-signed” olarak dağıtılmamalıdır. SEC-06'nın harici sealed-head tasarımı ayrı threat-model/design çalışması gerektirir.

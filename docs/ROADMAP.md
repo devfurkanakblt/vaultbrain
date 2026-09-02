@@ -74,7 +74,10 @@ Each phase must ship a usable vertical slice and keep older vaults readable.
   - [x] Content-addressed encrypted envelopes, device chains, causal DAG validation and deterministic conflict inspection
   - [x] Emit changes automatically from note/canvas/attachment transactions and apply resolved remote changes to live storage
   - [x] Capture plugin package and plugin-policy transactions
-- [ ] Device enrollment, removal and key rotation
+- [x] Owner-signed device enrollment and sequence-bounded removal
+  - [x] Ed25519 proof-of-possession requests, signed certificates and encrypted registry exchange
+  - [x] Per-change device signatures, authority pinning, rollback rejection and revocation cutoffs
+- [ ] Epoch-based content-key rotation and trusted freshness checkpoints
 - [ ] Untrusted relay server and self-hosted option
 - [ ] Desktop multi-device release, then iOS/Android clients
 - [ ] External security audit, recovery drill and stable 1.0 format

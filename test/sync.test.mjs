@@ -7,6 +7,7 @@ import test from "node:test";
 import { openDocumentKey } from "../dist/document-crypto.js";
 import {
   SyncChangeLog,
+  SyncDeviceManager,
   SyncedDocumentVault,
   canonicalSyncJson,
   openSyncChange,
@@ -87,6 +88,168 @@ test("the local log appends an immutable encrypted device chain", () => {
   assert.equal(fs.readdirSync(changeDir).length, 2);
   log.close();
   assert.throws(() => log.changes(), /closed/iu);
+  fs.rmSync(vaultDir, { recursive: true, force: true });
+});
+
+test("owner-signed enrollment gives a second device a distinct signing identity", () => {
+  const ownerDir = tempVault("device-owner");
+  const ownerManager = new SyncDeviceManager(ownerDir, PASSPHRASE);
+  const initialized = ownerManager.initializeOwner("Owner laptop", DEVICE_A, "2026-09-03T08:00:00.000Z");
+  assert.equal(initialized.body.devices[0].certificate.deviceId, DEVICE_A);
+  const fingerprint = ownerManager.fingerprint();
+  assert.match(fingerprint, /^[a-f0-9]{64}$/u);
+  const initialRegistry = ownerManager.exportRegistry();
+  assert.doesNotMatch(JSON.stringify(initialRegistry), /Owner laptop/u);
+
+  const ownerLog = new SyncChangeLog(ownerDir, PASSPHRASE);
+  const ownerChange = ownerLog.append(
+    DEVICE_A,
+    noteMutation(null, 1, "owner change"),
+    "2026-09-03T08:01:00.000Z",
+  );
+  assert.equal(ownerChange.version, 2);
+  assert.equal(ownerChange.authorization.certificateSerial, 1);
+  ownerLog.close();
+
+  const secondDir = tempVault("device-second");
+  fs.rmSync(secondDir, { recursive: true, force: true });
+  fs.cpSync(ownerDir, secondDir, { recursive: true });
+  fs.rmSync(path.join(secondDir, "documents", "sync", "identity", "authority.key.enc"));
+  fs.rmSync(path.join(secondDir, "documents", "sync", "identity", `${DEVICE_A}.key.enc`));
+
+  const secondManager = new SyncDeviceManager(secondDir, PASSPHRASE);
+  const request = secondManager.createEnrollmentRequest(
+    "Travel laptop",
+    DEVICE_B,
+    "2026-09-03T08:02:00.000Z",
+  );
+  assert.doesNotMatch(JSON.stringify(request), /PRIVATE KEY/u);
+  assert.throws(() => ownerManager.enroll({ ...request, name: "Tampered" }), /proof verification failed/iu);
+  const enrolled = ownerManager.enroll(request, "2026-09-03T08:03:00.000Z");
+  assert.equal(enrolled.body.devices.length, 2);
+  secondManager.importRegistry(ownerManager.exportRegistry());
+  assert.throws(() => secondManager.importRegistry(initialRegistry), /rollback/iu);
+
+  const secondLog = new SyncChangeLog(secondDir, PASSPHRASE);
+  const secondChange = secondLog.append(
+    DEVICE_B,
+    noteMutation(1, 2, "second device change"),
+    "2026-09-03T08:04:00.000Z",
+  );
+  assert.equal(secondChange.version, 2);
+  assert.equal(secondChange.authorization.certificateSerial, 2);
+
+  const ownerReceiver = new SyncChangeLog(ownerDir, PASSPHRASE);
+  assert.deepEqual(ownerReceiver.import(secondLog.envelopes()), { imported: 1, existing: 1 });
+  assert.equal(ownerReceiver.verify().devices, 2);
+
+  ownerReceiver.close();
+  secondLog.close();
+  secondManager.close();
+  ownerManager.close();
+  fs.rmSync(ownerDir, { recursive: true, force: true });
+  fs.rmSync(secondDir, { recursive: true, force: true });
+});
+
+test("enrollment freezes the exact verified legacy history before requiring signatures", () => {
+  const vaultDir = tempVault("device-legacy-migration");
+  const legacyLog = new SyncChangeLog(vaultDir, PASSPHRASE);
+  const legacy = legacyLog.append(
+    DEVICE_A,
+    noteMutation(null, 1, "legacy"),
+    "2026-09-03T08:30:00.000Z",
+  );
+  legacyLog.close();
+
+  const manager = new SyncDeviceManager(vaultDir, PASSPHRASE);
+  const registry = manager.initializeOwner("Owner", DEVICE_A, "2026-09-03T08:31:00.000Z");
+  assert.deepEqual(registry.body.legacyChangeIds, [legacy.id]);
+
+  const signedLog = new SyncChangeLog(vaultDir, PASSPHRASE);
+  const signed = signedLog.append(
+    DEVICE_A,
+    noteMutation(1, 2, "signed"),
+    "2026-09-03T08:32:00.000Z",
+  );
+  assert.equal(signed.version, 2);
+  assert.equal(signedLog.verify().changes, 2);
+
+  signedLog.close();
+  manager.close();
+  fs.rmSync(vaultDir, { recursive: true, force: true });
+});
+
+test("a revoked device cannot append locally or import a withheld post-cutoff change", () => {
+  const ownerDir = tempVault("revoke-owner");
+  const ownerManager = new SyncDeviceManager(ownerDir, PASSPHRASE);
+  ownerManager.initializeOwner("Owner", DEVICE_A, "2026-09-03T09:00:00.000Z");
+
+  const secondDir = tempVault("revoke-second");
+  fs.rmSync(secondDir, { recursive: true, force: true });
+  fs.cpSync(ownerDir, secondDir, { recursive: true });
+  fs.rmSync(path.join(secondDir, "documents", "sync", "identity", "authority.key.enc"));
+  fs.rmSync(path.join(secondDir, "documents", "sync", "identity", `${DEVICE_A}.key.enc`));
+  const secondManager = new SyncDeviceManager(secondDir, PASSPHRASE);
+  const request = secondManager.createEnrollmentRequest("Second", DEVICE_B, "2026-09-03T09:01:00.000Z");
+  ownerManager.enroll(request, "2026-09-03T09:02:00.000Z");
+  secondManager.importRegistry(ownerManager.exportRegistry());
+
+  const secondLog = new SyncChangeLog(secondDir, PASSPHRASE);
+  secondLog.append(DEVICE_B, noteMutation(null, 1, "accepted"), "2026-09-03T09:03:00.000Z");
+  const ownerLog = new SyncChangeLog(ownerDir, PASSPHRASE);
+  ownerLog.import(secondLog.envelopes());
+  ownerManager.revoke(DEVICE_B, 1, "2026-09-03T09:04:00.000Z");
+
+  const withheld = secondLog.append(
+    DEVICE_B,
+    noteMutation(1, 2, "withheld after revocation"),
+    "2026-09-03T09:05:00.000Z",
+  );
+  assert.equal(withheld.sequence, 2, "the stale device has not received the revocation yet");
+  assert.throws(() => ownerLog.import(secondLog.envelopes()), /revoked after sequence 1/iu);
+  secondManager.importRegistry(ownerManager.exportRegistry());
+  assert.throws(
+    () => secondLog.append(DEVICE_B, noteMutation(2, 3, "blocked locally")),
+    /revoked/iu,
+  );
+
+  ownerLog.close();
+  secondLog.close();
+  secondManager.close();
+  ownerManager.close();
+  fs.rmSync(ownerDir, { recursive: true, force: true });
+  fs.rmSync(secondDir, { recursive: true, force: true });
+});
+
+test("a stolen vault key cannot forge an enrolled device signature", () => {
+  const vaultDir = tempVault("device-forgery");
+  const manager = new SyncDeviceManager(vaultDir, PASSPHRASE);
+  manager.initializeOwner("Owner", DEVICE_A, "2026-09-03T10:00:00.000Z");
+  const log = new SyncChangeLog(vaultDir, PASSPHRASE);
+  const first = log.append(DEVICE_A, noteMutation(null, 1, "signed"), "2026-09-03T10:01:00.000Z");
+  const session = openDocumentKey(vaultDir, PASSPHRASE);
+  const forged = sealSyncChange(
+    {
+      version: 2,
+      deviceId: DEVICE_A,
+      sequence: 2,
+      previousDeviceChange: first.id,
+      parents: [first.id],
+      createdAt: "2026-09-03T10:02:00.000Z",
+      mutation: noteMutation(1, 2, "forged with only the vault key"),
+      authorization: {
+        certificateSerial: 1,
+        signature: Buffer.alloc(64).toString("base64"),
+      },
+    },
+    session.key,
+  );
+  assert.throws(() => log.import([forged]), /invalid device signature/iu);
+  assert.equal(log.envelopes().length, 1);
+
+  session.key.fill(0);
+  log.close();
+  manager.close();
   fs.rmSync(vaultDir, { recursive: true, force: true });
 });
 

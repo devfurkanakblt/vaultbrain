@@ -523,8 +523,9 @@ daily-notes view, but without reading your notes to build it.
 
 Sync remains transport-independent: an append-only encrypted change log with
 per-device chains, causal parents and explicit conflict inspection. Exported
-JSON contains only keyed opaque IDs and AES-GCM ciphertext, suitable for copying
-between trusted devices or storing on an untrusted relay in a later slice.
+JSON contains only keyed opaque IDs and AES-GCM ciphertext. Enrolled devices
+sign every new change with a separate Ed25519 key; the owner-signed encrypted
+registry pins device certificates and revocation sequence cutoffs.
 
 Pass `--sync-device <uuid>` to a document or plugin command to capture its note,
 canvas, attachment, plugin-package or plugin-policy mutation automatically. A
@@ -533,30 +534,46 @@ so conflict-free remote changes can be replayed into the real vault exactly
 once.
 
 ```bash
-# Generate and persist this ID in your device configuration.
-sbrain sync device-id
+# Initialize enrollment and pin the returned authority fingerprint.
+sbrain --experimental-trusted-sync sync devices init "Owner laptop" \
+  --device-id <device-id>
+
+# On a securely bootstrapped second device, create a proof-of-possession request.
+sbrain --experimental-trusted-sync sync devices request "Travel laptop" \
+  --device-id <second-device-id> > enrollment-request.json
+
+# The owner approves it, then transfers the newer encrypted registry back.
+sbrain --experimental-trusted-sync sync devices enroll enrollment-request.json
+sbrain --experimental-trusted-sync sync devices export > device-registry.json
+sbrain --experimental-trusted-sync sync devices import device-registry.json
+
+# Removal is owner-signed at the last device sequence observed locally.
+sbrain --experimental-trusted-sync sync devices revoke <second-device-id>
 
 # Record revision 1 of one logical object.
-sbrain sync append <device-id> note <note-id> put \
+sbrain --experimental-trusted-sync sync append <device-id> note <note-id> put \
   --revision 1 --value '{"title":"Plan","body":"private"}'
 
 # Exchange opaque envelopes through files/stdout.
-sbrain sync export > changes.json
-sbrain sync import changes.json
+sbrain --experimental-trusted-sync sync export > changes.json
+sbrain --experimental-trusted-sync sync import changes.json
 
 # Validate the complete DAG, inspect concurrent heads, then apply a clean one.
-sbrain sync verify
-sbrain sync resolve note <note-id>
-sbrain sync apply note <note-id>
+sbrain --experimental-trusted-sync sync verify
+sbrain --experimental-trusted-sync sync resolve note <note-id>
+sbrain --experimental-trusted-sync sync apply note <note-id>
 
 # Example automatically captured edit.
-sbrain --sync-device <device-id> docs put Plans/Launch.md --body "Ready"
+sbrain --experimental-trusted-sync --sync-device <device-id> \
+  docs put Plans/Launch.md --body "Ready"
 ```
 
 Unresolved heads fail before live storage is touched. Synchronized attachment
 snapshots currently share the 8 MiB change limit (about 6 MiB of raw bytes);
-larger blob transport, device enrollment and key rotation,
-relay transport and mobile clients remain Phase 6 work. See the
+larger blob transport, epoch content-key rotation, independently witnessed
+freshness, relay transport and mobile clients remain Phase 6 work. A full vault
+copy must never carry another device's `documents/sync/identity` directory;
+private identity keys are local-only and are absent from sync exports. See the
 [sync protocol design](docs/superpowers/specs/2026-08-31-encrypted-sync-change-protocol-design.md)
 for the format and conflict rules.
 
@@ -593,9 +610,10 @@ cost scales with the number of _keys_, not the size of your notes.
 ## Roadmap
 
 Phases 0–5 are implemented. Phase 6 now has the encrypted immutable change log
-and live note/canvas/attachment/plugin-package/plugin-policy capture and application;
-enrollment/key rotation, relay transport, multi-device desktop and mobile
-remain. The maintained checklist is in [`docs/ROADMAP.md`](docs/ROADMAP.md).
+and live note/canvas/attachment/plugin-package/plugin-policy capture and
+application, plus owner-signed device enrollment and removal. Epoch key
+rotation, relay transport, multi-device desktop and mobile remain. The
+maintained checklist is in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## License
 

@@ -35,11 +35,13 @@ import { generatePluginSigningKey, signPluginPackage } from "./plugin-signatures
 import { DocumentVault, type PropertyValue } from "./documents.js";
 import { OllamaLocalModelAdapter } from "./semantic.js";
 import { importObsidianVault } from "./obsidian-import.js";
-import { writeFileAtomic } from "./fs-safe.js";
+import { readTextFileLimited, writeFileAtomic } from "./fs-safe.js";
 import {
   SyncChangeLog,
+  SyncDeviceManager,
   SyncedDocumentVault,
   type EncryptedSyncChange,
+  type EncryptedSyncDeviceRegistry,
   type SyncJson,
   type SyncMutation,
   type SyncObjectType,
@@ -738,8 +740,161 @@ sync.hook("preAction", () => {
 
 sync
   .command("device-id")
-  .description("generate a new local device identity (enrollment is added in the next slice)")
+  .description("generate a UUID for legacy trusted-device sync")
   .action(() => console.log(crypto.randomUUID()));
+
+const syncDevices = sync
+  .command("devices")
+  .description("owner-signed device enrollment, registry exchange and revocation");
+
+syncDevices
+  .command("init <name>")
+  .description("create the enrollment authority and enroll this first device")
+  .option("--device-id <uuid>", "use an existing local device UUID")
+  .action(async (name, opts) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const manager = new SyncDeviceManager(dir, passphrase);
+    try {
+      const registry = manager.initializeOwner(name, opts.deviceId);
+      console.log(
+        JSON.stringify(
+          {
+            deviceId: registry.body.devices[0].certificate.deviceId,
+            authorityFingerprint: manager.fingerprint(),
+            registryRevision: registry.body.revision,
+            legacyChanges: registry.body.legacyChangeIds.length,
+          },
+          null,
+          2,
+        ),
+      );
+    } finally {
+      manager.close();
+    }
+  });
+
+syncDevices
+  .command("request <name>")
+  .description("create a proof-of-possession enrollment request and retain its private key locally")
+  .option("--device-id <uuid>", "use an existing local device UUID")
+  .action(async (name, opts) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const manager = new SyncDeviceManager(dir, passphrase);
+    try {
+      process.stdout.write(`${JSON.stringify(manager.createEnrollmentRequest(name, opts.deviceId), null, 2)}\n`);
+    } finally {
+      manager.close();
+    }
+  });
+
+syncDevices
+  .command("enroll <request>")
+  .description("verify and owner-sign a device enrollment request")
+  .action(async (source) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const parsed: unknown = JSON.parse(
+      readTextFileLimited(path.resolve(source), 64 * 1024, "Sync enrollment request"),
+    );
+    const manager = new SyncDeviceManager(dir, passphrase);
+    try {
+      const registry = manager.enroll(parsed);
+      const requestId = (parsed as { deviceId?: unknown }).deviceId;
+      const enrolled = registry.body.devices.find(
+        (record) => record.certificate.deviceId === requestId,
+      );
+      if (!enrolled) throw new Error("Enrolled device is missing from the updated registry.");
+      console.log(
+        `Enrolled ${enrolled.certificate.name} (${enrolled.certificate.deviceId}); registry revision ${registry.body.revision}.`,
+      );
+    } finally {
+      manager.close();
+    }
+  });
+
+syncDevices
+  .command("list")
+  .description("list enrolled and revoked device certificates")
+  .action(async () => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const manager = new SyncDeviceManager(dir, passphrase);
+    try {
+      const registry = manager.state();
+      if (!registry) throw new Error("Sync device enrollment is not initialized.");
+      console.log(`Authority ${manager.fingerprint()} — registry revision ${registry.body.revision}`);
+      for (const record of registry.body.devices) {
+        console.log(
+          `${record.certificate.deviceId}  ${record.certificate.name}  serial=${record.certificate.serial}  ${record.revokedAt ? `revoked-after=${record.revokedAfterSequence}` : "active"}`,
+        );
+      }
+    } finally {
+      manager.close();
+    }
+  });
+
+syncDevices
+  .command("export")
+  .description("write the encrypted owner-signed device registry bundle to stdout")
+  .action(async () => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const manager = new SyncDeviceManager(dir, passphrase);
+    try {
+      process.stdout.write(`${JSON.stringify(manager.exportRegistry(), null, 2)}\n`);
+    } finally {
+      manager.close();
+    }
+  });
+
+syncDevices
+  .command("import <source>")
+  .description("verify and install a newer owner-signed device registry")
+  .option("--authority <sha256>", "expected authority fingerprint for the first import")
+  .action(async (source, opts) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const parsed: unknown = JSON.parse(
+      readTextFileLimited(path.resolve(source), 12 * 1024 * 1024, "Sync device registry bundle"),
+    );
+    const manager = new SyncDeviceManager(dir, passphrase);
+    try {
+      const registry = manager.importRegistry(
+        parsed as EncryptedSyncDeviceRegistry,
+        opts.authority,
+      );
+      console.log(`Installed device registry revision ${registry.body.revision}.`);
+    } finally {
+      manager.close();
+    }
+  });
+
+syncDevices
+  .command("revoke <device-id>")
+  .description("owner-sign a revocation at the last observed device sequence")
+  .action(async (deviceId) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const log = new SyncChangeLog(dir, passphrase);
+    let cutoff: number;
+    try {
+      cutoff = Math.max(
+        0,
+        ...log.changes().filter((change) => change.deviceId === deviceId).map((change) => change.sequence),
+      );
+    } finally {
+      log.close();
+    }
+    const manager = new SyncDeviceManager(dir, passphrase);
+    try {
+      const registry = manager.revoke(deviceId, cutoff);
+      console.log(`Revoked ${deviceId} after sequence ${cutoff}; registry revision ${registry.body.revision}.`);
+    } finally {
+      manager.close();
+    }
+  });
 
 sync
   .command("append <device-id> <object-type> <object-id> <operation>")
@@ -852,19 +1007,16 @@ sync
 
 sync
   .command("apply <object-type> <object-id>")
-  .description("apply one conflict-free note, canvas or attachment history to live vault storage")
+  .description("apply one conflict-free supported object history to live vault storage")
   .action(async (objectType, objectId) => {
-    if (objectType !== "note" && objectType !== "canvas" && objectType !== "attachment") {
-      throw new Error("Sync apply supports note, canvas and attachment objects only.");
+    if (!["note", "canvas", "attachment", "plugin", "vault"].includes(objectType)) {
+      throw new Error("Unsupported sync object type.");
     }
     const dir = program.opts().vault;
     const passphrase = await getPassphrase({ vaultDir: dir });
     const vault = new SyncedDocumentVault(dir, passphrase);
     try {
-      const result = vault.applyResolved(
-        objectType,
-        objectId,
-      );
+      const result = vault.applyResolved(objectType as SyncObjectType, objectId);
       console.log(
         result.alreadyApplied
           ? `Already applied ${objectType}:${objectId}@${result.revision}.`
