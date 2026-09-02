@@ -18,7 +18,6 @@ use sha2::{Digest, Sha256};
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 use std::{
-    cmp::Reverse,
     collections::{HashMap, HashSet},
     fs::{self, OpenOptions},
     io::Write,
