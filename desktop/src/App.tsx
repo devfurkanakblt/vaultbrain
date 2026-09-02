@@ -336,6 +336,7 @@ export function App() {
   const [workspacesOpen, setWorkspacesOpen] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [rightOpen, setRightOpen] = useState(true);
+  const [entering, setEntering] = useState(false);
   const [expanded, setExpanded] = useState(new Set<string>());
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
