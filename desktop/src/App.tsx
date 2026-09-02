@@ -657,6 +657,20 @@ export function App() {
     return () => window.clearTimeout(saveTimer.current);
   }, [active?.body, active?.title, saveNow, saveState]);
 
+  // Two frames let the note-entry transition begin from a painted state.
+  useEffect(() => {
+    if (!active?.id) return;
+    setEntering(true);
+    let release = 0;
+    const paint = window.requestAnimationFrame(() => {
+      release = window.requestAnimationFrame(() => setEntering(false));
+    });
+    return () => {
+      window.cancelAnimationFrame(paint);
+      window.cancelAnimationFrame(release);
+    };
+  }, [active?.id]);
+
   useEffect(() => {
     if (!notice) return;
     const timer = window.setTimeout(() => setNotice(""), 4200);
@@ -1212,7 +1226,7 @@ export function App() {
           )}
 
           <div className={`stage-panes ${secondary ? "is-split" : ""}`}>
-            <article className="stage-pane" aria-label="Primary pane">
+            <article className={`stage-pane ${entering ? "is-entering" : ""}`} aria-label="Primary pane">
               {active ? (
                 <>
                   <div className="document-toolbar">
@@ -1291,9 +1305,9 @@ export function App() {
                 </>
               ) : (
                 <div className="empty-stage">
-                  <BookOpen size={34} />
+                  <BookOpen size={32} strokeWidth={1.25} />
                   <h2>The archive is quiet.</h2>
-                  <p>Create a note to begin.</p>
+                  <p>Select a note to begin.</p>
                 </div>
               )}
             </article>
@@ -1407,6 +1421,8 @@ export function App() {
           <PanelRightOpen size={15} />
         </button>
       )}
+
+      {workspaceView === "notes" && !active && <div className="context-reserve" aria-hidden="true" />}
 
       {notice && (
         <div className="toast" role="status">

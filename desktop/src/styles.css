@@ -16,6 +16,8 @@
   --font-editor: "Newsreader Variable", serif;
   --font-mono: "IBM Plex Mono", monospace;
   --reading-size: 17px;
+  --radius: 5px;
+  --radius-sm: 3px;
   color: var(--ink);
   font-family: var(--font-ui);
   font-synthesis: none;
@@ -750,6 +752,9 @@ kbd {
 .stage-pane + .stage-pane {
   border-left: 1px solid var(--paper-line);
 }
+.document-title-wrap, .document-body { transition: opacity .18s ease, transform .18s ease; }
+.stage-pane.is-entering .document-title-wrap { opacity: 0; transform: translateY(6px); transition: none; }
+.stage-pane.is-entering .document-body { opacity: 0; transition: none; }
 .split-pane {
   grid-template-rows: 44px minmax(0, 1fr);
   background: rgba(247, 244, 236, 0.55);
@@ -974,6 +979,7 @@ kbd {
   text-align: center;
   color: #817f74;
 }
+.empty-stage svg { color: #c2bfb1; }
 .empty-stage h2 {
   font: 32px var(--font-editor);
   margin: 15px 0 3px;
@@ -1031,6 +1037,7 @@ kbd {
   color: var(--ink);
   background: color-mix(in oklab, var(--paper) 85%, #000);
 }
+.context-reserve { grid-row: 2; grid-column: 3; background: var(--paper); border-left: 1px solid var(--paper-line); }
 .context-panel {
   grid-row: 2;
   background: var(--paper);
@@ -3878,6 +3885,7 @@ kbd {
   .context-reopen {
     display: none;
   }
+  .context-reserve { display: none; }
   .stage-panes.is-split {
     grid-template-columns: minmax(0, 1fr);
   }
