@@ -656,8 +656,8 @@ use chrono::{SecondsFormat, Utc};
 use rand::{rngs::OsRng, RngCore};
 use scrypt::{scrypt, Params as ScryptParams};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
 use std::fs;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -1083,15 +1083,16 @@ mod tests {
     #[test]
     fn a_rewritten_slot_header_fails_closed() {
         let vector = vector();
-        let mut lowered = vector.slot.clone();
-        lowered.kdf.n = 1 << 14;
-        lowered.kdf.salt = vector.slot.kdf.salt.clone();
+        // The vector is wrapped at 2**14, so the header is rewritten UPWARD here:
+        // rewriting it to the same cost would authenticate and prove nothing.
+        let mut recosted = vector.slot.clone();
+        recosted.kdf.n = 1 << 15;
         let mut retyped = vector.slot.clone();
         retyped.id = "00000000-0000-4000-8000-000000000002".into();
         let mut corrupted = vector.slot.clone();
         corrupted.ciphertext_corrupted();
 
-        for slot in [lowered, retyped, corrupted] {
+        for slot in [recosted, retyped, corrupted] {
             assert!(
                 unwrap_slot(&slot, &vector.passphrase).is_err(),
                 "a tampered slot must not open"
