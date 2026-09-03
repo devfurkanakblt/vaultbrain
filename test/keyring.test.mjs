@@ -18,6 +18,7 @@ import {
 } from "../dist/keyring.js";
 
 import { decrypt, decryptWithKey, encryptWithKey, envelopeVersion } from "../dist/crypto.js";
+import { loadVaultFile, saveVaultFile, vaultFileEnvelopeVersion } from "../dist/store.js";
 
 const PASSPHRASE = "keyring-test-passphrase";
 
@@ -159,4 +160,33 @@ test("the keyed envelope binds its ciphertext to one file identity", () => {
 test("the passphrase envelope refuses a keyed payload with a usable message", () => {
   const payload = encryptWithKey("secret", crypto.randomBytes(32), "health");
   assert.throws(() => decrypt(payload, PASSPHRASE), /keyring/u);
+});
+
+test("key-value files use the keyed envelope once a vault has a keyring", () => {
+  const vault = tempVault();
+  saveVaultFile(vault, "health", [{ key: "BLOOD_TYPE", value: "0 Rh+", desc: "blood group" }], PASSPHRASE);
+  assert.equal(vaultFileEnvelopeVersion(vault, "health"), 1);
+
+  seedKeyring(vault, PASSPHRASE);
+
+  // A v1 file written before the keyring existed still opens.
+  assert.deepEqual(loadVaultFile(vault, "health", PASSPHRASE), [
+    { key: "BLOOD_TYPE", value: "0 Rh+", desc: "blood group" },
+  ]);
+
+  // The next write uses the keyset.
+  saveVaultFile(vault, "health", [{ key: "BLOOD_TYPE", value: "A Rh-", desc: "blood group" }], PASSPHRASE);
+  assert.equal(vaultFileEnvelopeVersion(vault, "health"), 2);
+  assert.deepEqual(loadVaultFile(vault, "health", PASSPHRASE), [
+    { key: "BLOOD_TYPE", value: "A Rh-", desc: "blood group" },
+  ]);
+});
+
+test("a keyed key-value file cannot be renamed into another category", () => {
+  const vault = tempVault();
+  seedKeyring(vault, PASSPHRASE);
+  saveVaultFile(vault, "health", [{ key: "BLOOD_TYPE", value: "0 Rh+", desc: "blood group" }], PASSPHRASE);
+
+  fs.copyFileSync(path.join(vault, "health.kv.enc"), path.join(vault, "finance.kv.enc"));
+  assert.throws(() => loadVaultFile(vault, "finance", PASSPHRASE));
 });

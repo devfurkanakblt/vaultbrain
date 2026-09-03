@@ -1,6 +1,16 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
-import { decrypt, encrypt, type AnyEncryptedPayload } from "./crypto.js";
+import {
+  decrypt,
+  decryptWithKey,
+  encrypt,
+  encryptWithKey,
+  envelopeVersion,
+  KEYED_ENVELOPE_VERSION,
+  type AnyEncryptedPayload,
+  type KeyedEncryptedPayload,
+} from "./crypto.js";
+import { openVaultKeys } from "./keyring.js";
 import { assertNotSymlink, writeFileAtomic } from "./fs-safe.js";
 import { isRedactionLevel, type RedactionLevel } from "./redaction.js";
 import { normalizeVaultName, resolveInside } from "./safety.js";
@@ -128,16 +138,28 @@ export function emptyGrantFile(): GrantFile {
   return { version: 1, grants: [], requests: [] };
 }
 
+const GRANTS_FILE_IDENTITY = "grants";
+
 export function loadGrants(vaultDir: string, passphrase: string): GrantFile | null {
   const path = grantsPath(vaultDir);
   if (!fs.existsSync(path)) return null;
   assertNotSymlink(path);
   const payload: AnyEncryptedPayload = JSON.parse(fs.readFileSync(path, "utf8"));
-  const parsed: GrantFile = JSON.parse(decrypt(payload, passphrase));
+  const parsed: GrantFile = JSON.parse(
+    envelopeVersion(payload) === KEYED_ENVELOPE_VERSION
+      ? decryptWithKey(payload as KeyedEncryptedPayload, requireGrantsKey(vaultDir, passphrase), GRANTS_FILE_IDENTITY)
+      : decrypt(payload, passphrase),
+  );
   if (parsed.version !== 1 || !Array.isArray(parsed.grants)) {
     throw new Error("Unrecognized grant file. Refusing to enforce a policy this build cannot read.");
   }
   return { version: 1, grants: parsed.grants, requests: parsed.requests ?? [] };
+}
+
+function requireGrantsKey(vaultDir: string, passphrase: string): Buffer {
+  const key = openVaultKeys(vaultDir, passphrase)?.kv;
+  if (!key) throw new Error("The grant file is keyring-encrypted but the vault has no readable keyring.");
+  return key;
 }
 
 export function saveGrants(vaultDir: string, file: GrantFile, passphrase: string): GrantFile {
@@ -151,9 +173,11 @@ export function saveGrants(vaultDir: string, file: GrantFile, passphrase: string
     grants: file.grants,
     requests: file.requests.slice(-MAX_REQUESTS),
   };
-  writeFileAtomic(path, JSON.stringify(encrypt(JSON.stringify(stored), passphrase), null, 2), {
-    mode: 0o600,
-  });
+  const key = openVaultKeys(vaultDir, passphrase)?.kv ?? null;
+  const payload = key
+    ? encryptWithKey(JSON.stringify(stored), key, GRANTS_FILE_IDENTITY)
+    : encrypt(JSON.stringify(stored), passphrase);
+  writeFileAtomic(path, JSON.stringify(payload, null, 2), { mode: 0o600 });
   return stored;
 }
 
