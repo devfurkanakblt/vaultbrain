@@ -6072,6 +6072,15 @@ mod tests {
         }
     }
 
+    fn fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("test")
+            .join("fixtures")
+            .join(name)
+    }
+
     #[test]
     fn attachments_deduplicate_by_content_and_chunk_at_one_mebibyte() {
         let (path, session) = attachment_session("attachment-round-trip");
@@ -6365,6 +6374,65 @@ mod tests {
         );
 
         drop(session);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    /// The fixture is copied rather than opened in place: opening a vault takes
+    /// the write lock and would leave a lock file inside a checked-in fixture.
+    #[test]
+    fn the_rust_core_opens_the_typescript_keyring_fixture() {
+        let path = temporary_vault("keyring-fixture");
+        copy_tree(&fixture("keyring-v2"), &path);
+        let path_text = path.to_string_lossy().into_owned();
+
+        let session = open_session(&path_text, "fixture-only-passphrase").unwrap();
+
+        // The documents key: the note object decrypts and indexes.
+        let titles: Vec<&str> = session
+            .index
+            .notes
+            .values()
+            .map(|indexed| indexed.note.title.as_str())
+            .collect();
+        assert_eq!(titles, ["Keyring contract"]);
+
+        // The attachmentId key: the content address the TypeScript core wrote.
+        const FIXTURE_ATTACHMENT_ID: &str =
+            "11eda91fda11ea24f0063a23a63c7e2b1570b139a14fc42eb5a5e4a745e1e4ca";
+        assert_eq!(
+            attachment_id(
+                session.attachment_id_key.as_ref(),
+                b"keyring fixture attachment"
+            )
+            .unwrap(),
+            FIXTURE_ATTACHMENT_ID
+        );
+
+        // And the manifest of that attachment decrypts under the documents key.
+        let info = read_attachment_manifest(&session, FIXTURE_ATTACHMENT_ID).unwrap();
+        assert_eq!(info.filename, "keyring.txt");
+        assert_eq!(info.size, "keyring fixture attachment".len());
+
+        assert!(open_session(&path_text, "wrong passphrase").is_err());
+        drop(session);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn the_rust_core_still_opens_a_legacy_document_vault() {
+        let path = temporary_vault("legacy-docs");
+        copy_tree(&fixture("documents-v1"), &path);
+        let path_text = path.to_string_lossy().into_owned();
+
+        let session = open_session(&path_text, "fixture-only-passphrase").unwrap();
+        let vault_dir = session.vault_dir.clone();
+        assert!(!session.index.notes.is_empty());
+        drop(session);
+
+        assert!(
+            !vault_dir.join("keyring.json").exists(),
+            "opening a legacy vault must not change its format"
+        );
         fs::remove_dir_all(path).unwrap();
     }
 }
