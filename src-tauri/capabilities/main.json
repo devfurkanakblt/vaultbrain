@@ -53,6 +53,8 @@
     "allow-add-attachment",
     "allow-read-attachment",
     "allow-list-attachments",
-    "allow-delete-attachment"
+    "allow-delete-attachment",
+    "allow-sync-status",
+    "allow-sync-verify-registry"
   ]
 }

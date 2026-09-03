@@ -241,3 +241,13 @@ commands.allow = ["list_attachments"]
 identifier = "allow-delete-attachment"
 description = "Allows removing one attachment and every chunk it owns from the unlocked vault."
 commands.allow = ["delete_attachment"]
+
+[[permission]]
+identifier = "allow-sync-status"
+description = "Allows read-only visibility into device enrollment, the active epoch, checkpoint freshness and change counts. Never decrypts a change envelope or unwraps an epoch key."
+commands.allow = ["sync_status"]
+
+[[permission]]
+identifier = "allow-sync-verify-registry"
+description = "Allows verifying the owner's Ed25519 signature over the encrypted sync device registry. Read-only: cannot enroll, revoke or rotate."
+commands.allow = ["sync_verify_registry"]

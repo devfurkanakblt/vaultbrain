@@ -53,6 +53,17 @@ const MAX_PLUGIN_STORAGE_BYTES: usize = 256 * 1024;
 const MAX_PLUGINS: usize = 100;
 const PLUGIN_POLICY_AAD: &str = "secondbrain-vault:plugin-policy:v1";
 const PLUGIN_SIGNATURE_PREFIX: &[u8] = b"secondbrain-vault-plugin-signature-v1\n";
+const SYNC_DEVICE_REGISTRY_AAD: &str = "secondbrain-vault:sync-device-registry:v1";
+const SYNC_FRESHNESS_CHECKPOINT_AAD: &str = "secondbrain-vault:sync-freshness-checkpoint:v1";
+const SYNC_APPLIED_AAD: &str = "secondbrain-vault:sync-applied:v1";
+const MAX_SYNC_DEVICE_REGISTRY_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_SYNC_CHECKPOINT_BYTES: u64 = 1024 * 1024;
+const MAX_SYNC_APPLIED_BYTES: u64 = 64 * 1024 * 1024;
+/// Versions of the signed device registry this build knows how to display.
+/// Anything higher still decodes (1.x format is additive-only), but is
+/// reported as unreadable so the UI can say "a newer format this build
+/// cannot display" instead of rendering a possibly-incomplete picture.
+const READABLE_REGISTRY_VERSIONS: &[u64] = &[1, 2];
 
 /// The capability names this build understands.
 ///
@@ -4910,6 +4921,376 @@ fn delete_attachment(id: String, state: State<'_, AppState>) -> Result<Attachmen
     with_vault_write(session, |session| remove_attachment(session, &id))
 }
 
+/// Read-only visibility into the encrypted sync store the TypeScript CLI
+/// owns. Nothing here writes, enrolls, revokes, rotates, applies or relays —
+/// that machinery stays CLI-only so the sync protocol keeps exactly one
+/// authoritative implementation. The desktop only ever decrypts the small
+/// signed registry, freshness checkpoint and applied-state documents (using
+/// the same vault key it already holds to read notes); it never decrypts a
+/// change envelope and never unwraps an epoch key, so the change store is
+/// counted by listing filenames only.
+#[derive(Debug, Deserialize)]
+struct SyncEnvelope {
+    version: u8,
+    payload: EncryptedPayload,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DeviceCertificate {
+    version: u64,
+    serial: u64,
+    #[serde(rename = "deviceId")]
+    device_id: String,
+    name: String,
+    #[serde(rename = "publicKey")]
+    public_key: String,
+    #[serde(rename = "keyAgreementKey", skip_serializing_if = "Option::is_none")]
+    key_agreement_key: Option<String>,
+    #[serde(rename = "enrolledAt")]
+    enrolled_at: String,
+    epoch: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DeviceRecord {
+    certificate: DeviceCertificate,
+    #[serde(rename = "certificateSignature")]
+    certificate_signature: String,
+    #[serde(rename = "revokedAt", skip_serializing_if = "Option::is_none")]
+    revoked_at: Option<String>,
+    #[serde(
+        rename = "revokedAfterSequence",
+        skip_serializing_if = "Option::is_none"
+    )]
+    revoked_after_sequence: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DeviceRegistryBody {
+    version: u64,
+    revision: u64,
+    epoch: u64,
+    #[serde(rename = "authorityPublicKey")]
+    authority_public_key: String,
+    #[serde(rename = "updatedAt")]
+    updated_at: String,
+    #[serde(rename = "legacyChangeIds")]
+    legacy_change_ids: Vec<String>,
+    devices: Vec<DeviceRecord>,
+    #[serde(rename = "epochKeys", skip_serializing_if = "Option::is_none")]
+    epoch_keys: Option<Vec<Value>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SignedDeviceRegistry {
+    body: DeviceRegistryBody,
+    signature: String,
+}
+
+/// Mirrors `SyncFreshnessCheckpointBody` in `src/sync.ts`. The desktop never
+/// verifies the checkpoint's signature (nothing here relies on it being
+/// authentic to act), so only the fields the freshness summary displays are
+/// modeled; unrecognised fields are ignored by serde rather than rejected.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CheckpointBody {
+    sequence: u64,
+    change_count: u64,
+    created_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SignedCheckpoint {
+    id: String,
+    body: CheckpointBody,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AppliedState {
+    #[serde(default)]
+    objects: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncDeviceSummary {
+    device_id: String,
+    name: String,
+    serial: u64,
+    epoch: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revoked_after_sequence: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncCheckpointSummary {
+    id: String,
+    sequence: u64,
+    change_count: u64,
+    created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncStatus {
+    enrolled: bool,
+    authority_fingerprint: String,
+    epoch: u64,
+    registry_revision: u64,
+    registry_version: u64,
+    devices: Vec<SyncDeviceSummary>,
+    checkpoint: Option<SyncCheckpointSummary>,
+    change_count: usize,
+    unapplied_count: usize,
+    readable: bool,
+}
+
+fn sync_dir(session: &VaultSession) -> PathBuf {
+    session.root_dir.join("sync")
+}
+
+fn registry_is_readable(registry: &SignedDeviceRegistry) -> bool {
+    READABLE_REGISTRY_VERSIONS.contains(&registry.body.version)
+}
+
+/// Canonical JSON matching `canonicalSyncJson` in `src/sync.ts`: object keys
+/// sorted by code unit, no insignificant whitespace, scalars rendered exactly
+/// as `JSON.stringify` would. serde_json's `Map` preserves insertion order,
+/// so the keys are sorted explicitly here rather than relying on it. This
+/// must match the TypeScript signer byte-for-byte or Ed25519 verification of
+/// otherwise-valid registries fails.
+fn canonical_json(value: &Value) -> String {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let entries: Vec<String> = keys
+                .iter()
+                .map(|key| {
+                    format!(
+                        "{}:{}",
+                        serde_json::to_string(key).unwrap(),
+                        canonical_json(&map[*key])
+                    )
+                })
+                .collect();
+            format!("{{{}}}", entries.join(","))
+        }
+        Value::Array(items) => {
+            let entries: Vec<String> = items.iter().map(canonical_json).collect();
+            format!("[{}]", entries.join(","))
+        }
+        other => serde_json::to_string(other).unwrap_or_default(),
+    }
+}
+
+fn verify_registry_signature(registry: &SignedDeviceRegistry) -> Result<bool, String> {
+    let body = serde_json::to_value(&registry.body).map_err(|error| error.to_string())?;
+    let message = canonical_json(&body);
+    let key_bytes = BASE64
+        .decode(registry.body.authority_public_key.as_bytes())
+        .map_err(|error| error.to_string())?;
+    // Strip the 12-byte SPKI prefix to reach the raw 32-byte Ed25519 key.
+    if key_bytes.len() != 44 {
+        return Err("authority public key must be 44 bytes of SPKI DER".into());
+    }
+    let raw: [u8; 32] = key_bytes[12..]
+        .try_into()
+        .map_err(|_| "malformed authority key".to_string())?;
+    let verifying = VerifyingKey::from_bytes(&raw).map_err(|error| error.to_string())?;
+    let signature_bytes = BASE64
+        .decode(registry.signature.as_bytes())
+        .map_err(|error| error.to_string())?;
+    let signature_bytes: [u8; 64] = signature_bytes
+        .try_into()
+        .map_err(|_| "signature must be 64 bytes".to_string())?;
+    Ok(verifying
+        .verify(message.as_bytes(), &Signature::from_bytes(&signature_bytes))
+        .is_ok())
+}
+
+/// `sha256(base64_decode(authorityPublicKey))` as lowercase hex — matches
+/// `syncRegistryFingerprint` in `src/sync.ts`. Hashes the decoded SPKI bytes,
+/// not the base64 text.
+fn registry_fingerprint(registry: &SignedDeviceRegistry) -> Result<String, String> {
+    let key_bytes = BASE64
+        .decode(registry.body.authority_public_key.as_bytes())
+        .map_err(|error| error.to_string())?;
+    Ok(hex_lower(&Sha256::digest(&key_bytes)))
+}
+
+fn load_device_registry(session: &VaultSession) -> Result<Option<SignedDeviceRegistry>, String> {
+    let path = sync_dir(session).join("devices.enc");
+    if !path.exists() {
+        return Ok(None);
+    }
+    reject_symlink(&path)?;
+    let envelope: SyncEnvelope = serde_json::from_slice(&read_limited(
+        &path,
+        MAX_SYNC_DEVICE_REGISTRY_BYTES,
+        "sync device registry",
+    )?)
+    .map_err(|error| error.to_string())?;
+    if envelope.version != 1 {
+        return Err("unsupported encrypted sync device registry".into());
+    }
+    let plaintext = decrypt(
+        &envelope.payload,
+        session.key.as_ref(),
+        SYNC_DEVICE_REGISTRY_AAD,
+    )?;
+    let registry: SignedDeviceRegistry =
+        serde_json::from_slice(&plaintext).map_err(|error| error.to_string())?;
+    Ok(Some(registry))
+}
+
+fn load_checkpoint(session: &VaultSession) -> Result<Option<SignedCheckpoint>, String> {
+    let path = sync_dir(session).join("checkpoint.enc");
+    if !path.exists() {
+        return Ok(None);
+    }
+    reject_symlink(&path)?;
+    let envelope: SyncEnvelope = serde_json::from_slice(&read_limited(
+        &path,
+        MAX_SYNC_CHECKPOINT_BYTES,
+        "sync freshness checkpoint",
+    )?)
+    .map_err(|error| error.to_string())?;
+    if envelope.version != 1 {
+        return Err("unsupported encrypted sync freshness checkpoint".into());
+    }
+    let plaintext = decrypt(
+        &envelope.payload,
+        session.key.as_ref(),
+        SYNC_FRESHNESS_CHECKPOINT_AAD,
+    )?;
+    let checkpoint: SignedCheckpoint =
+        serde_json::from_slice(&plaintext).map_err(|error| error.to_string())?;
+    Ok(Some(checkpoint))
+}
+
+/// The change store is counted by listing `documents/sync/changes/*.change.enc`
+/// filenames only. No envelope is ever opened and no epoch key is ever
+/// unwrapped — the desktop has no second implementation of the change crypto.
+fn count_sync_changes(session: &VaultSession) -> Result<usize, String> {
+    let dir = sync_dir(session).join("changes");
+    if !dir.is_dir() {
+        return Ok(0);
+    }
+    reject_symlink(&dir)?;
+    let mut count = 0usize;
+    for entry in fs::read_dir(&dir).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let is_change = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.ends_with(".change.enc"));
+        if is_change {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn count_applied_objects(session: &VaultSession) -> Result<usize, String> {
+    let path = sync_dir(session).join("applied.enc");
+    if !path.exists() {
+        return Ok(0);
+    }
+    reject_symlink(&path)?;
+    let envelope: SyncEnvelope = serde_json::from_slice(&read_limited(
+        &path,
+        MAX_SYNC_APPLIED_BYTES,
+        "sync application state",
+    )?)
+    .map_err(|error| error.to_string())?;
+    if envelope.version != 1 {
+        return Err("unsupported encrypted sync application state".into());
+    }
+    let plaintext = decrypt(&envelope.payload, session.key.as_ref(), SYNC_APPLIED_AAD)?;
+    let state: AppliedState =
+        serde_json::from_slice(&plaintext).map_err(|error| error.to_string())?;
+    Ok(state.objects.len())
+}
+
+#[tauri::command(async)]
+fn sync_status(state: State<'_, AppState>) -> Result<SyncStatus, String> {
+    let guard = state
+        .session
+        .lock()
+        .map_err(|_| "vault session lock poisoned")?;
+    let session = guard.as_ref().ok_or("vault is locked")?;
+
+    let registry = load_device_registry(session)?;
+    let checkpoint = load_checkpoint(session)?;
+    let change_count = count_sync_changes(session)?;
+    let unapplied_count = change_count.saturating_sub(count_applied_objects(session)?);
+
+    let checkpoint = checkpoint.map(|checkpoint| SyncCheckpointSummary {
+        id: checkpoint.id,
+        sequence: checkpoint.body.sequence,
+        change_count: checkpoint.body.change_count,
+        created_at: checkpoint.body.created_at,
+    });
+
+    let Some(registry) = registry else {
+        return Ok(SyncStatus {
+            enrolled: false,
+            authority_fingerprint: String::new(),
+            epoch: 0,
+            registry_revision: 0,
+            registry_version: 0,
+            devices: Vec::new(),
+            checkpoint,
+            change_count,
+            unapplied_count,
+            readable: true,
+        });
+    };
+
+    let readable = registry_is_readable(&registry);
+    let devices = registry
+        .body
+        .devices
+        .iter()
+        .map(|record| SyncDeviceSummary {
+            device_id: record.certificate.device_id.clone(),
+            name: record.certificate.name.clone(),
+            serial: record.certificate.serial,
+            epoch: record.certificate.epoch,
+            revoked_after_sequence: record.revoked_after_sequence,
+        })
+        .collect();
+
+    Ok(SyncStatus {
+        enrolled: true,
+        authority_fingerprint: registry_fingerprint(&registry)?,
+        epoch: registry.body.epoch,
+        registry_revision: registry.body.revision,
+        registry_version: registry.body.version,
+        devices,
+        checkpoint,
+        change_count,
+        unapplied_count,
+        readable,
+    })
+}
+
+#[tauri::command(async)]
+fn sync_verify_registry(state: State<'_, AppState>) -> Result<bool, String> {
+    let guard = state
+        .session
+        .lock()
+        .map_err(|_| "vault session lock poisoned")?;
+    let session = guard.as_ref().ok_or("vault is locked")?;
+    let Some(registry) = load_device_registry(session)? else {
+        return Err("vault has no sync device registry".into());
+    };
+    verify_registry_signature(&registry)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -4963,6 +5344,8 @@ pub fn run() {
             read_attachment,
             list_attachments,
             delete_attachment,
+            sync_status,
+            sync_verify_registry,
         ])
         .run(tauri::generate_context!())
         .expect("error while running SecondBrain Vault");
@@ -6527,5 +6910,114 @@ mod tests {
 
         drop(session);
         fs::remove_dir_all(path).unwrap();
+    }
+
+    /// The second cross-implementation gate. This registry was written by the
+    /// TypeScript core after a real rotation. If the Rust core drifts on the
+    /// canonical JSON encoding, the AAD strings or the SPKI key layout, it can no
+    /// longer read or verify what the CLI wrote — and this fails.
+    #[test]
+    fn a_rotated_registry_written_by_the_typescript_core_still_verifies() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("test")
+            .join("fixtures")
+            .join("sync-epoch-v2");
+        assert!(fixture.is_dir(), "missing fixture: {}", fixture.display());
+
+        let path = temporary_vault("sync-registry-fixture");
+        copy_tree(&fixture, &path);
+        let session = open_session(&path.to_string_lossy(), "fixture-only-passphrase").unwrap();
+
+        let registry = load_device_registry(&session)
+            .unwrap()
+            .expect("the fixture is enrolled");
+        assert_eq!(registry.body.version, 2);
+        assert_eq!(registry.body.epoch, 2);
+        assert_eq!(registry.body.devices.len(), 2);
+        assert!(registry_is_readable(&registry));
+
+        // Canonical JSON and Ed25519 verification must agree with the signer.
+        assert!(verify_registry_signature(&registry).expect("verification runs"));
+
+        drop(session);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn a_tampered_registry_body_fails_verification() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("test")
+            .join("fixtures")
+            .join("sync-epoch-v2");
+        let path = temporary_vault("sync-registry-tampered");
+        copy_tree(&fixture, &path);
+        let session = open_session(&path.to_string_lossy(), "fixture-only-passphrase").unwrap();
+
+        let mut registry = load_device_registry(&session).unwrap().unwrap();
+        registry.body.revision += 1;
+        assert!(!verify_registry_signature(&registry).expect("verification runs"));
+
+        drop(session);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn an_unknown_registry_version_reads_as_undisplayable_rather_than_failing() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("test")
+            .join("fixtures")
+            .join("sync-epoch-v2");
+        let path = temporary_vault("sync-registry-future");
+        copy_tree(&fixture, &path);
+        let session = open_session(&path.to_string_lossy(), "fixture-only-passphrase").unwrap();
+
+        let mut registry = load_device_registry(&session).unwrap().unwrap();
+        registry.body.version = 99;
+        assert!(
+            !registry_is_readable(&registry),
+            "a future version is reported, not an error"
+        );
+
+        drop(session);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn sync_status_counts_changes_without_decrypting_them() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("test")
+            .join("fixtures")
+            .join("sync-epoch-v2");
+        let path = temporary_vault("sync-status-count");
+        copy_tree(&fixture, &path);
+        let session = open_session(&path.to_string_lossy(), "fixture-only-passphrase").unwrap();
+
+        // The fixture holds one epoch 1 change and one epoch 2 change. The count
+        // comes from filenames, so it works even though this build holds no epoch
+        // key and could not open the second envelope.
+        assert_eq!(count_sync_changes(&session).unwrap(), 2);
+
+        drop(session);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    /// Guards the canonical JSON hazard the brief calls out explicitly: the
+    /// committed fixture uses ASCII-only device names, so a Rust/TypeScript
+    /// escaping divergence on non-ASCII text would pass every other test here
+    /// and only fail in production. Expected value obtained by running:
+    /// `node -e "import('./dist/sync.js').then(m => console.log(JSON.stringify(m.canonicalSyncJson({deviceId:'11111111-1111-4111-8111-111111111111', name:\"Ömer'in dizüstü 🖥️\", epoch:2}))))"`
+    #[test]
+    fn canonical_json_matches_the_typescript_signer_on_non_ascii_text() {
+        let value = serde_json::json!({
+            "deviceId": "11111111-1111-4111-8111-111111111111",
+            "name": "Ömer'in dizüstü 🖥️",
+            "epoch": 2,
+        });
+        let expected = "{\"deviceId\":\"11111111-1111-4111-8111-111111111111\",\"epoch\":2,\"name\":\"Ömer'in dizüstü 🖥️\"}";
+        assert_eq!(canonical_json(&value), expected);
     }
 }
