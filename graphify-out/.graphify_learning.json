@@ -1,0 +1,86 @@
+{
+  "generated_at": "2026-09-02T13:53:03.013846+00:00",
+  "nodes": {
+    "docs_superpowers_plans_2026_08_31_phase_6_sync_mobile_task_1_split_protocol_modules_and_freeze_v1_fixtures": {
+      "code_fingerprint": "f4d21e95a673790c9ad7b6ddd4075e3b1333edd1d8f45df1bd8fd6cd3e129d71",
+      "label": "Task 1: Split protocol modules and freeze v1 fixtures",
+      "last": "2026-09-02T13:43:28.153539+00:00",
+      "provenance": [
+        {
+          "date": "2026-09-02T13:43:28.153539+00:00",
+          "outcome": "useful",
+          "q": "phase 6a'nın bütün taskları bitti mi"
+        }
+      ],
+      "score": 0.999846284,
+      "source_file": "docs/superpowers/plans/2026-08-31-phase-6-sync-mobile.md",
+      "status": "tentative",
+      "uses": 1
+    },
+    "docs_superpowers_plans_2026_08_31_phase_6_sync_mobile_task_2_make_local_capture_a_recoverable_transaction": {
+      "code_fingerprint": "f4d21e95a673790c9ad7b6ddd4075e3b1333edd1d8f45df1bd8fd6cd3e129d71",
+      "label": "Task 2: Make local capture a recoverable transaction",
+      "last": "2026-09-02T13:43:28.153539+00:00",
+      "provenance": [
+        {
+          "date": "2026-09-02T13:43:28.153539+00:00",
+          "outcome": "useful",
+          "q": "phase 6a'nın bütün taskları bitti mi"
+        }
+      ],
+      "score": 0.999846284,
+      "source_file": "docs/superpowers/plans/2026-08-31-phase-6-sync-mobile.md",
+      "status": "tentative",
+      "uses": 1
+    },
+    "docs_superpowers_plans_2026_08_31_phase_6_sync_mobile_task_3_apply_asymmetric_dags_exactly_once": {
+      "code_fingerprint": "f4d21e95a673790c9ad7b6ddd4075e3b1333edd1d8f45df1bd8fd6cd3e129d71",
+      "label": "Task 3: Apply asymmetric DAGs exactly once",
+      "last": "2026-09-02T13:43:28.153539+00:00",
+      "provenance": [
+        {
+          "date": "2026-09-02T13:43:28.153539+00:00",
+          "outcome": "useful",
+          "q": "phase 6a'nın bütün taskları bitti mi"
+        }
+      ],
+      "score": 0.999846284,
+      "source_file": "docs/superpowers/plans/2026-08-31-phase-6-sync-mobile.md",
+      "status": "tentative",
+      "uses": 1
+    },
+    "docs_superpowers_plans_2026_08_31_phase_6_sync_mobile_task_4_prevalidate_snapshots_and_harden_public_apis": {
+      "code_fingerprint": "f4d21e95a673790c9ad7b6ddd4075e3b1333edd1d8f45df1bd8fd6cd3e129d71",
+      "label": "Task 4: Prevalidate snapshots and harden public APIs",
+      "last": "2026-09-02T13:43:28.153539+00:00",
+      "provenance": [
+        {
+          "date": "2026-09-02T13:43:28.153539+00:00",
+          "outcome": "useful",
+          "q": "phase 6a'nın bütün taskları bitti mi"
+        }
+      ],
+      "score": 0.999846284,
+      "source_file": "docs/superpowers/plans/2026-08-31-phase-6-sync-mobile.md",
+      "status": "tentative",
+      "uses": 1
+    },
+    "docs_superpowers_plans_2026_08_31_phase_6_sync_mobile_task_5_close_the_phase_6a_integration_gate": {
+      "code_fingerprint": "f4d21e95a673790c9ad7b6ddd4075e3b1333edd1d8f45df1bd8fd6cd3e129d71",
+      "label": "Task 5: Close the Phase 6A integration gate",
+      "last": "2026-09-02T13:43:28.153539+00:00",
+      "provenance": [
+        {
+          "date": "2026-09-02T13:43:28.153539+00:00",
+          "outcome": "useful",
+          "q": "phase 6a'nın bütün taskları bitti mi"
+        }
+      ],
+      "score": 0.999846284,
+      "source_file": "docs/superpowers/plans/2026-08-31-phase-6-sync-mobile.md",
+      "status": "tentative",
+      "uses": 1
+    }
+  },
+  "version": 1
+}

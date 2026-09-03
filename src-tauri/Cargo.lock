@@ -2892,30 +2892,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vault-brain-desktop"
-version = "0.2.0"
-dependencies = [
- "aes-gcm",
- "base64 0.22.1",
- "chrono",
- "ed25519-dalek",
- "hmac",
- "rand",
- "regex",
- "scrypt",
- "serde",
- "serde_json",
- "sha2",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "unicode-normalization",
- "uuid",
- "windows-sys 0.61.2",
- "zeroize",
-]
-
-[[package]]
 name = "selectors"
 version = "0.36.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4135,6 +4111,30 @@ dependencies = [
  "js-sys",
  "serde_core",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "vault-brain-desktop"
+version = "0.2.0"
+dependencies = [
+ "aes-gcm",
+ "base64 0.22.1",
+ "chrono",
+ "ed25519-dalek",
+ "hmac",
+ "rand",
+ "regex",
+ "scrypt",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "unicode-normalization",
+ "uuid",
+ "windows-sys 0.61.2",
+ "zeroize",
 ]
 
 [[package]]
