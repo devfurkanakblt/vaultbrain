@@ -565,6 +565,35 @@ kbd { font: 9px var(--font-mono); color: #777a6f; border: 1px solid #3a3d35; bor
 .plugin-panel { margin: 0; padding: 0 15px; white-space: pre-wrap; word-break: break-word; color: #5f6157; font: 11px/1.6 var(--font-mono); }
 .context-heading svg { color: #b4b0a3; }
 
+/* Sync status: read-only visibility into the CLI-owned sync store */
+.sync-view { grid-row: 2; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--paper); color: var(--ink); overflow: auto; scrollbar-width: thin; }
+.sync-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 20px 26px; border-bottom: 1px solid var(--paper-line); }
+.sync-header h2 { display: flex; align-items: center; gap: 10px; font: 500 29px/1 var(--font-editor); letter-spacing: -.025em; margin: 6px 0 0; }
+.sync-header h2 svg { color: var(--acid-deep); }
+.sync-unreadable { display: flex; align-items: center; gap: 8px; margin: 20px 26px; padding: 12px 14px; border: 1px solid var(--paper-line); background: rgba(226,231,205,.36); color: var(--rust); font-size: 12px; line-height: 1.5; }
+.sync-summary { display: flex; flex-wrap: wrap; gap: 18px; margin: 18px 26px 0; padding: 12px 14px; border: 1px solid var(--paper-line); background: rgba(226,231,205,.36); }
+.sync-summary > div { display: flex; align-items: center; gap: 8px; color: var(--acid-deep); }
+.sync-summary span { display: grid; gap: 2px; }
+.sync-summary b { color: var(--ink); font-size: 11px; }
+.sync-summary code { color: #6d6f65; font: 10px var(--font-mono); }
+.sync-devices, .sync-checkpoint, .sync-counts { margin: 18px 26px 0; }
+.sync-devices h3, .sync-checkpoint h3 { font: 500 13px var(--font-editor); margin: 0 0 8px; color: #4c4e45; }
+.sync-devices ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.sync-device { display: flex; align-items: center; justify-content: space-between; gap: 12px; background: rgba(248,245,236,.85); border: 1px solid var(--paper-line); padding: 10px 14px; }
+.sync-device b { font-size: 12px; font-weight: 570; }
+.sync-device small { display: block; color: #97948a; font: 9px var(--font-mono); margin-top: 2px; }
+.sync-device-active, .sync-device-revoked { display: inline-flex; align-items: center; gap: 5px; flex: none; font: 600 8px var(--font-mono); text-transform: uppercase; letter-spacing: .05em; }
+.sync-device-active { color: var(--acid-deep); }
+.sync-device-revoked { color: var(--rust); }
+.sync-checkpoint p, .sync-counts p { margin: 0; color: #65675e; font-size: 12px; }
+.sync-footer { margin: 18px 26px 26px; padding: 14px 16px; background: rgba(226,231,205,.5); border-left: 2px solid var(--acid-deep); }
+.sync-footer p { margin: 0 0 8px; color: #5f6157; font-size: 11px; line-height: 1.5; }
+.sync-footer code { display: block; background: #faf8f1; border: 1px solid var(--paper-line); padding: 8px 10px; color: #4c4e45; font: 11px var(--font-mono); overflow-wrap: break-word; }
+.sync-empty { margin: auto; padding: 30px; text-align: center; color: #817f74; }
+.sync-empty svg { color: var(--acid-deep); }
+.sync-empty h3 { font: 26px var(--font-editor); margin: 12px 0 6px; color: #4c4e45; }
+.sync-empty p { font-size: 12px; line-height: 1.6; max-width: 400px; margin: 0 auto; }
+
 .spin { animation: spin 1s linear infinite; }
 @keyframes rise { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: none; } }
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
@@ -592,6 +621,8 @@ kbd { font: 9px var(--font-mono); color: #777a6f; border: 1px solid #3a3d35; bor
   .document-title-wrap { padding-left: 28px; padding-right: 28px; }.cm-content, .markdown-preview { padding-left: 28px !important; padding-right: 28px !important; }
   .plugin-header { padding: 16px; flex-direction: column; }
   .plugin-policy { margin: 12px 16px 0; }
+  .sync-header { padding: 16px; flex-direction: column; }
+  .sync-summary, .sync-devices, .sync-checkpoint, .sync-counts, .sync-footer, .sync-unreadable { margin-left: 16px; margin-right: 16px; }
   .plugin-list { padding: 14px 14px 50px; }
   .history-body { grid-template-columns: minmax(0, 1fr); }
   .history-body article { display: none; }

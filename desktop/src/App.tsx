@@ -26,6 +26,7 @@ import {
   PanelRightOpen,
   Paperclip,
   Puzzle,
+  RefreshCw,
   Search,
   ShieldCheck,
   Sparkles,
@@ -47,17 +48,18 @@ import type { PluginPanel, PluginRuntimeState, RegisteredCommand } from "./plugi
 import { PropertyTable } from "./PropertyTable";
 import { QuickSwitcher } from "./QuickSwitcher";
 import { clearOwnedClipboard, copyWithExpiry } from "./secure-clipboard";
+import { SyncStatus } from "./SyncStatus";
 import { ThemeEditor } from "./ThemeEditor";
 import { WorkspacesDialog } from "./Workspaces";
 import { applyTheme, clearTheme, DEFAULT_THEME, loadTheme, saveTheme, type ThemeSettings } from "./theme";
 import { useVirtualWindow } from "./virtual";
-import type { AttachmentInfo, Backlink, Bookmark, CanvasSummary, DeletedNote, KnowledgeGraph as GraphData, NoteDocument, NoteSummary, PluginSecurityPolicy, PluginSummary, PropertyRow, SavedView, SaveState, SearchHit, UnlinkedMention, VaultInfo, WorkspaceLayout, WorkspaceState } from "./types";
+import type { AttachmentInfo, Backlink, Bookmark, CanvasSummary, DeletedNote, KnowledgeGraph as GraphData, NoteDocument, NoteSummary, PluginSecurityPolicy, PluginSummary, PropertyRow, SavedView, SaveState, SearchHit, SyncStatusData, UnlinkedMention, VaultInfo, WorkspaceLayout, WorkspaceState } from "./types";
 
 const MarkdownEditor = lazy(() => import("./Editor").then((module) => ({ default: module.MarkdownEditor })));
 const MarkdownPreview = lazy(() => import("./Preview"));
 
 type ViewMode = "write" | "read";
-type WorkspaceView = "notes" | "graph" | "properties" | "canvas" | "files" | "plugins";
+type WorkspaceView = "notes" | "graph" | "properties" | "canvas" | "files" | "plugins" | "sync";
 type LockReason = "manual" | "inactivity";
 type TreeRow =
   | { kind: "folder"; key: string; folder: string; count: number; open: boolean }
@@ -195,6 +197,7 @@ export function App() {
   const [pluginCommands, setPluginCommands] = useState<RegisteredCommand[]>([]);
   const [pluginPanels, setPluginPanels] = useState<PluginPanel[]>([]);
   const pluginHost = useRef<PluginHost>(undefined);
+  const [syncStatus, setSyncStatus] = useState<SyncStatusData | null>(null);
   const [notice, setNotice] = useState("");
   const [lockNotice, setLockNotice] = useState("");
   const [idleMinutes, setIdleMinutes] = useState(readIdlePreference);
@@ -381,7 +384,7 @@ export function App() {
     pluginHost.current?.stopAll();
     setPlugins([]); setPluginStates([]); setPluginCommands([]); setPluginPanels([]);
     setWorkspaceView("notes"); setGraph({ nodes: [], edges: [] }); setPropertyRows([]); setSavedViews([]);
-    setCanvases([]); setAttachments([]);
+    setCanvases([]); setAttachments([]); setSyncStatus(null);
     setLockNotice(reason === "inactivity"
       ? `Locked automatically after ${idleMinutes} minute${idleMinutes === 1 ? "" : "s"} without activity. The clipboard was cleared too.`
       : "");
@@ -533,6 +536,7 @@ export function App() {
     }
     if (next === "canvas" || next === "files") await refreshAssets();
     if (next === "plugins") await refreshPlugins();
+    if (next === "sync") setSyncStatus(await vaultBridge.syncStatus());
   }
 
   async function installPlugin(manifest: unknown, source: string) {
@@ -699,6 +703,7 @@ export function App() {
           <button className={workspaceView === "canvas" ? "active" : ""} onClick={() => void showWorkspace("canvas")}><FolderKanban size={14} /><span>Canvas</span></button>
           <button className={workspaceView === "files" ? "active" : ""} onClick={() => void showWorkspace("files")}><Paperclip size={14} /><span>Files</span></button>
           <button className={workspaceView === "plugins" ? "active" : ""} onClick={() => void showWorkspace("plugins")}><Puzzle size={14} /><span>Plugins</span></button>
+          <button className={workspaceView === "sync" ? "active" : ""} onClick={() => void showWorkspace("sync")}><RefreshCw size={14} /><span>Sync</span></button>
         </div>
         <button className="quick-find" onClick={() => setSearchOpen(true)}><Search size={15} /><span>Find anything…</span><kbd>⇧⌘F</kbd></button>
         {bookmarks.length > 0 && <div className="bookmark-block">
@@ -834,6 +839,13 @@ export function App() {
         onRestore={restorePluginSigner}
         onNotice={setNotice}
       />
+      : workspaceView === "sync" ? (syncStatus?.enrolled
+        ? <SyncStatus status={syncStatus} />
+        : <div className="sync-empty">
+            <RefreshCw size={30} />
+            <h3>This vault isn't enrolled in sync</h3>
+            <p>Enroll a device from the CLI to see the registry, checkpoint and change counts here. The desktop app never enrolls, revokes, or mutates sync state itself.</p>
+          </div>)
       : <PropertyTable
         rows={propertyRows}
         views={savedViews}
@@ -891,6 +903,7 @@ export function App() {
             { icon: TableProperties, label: "Open property view", keys: "", action: () => void showWorkspace("properties") },
             { icon: FolderKanban, label: "Open canvas workspace", keys: "", action: () => void showWorkspace("canvas") },
             { icon: Paperclip, label: "Open attachment library", keys: "", action: () => void showWorkspace("files") },
+            { icon: RefreshCw, label: "View sync status", keys: "", action: () => void showWorkspace("sync") },
             { icon: BookOpen, label: mode === "write" ? "Switch to reading view" : "Switch to writing view", keys: "⌘ E", action: () => setMode(mode === "write" ? "read" : "write") },
             { icon: LayoutGrid, label: "Workspaces and saved layouts", keys: "", action: () => setWorkspacesOpen(true) },
             { icon: Palette, label: "Customize theme", keys: "", action: () => setThemeOpen(true) },

@@ -249,3 +249,39 @@ export interface CanvasInput {
   createdAt?: string;
   baseRevision?: number;
 }
+
+/** One device in the signed sync registry. `revokedAfterSequence` is absent — not null — for an active device. */
+export interface SyncDeviceSummary {
+  deviceId: string;
+  name: string;
+  serial: number;
+  epoch: number;
+  revokedAfterSequence?: number;
+}
+
+export interface SyncCheckpointSummary {
+  id: string;
+  sequence: number;
+  changeCount: number;
+  createdAt: string;
+}
+
+/**
+ * Read-only visibility into the encrypted sync store the CLI owns. There is
+ * no honest way to compute how many recorded changes remain unapplied from
+ * this data alone: `changeCount` counts change files (many edits can target
+ * one object) while `appliedObjectCount` is a per-object cursor, so the two
+ * are different units and must never be subtracted against each other.
+ */
+export interface SyncStatusData {
+  enrolled: boolean;
+  authorityFingerprint: string;
+  epoch: number;
+  registryRevision: number;
+  registryVersion: number;
+  devices: SyncDeviceSummary[];
+  checkpoint: SyncCheckpointSummary | null;
+  changeCount: number;
+  appliedObjectCount: number;
+  readable: boolean;
+}

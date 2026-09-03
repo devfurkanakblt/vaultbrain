@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AttachmentContent, AttachmentInfo, Backlink, Bookmark, CanvasDocument, CanvasInput, CanvasSummary, DailyNote, DeletedNote, KnowledgeGraph, NoteDocument, NoteSummary, PluginCallContext, PluginPackage, PluginSecurityPolicy, PluginSummary, PropertyRow, RevisionInfo, SavedView, SearchHit, UnlinkedMention, VaultInfo, WorkspaceState } from "./types";
+import type { AttachmentContent, AttachmentInfo, Backlink, Bookmark, CanvasDocument, CanvasInput, CanvasSummary, DailyNote, DeletedNote, KnowledgeGraph, NoteDocument, NoteSummary, PluginCallContext, PluginPackage, PluginSecurityPolicy, PluginSummary, PropertyRow, RevisionInfo, SavedView, SearchHit, SyncStatusData, UnlinkedMention, VaultInfo, WorkspaceState } from "./types";
 
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -54,6 +54,19 @@ let demoPluginStorage: Record<string, Record<string, string>> = {};
 let demoPluginPolicy: PluginSecurityPolicy = { version: 1, restrictedMode: false, revokedSigners: [] };
 const demoPluginInstances = new Map<string, { pluginId: string; revision: number }>();
 let demoWorkspace: WorkspaceState = { version: 1, bookmarks: [], layouts: [] };
+/** Demo mode has no on-disk sync store, so it always reports not enrolled. */
+const demoSyncStatus: SyncStatusData = {
+  enrolled: false,
+  authorityFingerprint: "",
+  epoch: 0,
+  registryRevision: 0,
+  registryVersion: 0,
+  devices: [],
+  checkpoint: null,
+  changeCount: 0,
+  appliedObjectCount: 0,
+  readable: true,
+};
 
 const WIKILINK = /\[\[[^\]]*\]\]/gu;
 
@@ -666,6 +679,20 @@ export const vaultBridge = {
     if (!entry) throw new Error(`Attachment not found: ${id}`);
     demoAttachments = demoAttachments.filter((item) => item.info.id !== id);
     return structuredClone(entry.info);
+  },
+  /**
+   * Read-only visibility into the CLI-owned sync store. There is no mutating
+   * counterpart here by design -- enroll, revoke, import, apply and relay
+   * stay CLI-only so the sync protocol keeps exactly one authoritative
+   * implementation.
+   */
+  async syncStatus(): Promise<SyncStatusData> {
+    if (isTauri) return call<SyncStatusData>("sync_status");
+    return structuredClone(demoSyncStatus);
+  },
+  async syncVerifyRegistry(): Promise<boolean> {
+    if (isTauri) return call<boolean>("sync_verify_registry");
+    return demoSyncStatus.enrolled;
   },
 };
 
