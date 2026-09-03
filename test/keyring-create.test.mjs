@@ -99,6 +99,20 @@ test("a legacy document vault opens and is written to without gaining a keyring"
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test("verifying an audit chain with the wrong passphrase reports the passphrase, not a broken chain", () => {
+  const dir = tempDir("audit-wrong-pass");
+  upsertEntry(dir, "health", "BLOOD_TYPE", "0 Rh+", "blood group", PASSPHRASE);
+  appendAudit(dir, { actor: "test", file: "health", key: "BLOOD_TYPE" }, PASSPHRASE);
+
+  assert.equal(verifyAudit(dir, PASSPHRASE).valid, true);
+  // A legacy vault could not tell a wrong passphrase from a tampered chain and
+  // reported `valid: false` for both. A keyring vault can: the keyset simply
+  // does not unwrap, and saying "invalid chain" here would accuse the log of
+  // tampering that never happened.
+  assert.throws(() => verifyAudit(dir, "wrong passphrase"), /wrong passphrase/u);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("creating a keyring is idempotent and every key is independent", () => {
   const dir = tempDir("idempotent");
   const first = openOrCreateVaultKeys(dir, PASSPHRASE);

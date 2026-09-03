@@ -106,6 +106,19 @@ function seedKeyring(vaultDir, passphrase) {
   return keys;
 }
 
+/**
+ * What a pre-keyring release left in a vault directory. Writing it is what
+ * makes this a legacy vault: since phase 7.2 the ordinary write paths create a
+ * keyring on a directory holding no legacy material, so a test that needs the
+ * pre-keyring format has to say so. `schema.json` is the inert marker — no
+ * code path reads its contents, so seeding it changes the vault's format and
+ * nothing else.
+ */
+function seedLegacyVault(vaultDir) {
+  fs.mkdirSync(vaultDir, { recursive: true });
+  fs.writeFileSync(path.join(vaultDir, "schema.json"), '{"version":1,"files":{}}\n');
+}
+
 test("an empty directory is an empty vault and gets no keyring implicitly", () => {
   const vault = tempVault();
   assert.equal(detectVaultFormat(vault), "empty");
@@ -184,6 +197,7 @@ test("the passphrase envelope refuses a keyed payload with a usable message", ()
 
 test("key-value files use the keyed envelope once a vault has a keyring", () => {
   const vault = tempVault();
+  seedLegacyVault(vault);
   saveVaultFile(vault, "health", [{ key: "BLOOD_TYPE", value: "0 Rh+", desc: "blood group" }], PASSPHRASE);
   assert.equal(vaultFileEnvelopeVersion(vault, "health"), 1);
 
@@ -213,6 +227,7 @@ test("a keyed key-value file cannot be renamed into another category", () => {
 
 test("grant files use the keyed envelope once a vault has a keyring", () => {
   const vault = tempVault();
+  seedLegacyVault(vault);
   saveGrants(vault, emptyGrantFile(), PASSPHRASE);
   const payload = JSON.parse(fs.readFileSync(path.join(vault, "grants.enc"), "utf8"));
   assert.equal(envelopeVersion(payload), 1);
@@ -315,6 +330,7 @@ test("the audit chain keeps verifying after a keyring appears", () => {
 
 test("a legacy session uses one key for content and identity, a keyring session does not", () => {
   const legacy = tempVault();
+  seedLegacyVault(legacy);
   const legacySession = openDocumentKey(legacy, PASSPHRASE);
   assert.equal(legacySession.attachmentIdKey.toString("base64"), legacySession.key.toString("base64"));
   assert.equal(legacySession.syncChangeKey.toString("base64"), legacySession.key.toString("base64"));

@@ -44,6 +44,19 @@ function copyFixture(name) {
   return target;
 }
 
+/**
+ * What a pre-keyring release left in a vault directory. Writing it is what
+ * makes this a legacy vault: since phase 7.2 the ordinary write paths create a
+ * keyring on a directory holding no legacy material, so a test that needs the
+ * pre-keyring format has to say so. `schema.json` is the inert marker — no
+ * code path reads its contents, so seeding it changes the vault's format and
+ * nothing else.
+ */
+function seedLegacyVault(vaultDir) {
+  fs.mkdirSync(vaultDir, { recursive: true });
+  fs.writeFileSync(path.join(vaultDir, "schema.json"), '{"version":1,"files":{}}\n');
+}
+
 test("migration adopts the legacy key so attachment identities never move", () => {
   const vault = copyFixture("documents-attachments-v1");
 
@@ -89,6 +102,7 @@ test("migration keeps notes, revisions and search working", () => {
 
 test("migration adopts the audit key so the existing chain still verifies", () => {
   const vault = tempDir("audit");
+  seedLegacyVault(vault);
   upsertEntry(vault, "health", "BLOOD_TYPE", "0 Rh+", "blood group", PASSPHRASE);
   appendAudit(vault, { actor: "cli-direct-write", file: "health", key: "BLOOD_TYPE" }, PASSPHRASE);
   assert.equal(verifyAudit(vault, PASSPHRASE).valid, true);
@@ -105,6 +119,7 @@ test("migration adopts the audit key so the existing chain still verifies", () =
 
 test("migration rewrites key-value files and the manifest tombstone", () => {
   const vault = tempDir("kv");
+  seedLegacyVault(vault);
   upsertEntry(vault, "health", "BLOOD_TYPE", "0 Rh+", "blood group", PASSPHRASE);
   assert.equal(vaultFileEnvelopeVersion(vault, "health"), 1);
   new DocumentVault(vault, PASSPHRASE).lock();
@@ -124,6 +139,7 @@ test("migration rewrites key-value files and the manifest tombstone", () => {
 
 test("a key-value-only vault generates the keys it cannot adopt", () => {
   const vault = tempDir("kvonly");
+  seedLegacyVault(vault);
   saveVaultFile(vault, "health", [{ key: "BLOOD_TYPE", value: "0 Rh+", desc: "blood group" }], PASSPHRASE);
 
   const report = migrateToKeyring(vault, PASSPHRASE);
@@ -248,6 +264,7 @@ test("C2: migrate refuses to fabricate a fresh keyset when a v2 manifest has los
 test("sync change IDs and bodies are byte-identical across migration, and resolved heads agree", () => {
   const DEVICE_A = "11111111-1111-4111-8111-111111111111";
   const vault = tempDir("sync-identity");
+  seedLegacyVault(vault);
 
   const before = new SyncedDocumentVault(vault, PASSPHRASE, DEVICE_A);
   const note = before.put({ path: "Plans/Launch.md", body: "first" });
