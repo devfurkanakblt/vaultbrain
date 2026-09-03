@@ -322,7 +322,7 @@ fn unwrap_slot(slot: &KeyringSlot, passphrase: &str) -> Result<KeySet, String> {
         .decrypt_in_place_detached(
             Nonce::from_slice(&iv),
             &aad,
-            &mut *buffer,
+            &mut buffer,
             Tag::from_slice(&tag),
         )
         .map_err(|_| "vault keyring slot did not authenticate".to_string())?;
@@ -400,7 +400,7 @@ pub(crate) fn wrap_key_set(
     let cipher =
         Aes256Gcm::new_from_slice(derived.as_ref()).map_err(|_| "invalid AES key".to_string())?;
     let tag = cipher
-        .encrypt_in_place_detached(Nonce::from_slice(&iv), &aad, &mut *buffer)
+        .encrypt_in_place_detached(Nonce::from_slice(&iv), &aad, &mut buffer)
         .map_err(|_| "wrapping the vault keyset failed".to_string())?;
     slot.wrapped.auth_tag = BASE64.encode(tag);
     slot.wrapped.ciphertext = BASE64.encode(&*buffer);

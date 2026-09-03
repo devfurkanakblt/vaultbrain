@@ -88,6 +88,10 @@ struct AppState {
     session: Mutex<Option<VaultSession>>,
 }
 
+/// The `documents` key and the `attachmentId` key, in that order: everything
+/// the Rust core takes from a vault's keyset, and everything a session holds.
+type SessionKeys = (Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>);
+
 struct VaultSession {
     vault_dir: PathBuf,
     root_dir: PathBuf,
@@ -1434,7 +1438,7 @@ fn open_vault_keys(
     vault_dir: &Path,
     root_dir: &Path,
     passphrase: &str,
-) -> Result<(Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>), String> {
+) -> Result<SessionKeys, String> {
     if let Some(file) = keyring::read(vault_dir)? {
         let keys = keyring::unwrap_keyring(&file, passphrase)?;
         return Ok((keys.documents.clone(), keys.attachment_id.clone()));
@@ -4884,7 +4888,12 @@ mod tests {
         drop(session);
         fs::remove_file(vault_dir.join("keyring.json")).unwrap();
 
-        let error = open_session(&path_text, "correct horse battery staple").unwrap_err();
+        // Not `unwrap_err()`: that would need `VaultSession: Debug`, and a
+        // session holds two live key buffers that must never be printable.
+        let error = match open_session(&path_text, "correct horse battery staple") {
+            Ok(_) => panic!("a vault whose keyring is gone must not open"),
+            Err(error) => error,
+        };
         assert!(
             error.contains("upgraded to a keyring"),
             "unhelpful refusal: {error}"
