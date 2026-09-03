@@ -669,3 +669,147 @@ test("version 1 and version 2 envelopes coexist and are keyed differently", () =
   // Neither envelope leaks plaintext.
   assert.doesNotMatch(JSON.stringify(rotated), /private body/u);
 });
+
+test("revoking a device rotates the epoch and locks it out of later changes", () => {
+  const ownerVault = tempVault("rotate-owner");
+  const owner = new SyncDeviceManager(ownerVault, PASSPHRASE);
+  owner.initializeOwner("Owner laptop", DEVICE_A);
+
+  // A peer device shares the same vault (same passphrase-derived key material),
+  // as in the existing owner-signed-enrollment test: copy the vault, then strip
+  // the private keys that belong only to the owner's device.
+  const peerVault = tempVault("rotate-peer");
+  fs.rmSync(peerVault, { recursive: true, force: true });
+  fs.cpSync(ownerVault, peerVault, { recursive: true });
+  fs.rmSync(path.join(peerVault, "documents", "sync", "identity", "authority.key.enc"));
+  fs.rmSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.key.enc`));
+  fs.rmSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.x25519.key.enc`));
+  const peer = new SyncDeviceManager(peerVault, PASSPHRASE);
+  let registryAfterEnroll;
+  try {
+    registryAfterEnroll = owner.enroll(peer.createEnrollmentRequest("Travel laptop", DEVICE_B));
+    assert.equal(registryAfterEnroll.body.epoch, 1);
+
+    const rotated = owner.revoke(DEVICE_B, 0);
+    assert.equal(rotated.body.epoch, 2, "revocation advances the epoch");
+    assert.equal(rotated.body.revision, registryAfterEnroll.body.revision + 1, "in one signed revision");
+
+    // Only the remaining device gets a wrap.
+    assert.deepEqual(
+      rotated.body.epochKeys.map((wrap) => wrap.deviceId),
+      [DEVICE_A],
+    );
+
+    // The remaining device's certificate was reissued at the new epoch,
+    // reusing its existing public keys.
+    const before = registryAfterEnroll.body.devices.find((r) => r.certificate.deviceId === DEVICE_A).certificate;
+    const after = rotated.body.devices.find((r) => r.certificate.deviceId === DEVICE_A).certificate;
+    assert.equal(after.epoch, 2);
+    assert.equal(after.publicKey, before.publicKey);
+    assert.equal(after.keyAgreementKey, before.keyAgreementKey);
+
+    // The revoked device stays behind at the old epoch.
+    const revoked = rotated.body.devices.find((r) => r.certificate.deviceId === DEVICE_B);
+    assert.equal(revoked.certificate.epoch, 1);
+    assert.ok(revoked.revokedAt);
+  } finally {
+    owner.close();
+    peer.close();
+  }
+});
+
+test("post-rotation changes are unreadable with the revoked device's epoch keys", () => {
+  const vaultDir = tempVault("rotate-readability");
+  const manager = new SyncDeviceManager(vaultDir, PASSPHRASE);
+  const log = new SyncChangeLog(vaultDir, PASSPHRASE);
+  try {
+    manager.initializeOwner("Owner laptop", DEVICE_A);
+    // A peer device shares the same vault (same passphrase-derived key material),
+    // as in the existing owner-signed-enrollment test: copy the vault, then strip
+    // the private keys that belong only to the owner's device.
+    const peerVault = tempVault("rotate-readability-peer");
+    fs.rmSync(peerVault, { recursive: true, force: true });
+    fs.cpSync(vaultDir, peerVault, { recursive: true });
+    fs.rmSync(path.join(peerVault, "documents", "sync", "identity", "authority.key.enc"));
+    fs.rmSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.key.enc`));
+    fs.rmSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.x25519.key.enc`));
+    const peer = new SyncDeviceManager(peerVault, PASSPHRASE);
+    try {
+      manager.enroll(peer.createEnrollmentRequest("Travel laptop", DEVICE_B));
+    } finally {
+      peer.close();
+    }
+
+    const before = log.append(DEVICE_A, noteMutation(null, 1, "before rotation"));
+    assert.equal(before.version, 2, "changes are device-signed once enrolled");
+
+    manager.revoke(DEVICE_B, 0);
+
+    const after = log.append(DEVICE_A, noteMutation(1, 2, "after rotation"));
+    const envelopes = log.envelopes();
+    const rotatedEnvelope = envelopes.find((envelope) => envelope.id === after.id);
+    const legacyEnvelope = envelopes.find((envelope) => envelope.id === before.id);
+
+    assert.equal(rotatedEnvelope.version, 2);
+    assert.equal(rotatedEnvelope.epoch, 2);
+    assert.equal(legacyEnvelope.version, 1, "pre-rotation changes keep their epoch 1 sealing");
+
+    // Holding only the vault key — which a revoked device still has — is no
+    // longer enough for the post-rotation change.
+    const session = openDocumentKey(vaultDir, PASSPHRASE);
+    assert.doesNotThrow(() => openSyncChange(legacyEnvelope, session.key));
+    assert.throws(() => openSyncChange(rotatedEnvelope, session.key), /epoch/iu);
+
+    // The whole log still verifies on the device that holds the epoch key.
+    assert.equal(log.verify().heads.length, 1);
+  } finally {
+    log.close();
+    manager.close();
+  }
+});
+
+test("revoking the last active device is refused", () => {
+  const vaultDir = tempVault("rotate-last");
+  const manager = new SyncDeviceManager(vaultDir, PASSPHRASE);
+  try {
+    manager.initializeOwner("Owner laptop", DEVICE_A);
+    assert.throws(() => manager.revoke(DEVICE_A, 0), /last active sync device/u);
+  } finally {
+    manager.close();
+  }
+});
+
+test("a checkpoint created before rotation still verifies afterwards", () => {
+  const vaultDir = tempVault("rotate-checkpoint");
+  const manager = new SyncDeviceManager(vaultDir, PASSPHRASE);
+  const log = new SyncChangeLog(vaultDir, PASSPHRASE);
+  try {
+    manager.initializeOwner("Owner laptop", DEVICE_A);
+    // A peer device shares the same vault (same passphrase-derived key material),
+    // as in the existing owner-signed-enrollment test: copy the vault, then strip
+    // the private keys that belong only to the owner's device.
+    const peerVault = tempVault("rotate-checkpoint-peer");
+    fs.rmSync(peerVault, { recursive: true, force: true });
+    fs.cpSync(vaultDir, peerVault, { recursive: true });
+    fs.rmSync(path.join(peerVault, "documents", "sync", "identity", "authority.key.enc"));
+    fs.rmSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.key.enc`));
+    fs.rmSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.x25519.key.enc`));
+    const peer = new SyncDeviceManager(peerVault, PASSPHRASE);
+    try {
+      manager.enroll(peer.createEnrollmentRequest("Travel laptop", DEVICE_B));
+    } finally {
+      peer.close();
+    }
+    log.append(DEVICE_A, noteMutation(null, 1, "checkpointed"));
+    const checkpoint = manager.createCheckpoint(log.changes());
+
+    manager.revoke(DEVICE_B, 0);
+    log.append(DEVICE_A, noteMutation(1, 2, "after rotation"));
+
+    const verified = manager.verifyCheckpoint(log.changes());
+    assert.equal(verified.id, checkpoint.id, "the pinned checkpoint survives an epoch bump");
+  } finally {
+    log.close();
+    manager.close();
+  }
+});

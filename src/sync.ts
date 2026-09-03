@@ -41,6 +41,11 @@ import {
   exportAgreementPublicKey,
   generateAgreementKeyPair,
   validateEpochKeyWrap,
+  EPOCH_KEY_BYTES,
+  readEpochKey,
+  saveEpochKey,
+  wrapEpochKey,
+  unwrapEpochKey,
   type EpochKeyWrap,
 } from "./sync-epoch.js";
 
@@ -817,7 +822,7 @@ function agreementKeyPath(rootDir: string, deviceId: string): string {
   return resolveInside(identityDir(rootDir), `${deviceId}.x25519.key.enc`);
 }
 
-export function readAgreementKey(rootDir: string, vaultKey: Buffer, deviceId: string): crypto.KeyObject {
+function readAgreementKey(rootDir: string, vaultKey: Buffer, deviceId: string): crypto.KeyObject {
   const filePath = agreementKeyPath(rootDir, deviceId);
   if (!fs.existsSync(filePath)) {
     throw new Error(`This device has no sync key agreement key; re-enroll device ${deviceId}.`);
@@ -1327,6 +1332,22 @@ export class SyncDeviceManager {
       const record = registry.body.devices.find((candidate) => candidate.certificate.deviceId === deviceId);
       if (!record) throw new Error(`Sync device ${deviceId} is not enrolled.`);
       if (record.revokedAt) throw new Error(`Sync device ${deviceId} is already revoked.`);
+      const remaining = registry.body.devices.filter(
+        (candidate) => !candidate.revokedAt && candidate.certificate.deviceId !== deviceId,
+      );
+      if (remaining.length === 0) {
+        throw new Error(
+          "Refusing to revoke the last active sync device: the new epoch key would reach nobody and the log could not be extended.",
+        );
+      }
+      for (const candidate of remaining) {
+        if (candidate.certificate.version !== 2 || !candidate.certificate.keyAgreementKey) {
+          throw new Error(
+            `Sync device ${candidate.certificate.deviceId} predates key agreement; re-enroll it before revoking another device.`,
+          );
+        }
+      }
+
       const cutoff = integer(revokedAfterSequence, 0, "Device revocation sequence");
       const authorityKey = readPrivateKey(
         authorityKeyPath(this.session.rootDir),
@@ -1335,19 +1356,56 @@ export class SyncDeviceManager {
         "Sync enrollment authority private key",
       );
       const revokedAt = canonicalTimestamp(now, "Device revocation time");
-      const nextBody: SyncDeviceRegistryBody = {
-        ...registry.body,
-        revision: registry.body.revision + 1,
-        updatedAt: revokedAt,
-        devices: registry.body.devices.map((candidate) =>
-          candidate.certificate.deviceId === deviceId
-            ? { ...candidate, revokedAt, revokedAfterSequence: cutoff }
-            : candidate,
-        ),
-      };
-      const next = signRegistryBody(nextBody, authorityKey);
-      saveDeviceRegistry(this.session.rootDir, this.key(), next);
-      return structuredClone(next);
+      const epoch = registry.body.epoch + 1;
+      const epochKey = crypto.randomBytes(EPOCH_KEY_BYTES);
+
+      try {
+        // Reissue the remaining devices at the new epoch, reusing their keys,
+        // and wrap the fresh content key to those devices only.
+        const devices: SyncDeviceRecord[] = registry.body.devices.map((candidate) => {
+          if (candidate.certificate.deviceId === deviceId) {
+            return { ...candidate, revokedAt, revokedAfterSequence: cutoff };
+          }
+          if (candidate.revokedAt) return candidate;
+          const certificate: SyncDeviceCertificate = { ...candidate.certificate, epoch };
+          return {
+            ...candidate,
+            certificate,
+            certificateSignature: signCanonical(certificatePayload(certificate), authorityKey),
+          };
+        });
+        const epochKeys = remaining
+          .map((candidate) =>
+            wrapEpochKey(
+              epochKey,
+              epoch,
+              candidate.certificate.deviceId,
+              agreementPublicKeyFromBase64(candidate.certificate.keyAgreementKey, "Certificate key agreement key"),
+            ),
+          )
+          .sort((left, right) => left.deviceId.localeCompare(right.deviceId));
+
+        const next = signRegistryBody(
+          {
+            ...registry.body,
+            version: 2,
+            revision: registry.body.revision + 1,
+            epoch,
+            updatedAt: revokedAt,
+            devices,
+            epochKeys,
+          },
+          authorityKey,
+        );
+        // Persist the key before the registry: a crash between the two leaves a
+        // recoverable key with no registry referencing it, rather than a
+        // registry naming an epoch this device cannot open.
+        saveEpochKey(this.session.rootDir, this.key(), epoch, epochKey);
+        saveDeviceRegistry(this.session.rootDir, this.key(), next);
+        return structuredClone(next);
+      } finally {
+        epochKey.fill(0);
+      }
     });
   }
 
@@ -1402,6 +1460,21 @@ export class SyncDeviceManager {
         }
         if (fingerprint !== expectedAuthorityFingerprint) {
           throw new Error("Incoming sync registry does not match the expected enrollment authority.");
+        }
+      }
+      // Adopt the epoch key wrapped to whichever local device this vault holds.
+      if (incoming.body.epoch > 1 && incoming.body.epochKeys) {
+        for (const wrap of incoming.body.epochKeys) {
+          if (readEpochKey(this.session.rootDir, this.key(), incoming.body.epoch)) break;
+          if (!fs.existsSync(agreementKeyPath(this.session.rootDir, wrap.deviceId))) continue;
+          const privateKey = readAgreementKey(this.session.rootDir, this.key(), wrap.deviceId);
+          const epochKey = unwrapEpochKey(wrap, incoming.body.epoch, wrap.deviceId, privateKey);
+          try {
+            saveEpochKey(this.session.rootDir, this.key(), incoming.body.epoch, epochKey);
+          } finally {
+            epochKey.fill(0);
+          }
+          break;
         }
       }
       saveDeviceRegistry(this.session.rootDir, this.key(), incoming);
@@ -1866,6 +1939,21 @@ export class SyncChangeLog {
     return this.session.key;
   }
 
+  private epochResolver(): SyncEpochKeyResolver {
+    const vaultKey = this.key();
+    const rootDir = this.session.rootDir;
+    return (epoch: number): Buffer => {
+      if (epoch === 1) return vaultKey;
+      const key = readEpochKey(rootDir, vaultKey, epoch);
+      if (!key) {
+        throw new Error(
+          `This device holds no content key for sync epoch ${epoch}; import the owner-signed registry that rotated to it.`,
+        );
+      }
+      return key;
+    };
+  }
+
   private readAppliedState(): SyncAppliedState {
     this.key();
     if (!fs.existsSync(this.appliedPath)) return { version: 1, objects: {} };
@@ -1944,14 +2032,14 @@ export class SyncChangeLog {
 
   envelopes(): EncryptedSyncChange[] {
     const envelopes = this.readEnvelopes();
-    const changes = envelopes.map((envelope) => openSyncChange(envelope, this.key()));
+    const changes = envelopes.map((envelope) => openSyncChange(envelope, this.epochResolver()));
     validateChangeSet(changes);
     validateAuthorizedChanges(changes, readDeviceRegistry(this.session.rootDir, this.key()));
     return structuredClone(envelopes);
   }
 
   changes(): SyncChange[] {
-    const changes = this.readEnvelopes().map((envelope) => openSyncChange(envelope, this.key()));
+    const changes = this.readEnvelopes().map((envelope) => openSyncChange(envelope, this.epochResolver()));
     validateChangeSet(changes);
     validateAuthorizedChanges(changes, readDeviceRegistry(this.session.rootDir, this.key()));
     return changes.sort(
@@ -1964,7 +2052,7 @@ export class SyncChangeLog {
   }
 
   private storeEnvelope(envelope: EncryptedSyncChange): boolean {
-    openSyncChange(envelope, this.key());
+    openSyncChange(envelope, this.epochResolver());
     const destination = resolveInside(this.changesDir, changeFilename(envelope.id));
     assertNotSymlink(destination);
     if (fs.existsSync(destination)) return false;
@@ -2013,8 +2101,10 @@ export class SyncChangeLog {
       const body = registry
         ? signAuthorizedChange(unsigned, registry, this.session.rootDir, this.key())
         : validateSyncChangeBody(unsigned);
-      const envelope = sealSyncChange(body, this.key());
-      const change = openSyncChange(envelope, this.key());
+      const epoch = registry?.body.epoch ?? 1;
+      const contentKey = epoch === 1 ? this.key() : this.epochResolver()(epoch);
+      const envelope = sealSyncChange(body, contentKey, epoch);
+      const change = openSyncChange(envelope, this.epochResolver());
       validateChangeSet([...current, change]);
       validateAuthorizedChanges([...current, change], registry);
       this.storeEnvelope(envelope);
@@ -2025,7 +2115,7 @@ export class SyncChangeLog {
   import(envelopes: readonly EncryptedSyncChange[]): { imported: number; existing: number } {
     return withVaultLock(this.vaultDir, () => {
       const current = this.changes();
-      const incoming = envelopes.map((envelope) => openSyncChange(envelope, this.key()));
+      const incoming = envelopes.map((envelope) => openSyncChange(envelope, this.epochResolver()));
       const known = new Set(current.map((change) => change.id));
       const additions = incoming.filter((change) => !known.has(change.id));
       validateChangeSet([...current, ...additions]);
