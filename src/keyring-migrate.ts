@@ -6,6 +6,7 @@ import { loadGrants, saveGrants } from "./grants.js";
 import {
   detectVaultFormat,
   forgetVaultKeys,
+  manifestTombstone,
   openVaultKeys,
   randomKeySet,
   wrapKeySet,
@@ -97,7 +98,7 @@ function tombstoneManifest(vaultDir: string): boolean {
   assertNotSymlink(manifestPath);
   const current = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as { version?: number };
   if (current.version === 2) return false;
-  writeFileAtomic(manifestPath, `${JSON.stringify({ version: 2, keyring: true }, null, 2)}\n`, { mode: 0o600 });
+  writeFileAtomic(manifestPath, manifestTombstone(), { mode: 0o600 });
   return true;
 }
 

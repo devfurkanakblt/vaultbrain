@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { assertNotSymlink, writeFileAtomic } from "./fs-safe.js";
 import { resolveInside } from "./safety.js";
+import { withVaultLock } from "./vault-lock.js";
 
 export const KEYRING_VERSION = 2;
 export const KEYSET_VERSION = 1;
@@ -360,4 +361,95 @@ export function forgetVaultKeys(vaultDir?: string): void {
     zeroKeySet(keys);
     keySetCache.delete(id);
   }
+}
+
+/**
+ * The single definition of the manifest tombstone bytes. Both the keyring
+ * creation path and `vbrain migrate` must write exactly these bytes so a
+ * vault created from scratch and a vault upgraded by migration are
+ * indistinguishable on disk.
+ */
+export function manifestTombstone(): string {
+  return `${JSON.stringify({ version: 2, keyring: true }, null, 2)}\n`;
+}
+
+/**
+ * The document manifest a keyring-native vault carries, byte-identical to the
+ * tombstone `vbrain migrate` leaves behind. Builds from before the keyring
+ * refuse any manifest whose version is not 1, so writing this is what makes an
+ * older build fail closed instead of mistaking a keyring vault for an empty
+ * legacy one and writing notes under a key of its own.
+ */
+function writeManifestTombstone(vaultDir: string): void {
+  const manifestPath = resolveInside(vaultDir, path.join("documents", "manifest.json"));
+  if (fs.existsSync(manifestPath)) {
+    assertNotSymlink(manifestPath);
+    return;
+  }
+  fs.mkdirSync(path.dirname(manifestPath), { recursive: true, mode: 0o700 });
+  writeFileAtomic(manifestPath, manifestTombstone(), {
+    mode: 0o600,
+  });
+}
+
+/**
+ * Returns the vault's keyset, creating one when the vault is brand new.
+ *
+ * `openVaultKeys` deliberately never writes — reading a vault must not bring
+ * one into existence — so this is its write-path counterpart, and the only
+ * place outside `vbrain migrate` that a keyring is created. A vault holding
+ * legacy material still returns `null`: a fresh keyring written beside an
+ * existing `audit.meta.json` would put a random audit key in front of a chain
+ * signed with the key derived from that file, and `vbrain audit verify` would
+ * stop validating a chain that is in fact intact. Adopting legacy keys so that
+ * cannot happen is migration's job, not this function's.
+ */
+export function openOrCreateVaultKeys(vaultDir: string, passphrase: string): KeySet | null {
+  const existing = openVaultKeys(vaultDir, passphrase);
+  if (existing) return existing;
+  if (!passphrase) throw new Error("A non-empty vault passphrase is required.");
+  if (detectVaultFormat(vaultDir) === "legacy") return null;
+
+  fs.mkdirSync(vaultDir, { recursive: true, mode: 0o700 });
+  return withVaultLock(vaultDir, () => {
+    // Re-checked under the lock: two processes racing on the same fresh vault
+    // must not each write a keyset of their own, or whichever lost the race
+    // would have encrypted its first write under keys nobody keeps.
+    const raced = openVaultKeys(vaultDir, passphrase);
+    if (raced) return raced;
+    if (detectVaultFormat(vaultDir) === "legacy") return null;
+
+    const keys = randomKeySet();
+    try {
+      writeKeyring(vaultDir, { version: KEYRING_VERSION, slots: [wrapKeySet(keys, passphrase)] });
+    } finally {
+      zeroKeySet(keys);
+    }
+    writeManifestTombstone(vaultDir);
+
+    // Read back rather than returning what we just generated: this proves the
+    // keyring on disk really unwraps before one byte is encrypted under it,
+    // and it populates the process cache every other caller expects.
+    const created = openVaultKeys(vaultDir, passphrase);
+    if (!created) throw new Error("Failed to create a vault keyring.");
+    return created;
+  });
+}
+
+/**
+ * `openOrCreateVaultKeys` for a caller that needs one key, zeroizing the five
+ * it did not ask for — the same contract as `openVaultKey`.
+ */
+export function openOrCreateVaultKey(
+  vaultDir: string,
+  passphrase: string,
+  name: KeyName,
+): Buffer | null {
+  const keys = openOrCreateVaultKeys(vaultDir, passphrase);
+  if (!keys) return null;
+  const wanted = keys[name];
+  for (const other of KEY_NAMES) {
+    if (other !== name) keys[other].fill(0);
+  }
+  return wanted;
 }

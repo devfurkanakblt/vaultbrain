@@ -40,7 +40,7 @@ The target vault is versioned and self-describing:
 ```text
 vault/
   manifest.json              # format/KDF versions; no content
-  keyring.json               # wrapped keyset for v2 vaults; lost keyring loses vault
+  keyring.json               # wrapped keyset; every new and migrated vault; lost keyring loses vault
   objects/                   # encrypted notes and attachments
   index.db.enc               # encrypted derived search/link index
   views.enc                  # encrypted saved property queries
@@ -118,8 +118,15 @@ The link index is updated in the same logical transaction as a note revision:
 
 ## Cryptographic model
 
-- A memory-hard KDF derives a wrapping key from the passphrase.
-- Random data-encryption keys are wrapped by the wrapping key.
+- `keyring.json` holds the passphrase-wrapped keyset. A memory-hard KDF
+  (scrypt, N=2^17) derives a wrapping key from the passphrase; the wrapping key
+  unwraps six independent 32-byte data keys: `documents`, `kv`, `attachmentId`,
+  `syncChange`, `syncEnvelope` and `audit`. No data key is derived from the
+  passphrase, which is what makes changing the passphrase cheap and re-keying
+  possible. Both the TypeScript and Rust cores read this file; only the
+  TypeScript core migrates a legacy vault into it. See
+  `docs/superpowers/specs/2026-09-03-vault-keyring-design.md` for the full key
+  hierarchy and wire format.
 - Notes and attachment chunks use an authenticated encryption mode with unique nonces.
 - Key rotation re-wraps data keys instead of rewriting every object.
 - Session keys are kept only in the privileged core and zeroized on lock.

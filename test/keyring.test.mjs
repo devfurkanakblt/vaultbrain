@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   DEFAULT_SCRYPT_N,
@@ -28,6 +29,14 @@ import { openSyncChange, sealSyncChange } from "../dist/sync/protocol.js";
 import { SyncLocalTransaction, SyncApplyReceiptStore } from "../dist/sync/transaction.js";
 
 const PASSPHRASE = "keyring-test-passphrase";
+const FIXTURES = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
+
+const VECTOR = JSON.parse(
+  fs.readFileSync(
+    path.resolve(FIXTURES, "keyring-vector.json"),
+    "utf8",
+  ),
+);
 
 test("a wrapped keyset round-trips and records its own cost", () => {
   const keys = randomKeySet();
@@ -104,6 +113,19 @@ function seedKeyring(vaultDir, passphrase) {
   writeKeyring(vaultDir, { version: 2, slots: [wrapKeySet(keys, passphrase, 2 ** 14)] });
   forgetVaultKeys(vaultDir);
   return keys;
+}
+
+/**
+ * What a pre-keyring release left in a vault directory. Writing it is what
+ * makes this a legacy vault: since phase 7.2 the ordinary write paths create a
+ * keyring on a directory holding no legacy material, so a test that needs the
+ * pre-keyring format has to say so. `schema.json` is the inert marker — no
+ * code path reads its contents, so seeding it changes the vault's format and
+ * nothing else.
+ */
+function seedLegacyVault(vaultDir) {
+  fs.mkdirSync(vaultDir, { recursive: true });
+  fs.writeFileSync(path.join(vaultDir, "schema.json"), '{"version":1,"files":{}}\n');
 }
 
 test("an empty directory is an empty vault and gets no keyring implicitly", () => {
@@ -184,6 +206,7 @@ test("the passphrase envelope refuses a keyed payload with a usable message", ()
 
 test("key-value files use the keyed envelope once a vault has a keyring", () => {
   const vault = tempVault();
+  seedLegacyVault(vault);
   saveVaultFile(vault, "health", [{ key: "BLOOD_TYPE", value: "0 Rh+", desc: "blood group" }], PASSPHRASE);
   assert.equal(vaultFileEnvelopeVersion(vault, "health"), 1);
 
@@ -213,6 +236,7 @@ test("a keyed key-value file cannot be renamed into another category", () => {
 
 test("grant files use the keyed envelope once a vault has a keyring", () => {
   const vault = tempVault();
+  seedLegacyVault(vault);
   saveGrants(vault, emptyGrantFile(), PASSPHRASE);
   const payload = JSON.parse(fs.readFileSync(path.join(vault, "grants.enc"), "utf8"));
   assert.equal(envelopeVersion(payload), 1);
@@ -294,6 +318,7 @@ test("a keyed key-value file throws a clear error when the keyring is missing", 
 
 test("the audit chain keeps verifying after a keyring appears", () => {
   const vault = tempVault();
+  seedLegacyVault(vault);
   appendAudit(vault, { actor: "cli-direct", file: "health", key: "BLOOD_TYPE" }, PASSPHRASE);
   assert.equal(verifyAudit(vault, PASSPHRASE).valid, true);
 
@@ -315,6 +340,7 @@ test("the audit chain keeps verifying after a keyring appears", () => {
 
 test("a legacy session uses one key for content and identity, a keyring session does not", () => {
   const legacy = tempVault();
+  seedLegacyVault(legacy);
   const legacySession = openDocumentKey(legacy, PASSPHRASE);
   assert.equal(legacySession.attachmentIdKey.toString("base64"), legacySession.key.toString("base64"));
   assert.equal(legacySession.syncChangeKey.toString("base64"), legacySession.key.toString("base64"));
@@ -458,4 +484,65 @@ test("a version 2 manifest without a keyring fails closed", () => {
   fs.mkdirSync(path.join(vault, "documents"), { recursive: true });
   fs.writeFileSync(path.join(vault, "documents", "manifest.json"), JSON.stringify({ version: 2, keyring: true }));
   assert.throws(() => openDocumentKey(vault, PASSPHRASE), /keyring/u);
+});
+
+test("the cross-core vector unwraps to its recorded keyset", () => {
+  const keys = unwrapSlot(VECTOR.slot, VECTOR.passphrase);
+  for (const name of KEY_NAMES) {
+    assert.deepEqual(keys[name], Buffer.from(VECTOR.keys[name], "base64"), name);
+  }
+});
+
+test("the cross-core vector records the keyset plaintext in key order", () => {
+  // The vector's keysetPlaintext is a static string written by
+  // scripts/make-keyring-vector.mjs, not production output. Parsing it and
+  // checking its own key order proves nothing about `serializeKeySet` in
+  // src/keyring.ts: this would pass unchanged even if the real serializer had
+  // a different field order, a bug, or did not exist.
+  //
+  // Instead, drive the real write path: wrap the vector's own six keys with
+  // production `wrapKeySet`, then peel that slot open by hand (mirroring what
+  // scripts/make-keyring-vector.mjs does) to recover the plaintext
+  // `wrapKeySet` actually encrypted, and compare it to the recorded vector
+  // byte for byte. This fails if `serializeKeySet` changes a field name, a
+  // field order, its version, or its base64 encoding.
+  const keys = {};
+  for (const name of KEY_NAMES) keys[name] = Buffer.from(VECTOR.keys[name], "base64");
+
+  const slot = wrapKeySet(keys, PASSPHRASE);
+
+  const kek = crypto.scryptSync(PASSPHRASE, Buffer.from(slot.kdf.salt, "base64"), 32, {
+    N: slot.kdf.N,
+    r: slot.kdf.r,
+    p: slot.kdf.p,
+    maxmem: 256 * 1024 * 1024,
+  });
+  // Mirrors slotAad in src/keyring.ts / scripts/make-keyring-vector.mjs.
+  const aad = JSON.stringify({
+    context: "secondbrain-vault:keyring-slot:v1",
+    version: 2,
+    id: slot.id,
+    type: slot.type,
+    kdf: { name: slot.kdf.name, N: slot.kdf.N, r: slot.kdf.r, p: slot.kdf.p, salt: slot.kdf.salt },
+  });
+
+  const decipher = crypto.createDecipheriv("aes-256-gcm", kek, Buffer.from(slot.wrapped.iv, "base64"));
+  decipher.setAAD(Buffer.from(aad, "utf8"));
+  decipher.setAuthTag(Buffer.from(slot.wrapped.authTag, "base64"));
+  const plaintext = Buffer.concat([
+    decipher.update(Buffer.from(slot.wrapped.ciphertext, "base64")),
+    decipher.final(),
+  ]).toString("utf8");
+
+  assert.equal(plaintext, VECTOR.keysetPlaintext);
+});
+
+test("the cross-core vector fails closed when its slot header is rewritten", () => {
+  for (const rewrite of [
+    { id: "00000000-0000-4000-8000-000000000002" },
+    { type: "recovery" },
+    { kdf: { ...VECTOR.slot.kdf, N: 2 ** 15 } },
+  ]) {
+    assert.throws(() => unwrapSlot({ ...VECTOR.slot, ...rewrite }, VECTOR.passphrase));
+  }
 });

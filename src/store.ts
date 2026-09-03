@@ -12,7 +12,7 @@ import {
   type AnyEncryptedPayload,
   type KeyedEncryptedPayload,
 } from "./crypto.js";
-import { openVaultKey } from "./keyring.js";
+import { openOrCreateVaultKey, openVaultKey } from "./keyring.js";
 import { parseKV, serializeKV, type KVEntry } from "./format.js";
 import { assertNotSymlink, writeFileAtomic } from "./fs-safe.js";
 import {
@@ -41,6 +41,16 @@ export function listVaultFiles(vaultDir: string): string[] {
 /** The keyed key-value key when this vault has a keyring, otherwise null. */
 function kvKey(vaultDir: string, passphrase: string): Buffer | null {
   return openVaultKey(vaultDir, passphrase, "kv");
+}
+
+/**
+ * The key-value key for a write. A vault with neither a keyring nor legacy
+ * material becomes keyring-native here: the first write to a fresh vault is
+ * what creates the keyring. A legacy vault still gets `null` and keeps writing
+ * its per-file envelope exactly as before.
+ */
+function kvKeyForWrite(vaultDir: string, passphrase: string): Buffer | null {
+  return openOrCreateVaultKey(vaultDir, passphrase, "kv");
 }
 
 export function loadVaultFile(
@@ -116,7 +126,7 @@ export function saveVaultFile(
   if (!fs.existsSync(vaultDir)) fs.mkdirSync(vaultDir, { recursive: true });
   const filePath = vaultFilePath(vaultDir, name);
   const plaintext = serializeKV(entries);
-  const key = kvKey(vaultDir, passphrase);
+  const key = kvKeyForWrite(vaultDir, passphrase);
   const payload = key
     ? encryptWithKey(plaintext, key, normalizeVaultName(name))
     : encrypt(plaintext, passphrase);
