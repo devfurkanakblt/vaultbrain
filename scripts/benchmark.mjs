@@ -73,6 +73,12 @@ try {
   const created = writer.putMany(inputs);
   const bulkCreateMs = performance.now() - createStart;
 
+  // Lock before timing the unlock. Since new vaults are keyring-native, the
+  // writer's keyset stays in the process cache and would serve the next
+  // construction for free -- the unlock gate would then measure a cache hit
+  // rather than the KDF it exists to bound. lock() drops that cache.
+  writer.lock();
+
   const unlockStart = performance.now();
   const vault = new DocumentVault(root, passphrase);
   const unlockAndIndexMs = performance.now() - unlockStart;
