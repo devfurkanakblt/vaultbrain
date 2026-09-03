@@ -17,8 +17,9 @@ import {
   writeKeyring,
 } from "../dist/keyring.js";
 
-import { decrypt, decryptWithKey, encryptWithKey, envelopeVersion } from "../dist/crypto.js";
+import { decrypt, decryptWithKey, encrypt, encryptWithKey, envelopeVersion } from "../dist/crypto.js";
 import { loadVaultFile, saveVaultFile, vaultFileEnvelopeVersion } from "../dist/store.js";
+import { addGrant, emptyGrantFile, loadGrants, saveGrants } from "../dist/grants.js";
 
 const PASSPHRASE = "keyring-test-passphrase";
 
@@ -189,4 +190,69 @@ test("a keyed key-value file cannot be renamed into another category", () => {
 
   fs.copyFileSync(path.join(vault, "health.kv.enc"), path.join(vault, "finance.kv.enc"));
   assert.throws(() => loadVaultFile(vault, "finance", PASSPHRASE));
+});
+
+test("grant files use the keyed envelope once a vault has a keyring", () => {
+  const vault = tempVault();
+  saveGrants(vault, emptyGrantFile(), PASSPHRASE);
+  const payload = JSON.parse(fs.readFileSync(path.join(vault, "grants.enc"), "utf8"));
+  assert.equal(envelopeVersion(payload), 1);
+
+  seedKeyring(vault, PASSPHRASE);
+
+  // A v1 file written before the keyring existed still opens.
+  assert.deepEqual(loadGrants(vault, PASSPHRASE), emptyGrantFile());
+
+  // The next write uses the keyset.
+  const grant = addGrant(
+    vault,
+    {
+      agent: "test-agent",
+      scopes: [{ file: "health", keys: ["*"], actions: ["discover", "resolve", "store"], redact: "none" }],
+    },
+    PASSPHRASE,
+  );
+  const updatedPayload = JSON.parse(fs.readFileSync(path.join(vault, "grants.enc"), "utf8"));
+  assert.equal(updatedPayload.version, 2);
+  const loaded = loadGrants(vault, PASSPHRASE);
+  assert.ok(loaded);
+  assert.equal(loaded.grants.length, 1);
+  assert.equal(loaded.grants[0].id, grant.id);
+});
+
+test("a v1 grant file written before keyring exists still opens in a vault with a keyring", () => {
+  const vault = tempVault();
+  // Write a v1 envelope grant file before the keyring exists
+  const grantFile = emptyGrantFile();
+  const v1Payload = encrypt(JSON.stringify(grantFile), PASSPHRASE);
+  fs.writeFileSync(path.join(vault, "grants.enc"), JSON.stringify(v1Payload, null, 2));
+  assert.equal(envelopeVersion(v1Payload), 1);
+
+  seedKeyring(vault, PASSPHRASE);
+
+  // The v1 file can still be loaded after the keyring is added.
+  const loaded = loadGrants(vault, PASSPHRASE);
+  assert.deepEqual(loaded, grantFile);
+});
+
+test("a keyed grant file throws a clear error when the keyring is missing", () => {
+  const vault = tempVault();
+  seedKeyring(vault, PASSPHRASE);
+
+  // Save a grant, which uses the keyed envelope.
+  addGrant(
+    vault,
+    {
+      agent: "test-agent",
+      scopes: [{ file: "health", keys: ["*"], actions: ["discover"], redact: "none" }],
+    },
+    PASSPHRASE,
+  );
+
+  // Delete the keyring and forget the cached keys.
+  fs.rmSync(path.join(vault, "keyring.json"));
+  forgetVaultKeys(vault);
+
+  // Loading the keyed grant file without a keyring must throw with a clear message.
+  assert.throws(() => loadGrants(vault, PASSPHRASE), /keyring-encrypted but the vault has no readable keyring/u);
 });
