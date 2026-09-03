@@ -364,6 +364,16 @@ export function forgetVaultKeys(vaultDir?: string): void {
 }
 
 /**
+ * The single definition of the manifest tombstone bytes. Both the keyring
+ * creation path and `vbrain migrate` must write exactly these bytes so a
+ * vault created from scratch and a vault upgraded by migration are
+ * indistinguishable on disk.
+ */
+export function manifestTombstone(): string {
+  return `${JSON.stringify({ version: 2, keyring: true }, null, 2)}\n`;
+}
+
+/**
  * The document manifest a keyring-native vault carries, byte-identical to the
  * tombstone `vbrain migrate` leaves behind. Builds from before the keyring
  * refuse any manifest whose version is not 1, so writing this is what makes an
@@ -377,7 +387,7 @@ function writeManifestTombstone(vaultDir: string): void {
     return;
   }
   fs.mkdirSync(path.dirname(manifestPath), { recursive: true, mode: 0o700 });
-  writeFileAtomic(manifestPath, `${JSON.stringify({ version: 2, keyring: true }, null, 2)}\n`, {
+  writeFileAtomic(manifestPath, manifestTombstone(), {
     mode: 0o600,
   });
 }
