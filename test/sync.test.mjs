@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -17,6 +18,7 @@ import {
 const PASSPHRASE = "sync-test-passphrase";
 const DEVICE_A = "11111111-1111-4111-8111-111111111111";
 const DEVICE_B = "22222222-2222-4222-8222-222222222222";
+const DEVICE_C = "33333333-3333-4333-8333-333333333333";
 
 function tempVault(label) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `secondbrain-sync-${label}-`));
@@ -582,5 +584,51 @@ test("enrollment stores an X25519 agreement key that never leaves the device", (
   } finally {
     owner.close();
     peer.close();
+  }
+});
+
+test("a hand-built version 1 enrollment request from an older build is still accepted and yields a version 1 certificate", () => {
+  const ownerVault = tempVault("legacy-owner");
+  const owner = new SyncDeviceManager(ownerVault, PASSPHRASE);
+  try {
+    owner.initializeOwner("Owner laptop", DEVICE_A);
+
+    // Build the request exactly the way a pre-agreement-key build did: an
+    // Ed25519 identity keypair and an unsigned payload with no
+    // keyAgreementKey field at all (not present, not undefined), signed with
+    // the same canonical-JSON + Ed25519 proof scheme the current build still
+    // verifies with.
+    const legacyPair = crypto.generateKeyPairSync("ed25519");
+    const unsigned = {
+      version: 1,
+      deviceId: DEVICE_C,
+      name: "Legacy build laptop",
+      publicKey: legacyPair.publicKey.export({ format: "der", type: "spki" }).toString("base64"),
+      requestedAt: "2026-09-03T09:00:00.000Z",
+      nonce: crypto.randomBytes(32).toString("base64"),
+    };
+    assert.ok(!("keyAgreementKey" in unsigned));
+    const proof = crypto
+      .sign(null, Buffer.from(canonicalSyncJson(unsigned), "utf8"), legacyPair.privateKey)
+      .toString("base64");
+    const legacyRequest = { ...unsigned, proof };
+
+    const registry = owner.enroll(legacyRequest, "2026-09-03T09:01:00.000Z");
+    const enrolledInline = registry.body.devices.find((record) => record.certificate.deviceId === DEVICE_C);
+    assert.equal(enrolledInline.certificate.version, 1);
+    assert.ok(!("keyAgreementKey" in enrolledInline.certificate));
+
+    // Read the registry back through the normal decrypt+validate path, so
+    // validateSignedDeviceRegistry runs over a registry that mixes the
+    // owner's version 2 certificate with this version 1 certificate -- the
+    // realistic post-upgrade state.
+    const reloaded = owner.state();
+    const ownerRecord = reloaded.body.devices.find((record) => record.certificate.deviceId === DEVICE_A);
+    const legacyRecord = reloaded.body.devices.find((record) => record.certificate.deviceId === DEVICE_C);
+    assert.equal(ownerRecord.certificate.version, 2);
+    assert.equal(legacyRecord.certificate.version, 1);
+    assert.ok(!("keyAgreementKey" in legacyRecord.certificate));
+  } finally {
+    owner.close();
   }
 });
