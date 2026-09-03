@@ -56,6 +56,7 @@ import {
   parseLocalDate,
   type TemplateVariables,
 } from "./templates.js";
+import { FORMAT_COMPATIBILITY, VAULT_FORMAT_VERSION } from "./format-version.js";
 
 const program = new Command();
 
@@ -1713,6 +1714,15 @@ program
     for (const name of listVaultFiles(dir)) {
       console.log(`  ${name}.kv.enc: envelope v${vaultFileEnvelopeVersion(dir, name)}`);
     }
+  });
+
+program
+  .command("format")
+  .description("print the on-disk format version and the artifact version matrix")
+  .action(() => {
+    console.log(
+      JSON.stringify({ formatVersion: VAULT_FORMAT_VERSION, artifacts: FORMAT_COMPATIBILITY }, null, 2),
+    );
   });
 
 program.parseAsync(process.argv).catch((error: unknown) => {

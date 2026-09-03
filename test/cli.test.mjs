@@ -31,3 +31,14 @@ test("sync devices list reports the active epoch and per-device state", () => {
   assert.match(listed, new RegExp(`${DEVICE_A}.*epoch=1.*active`, "u"), "each row carries its epoch and state");
   fs.rmSync(vaultDir, { recursive: true, force: true });
 });
+
+test("sbrain format prints the frozen version matrix", () => {
+  const output = JSON.parse(runCli(["format"]));
+  assert.equal(output.formatVersion, "1.0");
+  assert.deepEqual(output.artifacts.encryptedEnvelope, {
+    path: "*.kv.enc",
+    reads: [0, 1],
+    writes: [1],
+  });
+  assert.deepEqual(output.artifacts.syncChangeEnvelope.reads, [1, 2]);
+});
