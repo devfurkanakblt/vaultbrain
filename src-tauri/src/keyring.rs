@@ -17,7 +17,6 @@ use aes_gcm::{
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::{SecondsFormat, Utc};
 use rand::{rngs::OsRng, RngCore};
-use regex::Regex;
 use scrypt::{scrypt, Params as ScryptParams};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -185,8 +184,12 @@ fn validate_slot(slot: &KeyringSlot) -> Result<(), String> {
     if slot.kind != "passphrase" {
         return Err(format!("unsupported vault keyring slot type: {}", slot.kind));
     }
-    let id_pattern = Regex::new(r"^[0-9a-f-]{36}$").map_err(|error| error.to_string())?;
-    if !id_pattern.is_match(&slot.id) {
+    // The shape `src/keyring.ts` checks with /^[0-9a-f-]{36}$/, matched the way
+    // `attachment_dir` matches a content address rather than by building a
+    // regex on every validation.
+    if slot.id.len() != 36
+        || !slot.id.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f' | b'-'))
+    {
         return Err("vault keyring slot has a malformed id".into());
     }
     if slot.label.chars().count() > 64 {
