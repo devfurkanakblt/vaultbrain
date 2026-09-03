@@ -17,12 +17,13 @@ use aes_gcm::{
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::{SecondsFormat, Utc};
 use rand::{rngs::OsRng, RngCore};
+use regex::Regex;
 use scrypt::{scrypt, Params as ScryptParams};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{reject_symlink, write_atomic};
 
@@ -89,6 +90,21 @@ struct KeySetKeys {
     sync_change: String,
     sync_envelope: String,
     audit: String,
+}
+
+/// The base64 in these fields is a directly reversible copy of all six vault
+/// keys, and `String`'s ordinary drop leaves it in freed heap memory. Every
+/// other key copy in this module is `Zeroizing`; this is the one serde has to
+/// own, so it scrubs itself instead.
+impl Drop for KeySetKeys {
+    fn drop(&mut self) {
+        self.documents.zeroize();
+        self.kv.zeroize();
+        self.attachment_id.zeroize();
+        self.sync_change.zeroize();
+        self.sync_envelope.zeroize();
+        self.audit.zeroize();
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -169,15 +185,22 @@ fn validate_slot(slot: &KeyringSlot) -> Result<(), String> {
     if slot.kind != "passphrase" {
         return Err(format!("unsupported vault keyring slot type: {}", slot.kind));
     }
-    if slot.id.is_empty() {
-        return Err("vault keyring slot has no id".into());
+    let id_pattern = Regex::new(r"^[0-9a-f-]{36}$").map_err(|error| error.to_string())?;
+    if !id_pattern.is_match(&slot.id) {
+        return Err("vault keyring slot has a malformed id".into());
     }
+    if slot.label.chars().count() > 64 {
+        return Err("vault keyring slot label is too long".into());
+    }
+    // Deliberately stricter than `Date.parse` on the TypeScript side: every
+    // timestamp either core writes is RFC 3339, so failing closed here on
+    // anything looser cannot reject a keyring either core actually produced.
+    chrono::DateTime::parse_from_rfc3339(&slot.created_at)
+        .map_err(|_| "vault keyring slot has a malformed timestamp".to_string())?;
     validate_kdf(&slot.kdf)?;
     decode_base64(&slot.wrapped.iv, 12, 12, "iv")?;
     decode_base64(&slot.wrapped.auth_tag, 16, 16, "authentication tag")?;
-    if slot.wrapped.ciphertext.is_empty() {
-        return Err("vault keyring slot has no ciphertext".into());
-    }
+    decode_base64(&slot.wrapped.ciphertext, 16, 4096, "ciphertext")?;
     Ok(())
 }
 
@@ -518,5 +541,57 @@ mod tests {
         );
         assert!(read(&dir.join("missing")).unwrap().is_none());
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn slot_validation_matches_the_typescript_core() {
+        let vector = vector();
+        assert!(
+            validate_slot(&vector.slot).is_ok(),
+            "the vector's own slot must still validate"
+        );
+
+        let mut bad_id = vector.slot.clone();
+        bad_id.id = "not-a-valid-slot-id".into();
+        assert!(
+            validate_slot(&bad_id).is_err(),
+            "an id of the wrong shape must be rejected"
+        );
+
+        let mut long_label = vector.slot.clone();
+        long_label.label = "x".repeat(65);
+        assert!(
+            validate_slot(&long_label).is_err(),
+            "a label over 64 characters must be rejected"
+        );
+
+        let mut bad_timestamp = vector.slot.clone();
+        bad_timestamp.created_at = "not a timestamp".into();
+        assert!(
+            validate_slot(&bad_timestamp).is_err(),
+            "a created_at that is not a timestamp must be rejected"
+        );
+
+        let mut oversized_ciphertext = vector.slot.clone();
+        oversized_ciphertext.wrapped.ciphertext = BASE64.encode(vec![0u8; 4097]);
+        assert!(
+            validate_slot(&oversized_ciphertext).is_err(),
+            "a ciphertext decoding to more than 4096 bytes must be rejected"
+        );
+    }
+
+    #[test]
+    fn base64_key_material_is_cleared_by_the_zeroize_call_the_drop_impl_relies_on() {
+        // `KeySetKeys::drop` scrubs each field with `String::zeroize()`. Once
+        // the struct is actually dropped its heap allocation is freed, and
+        // safe Rust has no way to read freed memory back to prove the scrub
+        // happened — so this cannot assert anything about memory *after*
+        // drop. What it can prove, safely, is that the exact primitive the
+        // `Drop` impl calls on every field really does clear a base64 key
+        // copy's contents before that string is torn down.
+        let mut documents = BASE64.encode([7u8; KEY_LENGTH]);
+        assert!(!documents.is_empty());
+        documents.zeroize();
+        assert!(documents.is_empty(), "zeroize must clear the string's content");
     }
 }
