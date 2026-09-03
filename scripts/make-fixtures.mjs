@@ -12,10 +12,12 @@
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { DocumentVault } from "../dist/documents.js";
+import { SyncChangeLog, SyncDeviceManager } from "../dist/sync.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixtures = path.resolve(here, "..", "test", "fixtures");
@@ -59,6 +61,69 @@ function writeCanvasFixture() {
     edges: [{ id: "edge", fromNode: "contract", toNode: "text", toEnd: "arrow" }],
   });
   fs.rmSync(path.join(canvasDir, ".sbrain.lock"), { force: true });
+}
+
+/**
+ * A vault that has been through one epoch rotation: an owner device, a revoked
+ * device, a pre-rotation change sealed at epoch 1 and a post-rotation change
+ * sealed with the epoch 2 content key. Pins the version 2 registry and
+ * envelope shapes, and the fact that both envelope versions coexist.
+ */
+function writeSyncEpochFixture() {
+  const dir = path.join(fixtures, "sync-epoch-v2");
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+
+  const ownerId = "11111111-1111-4111-8111-111111111111";
+  const revokedId = "22222222-2222-4222-8222-222222222222";
+  const noteId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const mutation = (baseRevision, revision, body) => ({
+    objectType: "note",
+    objectId: noteId,
+    operation: "put",
+    baseRevision,
+    revision,
+    value: { title: "Frozen", body },
+  });
+
+  const manager = new SyncDeviceManager(dir, FIXTURE_PASSPHRASE);
+  manager.initializeOwner("Owner laptop", ownerId, "2026-09-03T00:00:00.000Z");
+
+  // A second device is required to produce a proof-of-possession enrollment
+  // request, but two independently created vaults can never share key
+  // material (each derives from its own random KDF salt). So the peer is a
+  // copy of the owner's freshly initialized vault, in a temporary directory,
+  // with the owner's private keys stripped -- it never gets committed.
+  const peerDir = fs.mkdtempSync(path.join(os.tmpdir(), "secondbrain-fixture-peer-"));
+  fs.rmSync(peerDir, { recursive: true, force: true });
+  fs.cpSync(dir, peerDir, { recursive: true });
+  fs.rmSync(path.join(peerDir, "documents", "sync", "identity", "authority.key.enc"));
+  fs.rmSync(path.join(peerDir, "documents", "sync", "identity", `${ownerId}.key.enc`));
+  fs.rmSync(path.join(peerDir, "documents", "sync", "identity", `${ownerId}.x25519.key.enc`));
+
+  const log = new SyncChangeLog(dir, FIXTURE_PASSPHRASE);
+  const peer = new SyncDeviceManager(peerDir, FIXTURE_PASSPHRASE);
+  try {
+    manager.enroll(
+      peer.createEnrollmentRequest("Travel laptop", revokedId, "2026-09-03T00:00:01.000Z"),
+      "2026-09-03T00:00:01.000Z"
+    );
+
+    // Sealed at epoch 1 with the vault key.
+    log.append(ownerId, mutation(null, 1, "before rotation"), "2026-09-03T00:00:02.000Z");
+    manager.createCheckpoint(log.changes(), "2026-09-03T00:00:03.000Z");
+
+    // Revocation rotates to epoch 2 and wraps the new key to the owner only.
+    manager.revoke(revokedId, 1, "2026-09-03T00:00:04.000Z");
+
+    // Sealed at epoch 2 with the wrapped content key.
+    log.append(ownerId, mutation(1, 2, "after rotation"), "2026-09-03T00:00:05.000Z");
+  } finally {
+    log.close();
+    manager.close();
+    peer.close();
+    fs.rmSync(peerDir, { recursive: true, force: true });
+  }
 }
 
 if (process.argv.includes("--canvas-only")) {
@@ -150,6 +215,7 @@ attachmentVault.putAttachment(
 fs.rmSync(path.join(attachmentDir, ".sbrain.lock"), { force: true });
 
 writeCanvasFixture();
+writeSyncEpochFixture();
 
 fs.writeFileSync(
   path.join(fixtures, "README.md"),
@@ -168,6 +234,7 @@ They contain dummy data only. Never point a fixture at a real vault.
 | \`documents-v1/\` | document vault manifest v1, index v2 | An encrypted note vault written by the current format still opens, searches and resolves links |
 | \`documents-attachments-v1/\` | document vault with chunk-encrypted attachments | Content-addressed attachments written by the TypeScript core still open in the Rust desktop core |
 | \`documents-canvas-v1/\` | document vault with encrypted canvas objects | Canvas objects, identities, references and AAD written by the TypeScript core stay readable |
+| \`sync-epoch-v2/\` | sync registry v2, change envelopes v1 and v2 | A rotated vault still opens: epoch 1 changes stay vault-key sealed, epoch 2 changes need the wrapped content key, and the revoked device holds no wrap |
 
 Regenerate deliberately (see \`scripts/make-fixtures.mjs\`) — overwriting a
 fixture throws away the evidence it was there to provide. To cover a new
