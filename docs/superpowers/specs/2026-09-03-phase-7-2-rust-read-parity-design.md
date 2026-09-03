@@ -39,12 +39,22 @@ deterministic vector rather than a fixture the Rust core generates.
 
 ## Sequencing decision
 
-7.2 is committed onto the existing `phase-7-vault-keyring` branch rather than a
-branch of its own, and phases 7.1 and 7.2 reach `main` in one pull request. The
-shared contract asks for a pull request per phase, and this deviates from it on
-purpose: the same document also states that neither phase is shippable alone.
-Merging 7.1 by itself would ship a `vbrain migrate` command that produces vaults
-the desktop build of the same commit cannot open.
+7.2 was built on top of the `phase-7-vault-keyring` branch, intending to reach
+`main` together with 7.1 in one pull request: the shared contract asks for a
+pull request per phase, but it also states that neither phase is shippable
+alone, and merging 7.1 by itself ships a `vbrain migrate` command that produces
+vaults the desktop build of the same commit cannot open.
+
+Events overtook that. 7.1 merged on its own as pull request #15 while 7.2 was
+being implemented, so `main` already carries the migration command without a
+Rust core that can read what it produces. 7.2 therefore ships as its own pull
+request, as the shared contract originally asked, and the window the sequencing
+decision existed to prevent is open until it merges. Nothing about the work
+changes; what changes is that the two phases are not landing atomically, so
+until 7.2 is in, a user who runs `vbrain migrate` against a vault the desktop
+application opens will find the desktop application refusing it — with a clear
+refusal, because both cores fail closed on a manifest they do not understand,
+but a refusal all the same.
 
 ## Rust keyring module
 
