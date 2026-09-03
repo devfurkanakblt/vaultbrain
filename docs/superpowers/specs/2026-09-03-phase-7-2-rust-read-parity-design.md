@@ -25,9 +25,17 @@ In scope:
 
 Out of scope: `vbrain passphrase change` (7.3), `vbrain rekey` (7.4), the
 recovery-key slot, and the desktop passphrase-change interface. The cosmetic
-follow-ups carried out of the 7.1 review stay open, except the `.gitignore`
-negation for fixture audit logs, which is included because its absence already
-caused one silent fixture omission.
+follow-ups carried out of the 7.1 review stay open. The `.gitignore` negation
+for fixture audit logs, listed as a follow-up in the 7.1 ledger, is already on
+the branch and needs nothing here.
+
+**Environment constraint.** There is no Rust toolchain on the development
+machine: `cargo`, `rustc`, `rustup` and any MSVC linker are all absent, and
+installing them is not part of this phase. Every Rust change therefore ships
+unverified locally and is gated by CI's `rust-windows` job, which runs
+`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
+`cargo test --lib`. This is why the cross-core evidence below is a
+deterministic vector rather than a fixture the Rust core generates.
 
 ## Sequencing decision
 
@@ -181,12 +189,23 @@ computes equals the fixture's attachment directory name. One test covers the
 slot AAD, the KDF parameters, the keyset parse, the document key and the
 `attachmentId` key at once.
 
-**Node reads what Rust wrote.** A new `test/fixtures/keyring-v2-rust/` fixture
-is produced by the Rust core — an `#[ignore]`d generator test, run by a
-documented command, with its row in `test/fixtures/README.md`. A Node test
-unwraps all six keys from it and decrypts the document the Rust core wrote. This
-is the only evidence that a vault created by the desktop application opens in the
-CLI, and it is checked in so it keeps being evidence.
+**Node reads what Rust wrote**, proved without running Rust. This machine has
+no Rust toolchain — no `cargo`, `rustc`, `rustup` or linker — so a fixture
+generated *by* the Rust core cannot be produced here, and CI is the only place
+Rust runs at all. A deterministic vector proves the same property offline and
+more precisely: `test/fixtures/keyring-vector.json` holds one slot with a fixed
+salt, IV, header and keyset, written by `scripts/make-keyring-vector.mjs`, plus
+the exact associated-data string and the exact keyset plaintext the format
+implies. Both cores assert they unwrap it to the recorded keys, and the Rust
+core additionally asserts its own keyset serializer reproduces
+`keysetPlaintext` byte-for-byte.
+
+Those two assertions close both directions. If Rust unwraps the vector, its
+associated data is byte-identical to the TypeScript core's, because the AAD is
+authenticated — and since the same builder serves both wrap and unwrap, that
+holds for what Rust writes too. If Rust's serializer reproduces
+`keysetPlaintext`, then a keyring Rust writes carries a plaintext the
+TypeScript core demonstrably parses.
 
 **The AAD literal** is asserted in both cores against the same expected string.
 
