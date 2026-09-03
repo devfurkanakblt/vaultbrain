@@ -632,3 +632,40 @@ test("a hand-built version 1 enrollment request from an older build is still acc
     owner.close();
   }
 });
+
+test("version 1 and version 2 envelopes coexist and are keyed differently", () => {
+  const vaultDir = tempVault("envelope-v2");
+  const session = openDocumentKey(vaultDir, PASSPHRASE);
+  const epochKey = Buffer.alloc(32, 9);
+  const body = {
+    version: 1,
+    deviceId: DEVICE_A,
+    sequence: 1,
+    previousDeviceChange: null,
+    parents: [],
+    createdAt: "2026-09-03T08:30:00.000Z",
+    mutation: noteMutation(null, 1, "private body"),
+  };
+
+  const legacy = sealSyncChange(body, session.key);
+  assert.equal(legacy.version, 1);
+  assert.equal(legacy.epoch, undefined);
+
+  const rotated = sealSyncChange(body, epochKey, 2);
+  assert.equal(rotated.version, 2);
+  assert.equal(rotated.epoch, 2);
+
+  // The same body under a different epoch key is a different change ID.
+  assert.notEqual(legacy.id, rotated.id);
+
+  const resolver = (epoch) => (epoch === 1 ? session.key : epochKey);
+  assert.equal(openSyncChange(legacy, resolver).mutation.value.body, "private body");
+  assert.equal(openSyncChange(rotated, resolver).mutation.value.body, "private body");
+
+  // A bare vault key still opens version 1 and now refuses version 2.
+  assert.equal(openSyncChange(legacy, session.key).sequence, 1);
+  assert.throws(() => openSyncChange(rotated, session.key), /epoch/iu);
+
+  // Neither envelope leaks plaintext.
+  assert.doesNotMatch(JSON.stringify(rotated), /private body/u);
+});

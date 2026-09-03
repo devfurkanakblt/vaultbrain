@@ -89,10 +89,15 @@ export interface SyncChangeAuthorization {
 }
 
 export interface EncryptedSyncChange {
-  version: 1;
+  version: 1 | 2;
   id: string;
+  /** Present on version 2 envelopes only; always 2 or greater. */
+  epoch?: number;
   payload: DocumentPayload;
 }
+
+/** Resolves an epoch number to its content key. Epoch 1 resolves to the vault key. */
+export type SyncEpochKeyResolver = (epoch: number) => Buffer;
 
 export interface SyncChange extends SyncChangeBody {
   id: string;
@@ -427,30 +432,34 @@ function changeAuthorizationPayload(body: SyncChangeBody): Buffer {
   return Buffer.from(canonicalSyncJson(payload as unknown as SyncJson), "utf8");
 }
 
-function changeId(body: SyncChangeBody, key: Buffer): string {
+function changeId(body: SyncChangeBody, key: Buffer, epoch: number): string {
   return crypto
     .createHmac("sha256", key)
     .update(AAD.syncChangeId)
     .update("\0")
+    .update(epoch === 1 ? "" : `${epoch}\0`)
     .update(canonicalSyncJson(body as unknown as SyncJson))
     .digest("hex");
 }
 
-function changeEncryptionKey(key: Buffer, id: string): Buffer {
-  return crypto.createHmac("sha256", key).update(AAD.syncChangeKey).update("\0").update(id).digest();
+function changeEncryptionKey(key: Buffer, id: string, epoch: number): Buffer {
+  return crypto
+    .createHmac("sha256", key)
+    .update(epoch === 1 ? AAD.syncChangeKey : AAD.syncChangeKeyV2)
+    .update("\0")
+    .update(id)
+    .digest();
 }
 
-export function sealSyncChange(body: SyncChangeBody, key: Buffer): EncryptedSyncChange {
+export function sealSyncChange(body: SyncChangeBody, key: Buffer, epoch = 1): EncryptedSyncChange {
+  if (!Number.isSafeInteger(epoch) || epoch < 1) throw new Error("A sync epoch must be a positive integer.");
   const normalized = validateSyncChangeBody(body);
   const canonical = canonicalSyncJson(normalized as unknown as SyncJson);
-  const id = changeId(normalized, key);
-  const envelopeKey = changeEncryptionKey(key, id);
+  const id = changeId(normalized, key, epoch);
+  const envelopeKey = changeEncryptionKey(key, id, epoch);
   try {
-    return {
-      version: 1,
-      id,
-      payload: encryptDocument(canonical, envelopeKey, syncChangeAad(id)),
-    };
+    const payload = encryptDocument(canonical, envelopeKey, syncChangeAad(id));
+    return epoch === 1 ? { version: 1, id, payload } : { version: 2, id, epoch, payload };
   } finally {
     envelopeKey.fill(0);
   }
@@ -458,8 +467,20 @@ export function sealSyncChange(body: SyncChangeBody, key: Buffer): EncryptedSync
 
 function validateEnvelope(value: unknown): EncryptedSyncChange {
   const envelope = value as EncryptedSyncChange | undefined;
-  if (!envelope || typeof envelope !== "object" || Array.isArray(envelope) || envelope.version !== 1) {
+  if (
+    !envelope ||
+    typeof envelope !== "object" ||
+    Array.isArray(envelope) ||
+    (envelope.version !== 1 && envelope.version !== 2)
+  ) {
     throw new Error("Unsupported or invalid encrypted sync envelope.");
+  }
+  if (envelope.version === 2) {
+    if (!Number.isSafeInteger(envelope.epoch) || (envelope.epoch as number) < 2) {
+      throw new Error("A version 2 sync envelope must declare an epoch of 2 or above.");
+    }
+  } else if (envelope.epoch !== undefined) {
+    throw new Error("A version 1 sync envelope cannot declare an epoch.");
   }
   if (typeof envelope.id !== "string" || !CHANGE_ID.test(envelope.id)) {
     throw new Error("Invalid encrypted sync change ID.");
@@ -1509,9 +1530,19 @@ export class SyncDeviceManager {
   }
 }
 
-export function openSyncChange(value: unknown, key: Buffer): SyncChange {
+export function openSyncChange(value: unknown, key: Buffer | SyncEpochKeyResolver): SyncChange {
   const envelope = validateEnvelope(value);
-  const envelopeKey = changeEncryptionKey(key, envelope.id);
+  const epoch = envelope.version === 2 ? envelope.epoch! : 1;
+  let contentKey: Buffer;
+  if (typeof key === "function") {
+    contentKey = key(epoch);
+  } else {
+    if (epoch !== 1) {
+      throw new Error(`Opening an epoch ${epoch} sync change requires an epoch key resolver.`);
+    }
+    contentKey = key;
+  }
+  const envelopeKey = changeEncryptionKey(contentKey, envelope.id, epoch);
   let plaintext: string;
   try {
     plaintext = decryptDocument(envelope.payload, envelopeKey, syncChangeAad(envelope.id));
@@ -1520,7 +1551,7 @@ export function openSyncChange(value: unknown, key: Buffer): SyncChange {
   }
   if (Buffer.byteLength(plaintext, "utf8") > MAX_CHANGE_BYTES) throw new Error("Sync change exceeds 8 MiB.");
   const body = validateSyncChangeBody(JSON.parse(plaintext));
-  const actual = Buffer.from(changeId(body, key), "hex");
+  const actual = Buffer.from(changeId(body, contentKey, epoch), "hex");
   const expected = Buffer.from(envelope.id, "hex");
   if (!crypto.timingSafeEqual(actual, expected)) throw new Error("Sync change ID does not match its content.");
   if (plaintext !== canonicalSyncJson(body as unknown as SyncJson)) {
