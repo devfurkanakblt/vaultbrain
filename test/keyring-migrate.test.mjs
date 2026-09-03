@@ -150,3 +150,24 @@ test("migration is idempotent and finishes an interrupted run", () => {
   assert.equal(vaultFileEnvelopeVersion(vault, "stale"), 2);
   assert.deepEqual(loadVaultFile(vault, "stale", PASSPHRASE), [{ key: "IBAN", value: "TR00", desc: "iban" }]);
 });
+
+test("the checked-in keyring fixture still opens", () => {
+  const vault = copyFixture("keyring-v2");
+  assert.equal(detectVaultFormat(vault), "keyring");
+
+  const documents = new DocumentVault(vault, FIXTURE_PASSPHRASE);
+  const notes = documents.list();
+  assert.ok(notes.length > 0);
+  assert.ok(documents.get(notes[0].id).body.length > 0);
+
+  const attachments = documents.listAttachments();
+  assert.ok(attachments.length > 0);
+  assert.ok(documents.getAttachment(attachments[0].id).data.length > 0);
+  documents.lock();
+
+  assert.deepEqual(loadVaultFile(vault, "health", FIXTURE_PASSPHRASE), [
+    { key: "BLOOD_TYPE", value: "0 Rh+", desc: "blood group" },
+  ]);
+  assert.equal(vaultFileEnvelopeVersion(vault, "health"), 2);
+  assert.equal(verifyAudit(vault, FIXTURE_PASSPHRASE).valid, true);
+});

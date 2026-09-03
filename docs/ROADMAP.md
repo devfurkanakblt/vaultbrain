@@ -78,3 +78,14 @@ Each phase must ship a usable vertical slice and keep older vaults readable.
 - [ ] Untrusted relay server and self-hosted option
 - [ ] Desktop multi-device release, then iOS/Android clients
 - [ ] External security audit, recovery drill and stable 1.0 format
+
+## Phase 7 — Key wrapping, passphrase change and re-key
+
+- [ ] Encrypted keyring: passphrase-wrapped keyset, adopting migration, keyed key-value envelope
+  - [x] Keyring format, vault format detection and cached keyset resolution
+  - [x] Key-value and grant files encrypted by the keyset and bound to their file identity
+  - [x] Document, attachment-identity and sync-change keys separated
+  - [x] `vbrain migrate` upgrades an existing vault without re-encrypting an object
+  - [ ] Rust core opens a keyring vault
+- [ ] Passphrase change, including the KDF cost upgrade path
+- [ ] Full re-key after a compromised passphrase
