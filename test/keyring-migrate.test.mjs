@@ -154,12 +154,14 @@ test("a key-value-only vault generates the keys it cannot adopt", () => {
 
 test("migration is idempotent and finishes an interrupted run", () => {
   const vault = tempDir("resume");
+  seedLegacyVault(vault);
   upsertEntry(vault, "health", "BLOOD_TYPE", "0 Rh+", "blood group", PASSPHRASE);
   new DocumentVault(vault, PASSPHRASE).lock();
 
-  migrateToKeyring(vault, PASSPHRASE);
+  const first = migrateToKeyring(vault, PASSPHRASE);
+  assert.equal(first.created, true, "the first call must genuinely create the keyring, not resume");
   const second = migrateToKeyring(vault, PASSPHRASE);
-  assert.equal(second.created, false);
+  assert.equal(second.created, false, "the second call must resume, not re-create");
   assert.deepEqual(second.kvFilesRewritten, []);
 
   // Simulate a crash between writing the keyring and rewriting a file: a
@@ -209,8 +211,14 @@ test("C1: migrate refuses to tombstone the legacy manifest when a present keyrin
   // A legacy document vault: manifest.json v1 with the real salt, and
   // deliberately no key-value files and no grants.enc — the interrupted-
   // migration state this branch exists to handle.
+  seedLegacyVault(vault);
   new DocumentVault(vault, PASSPHRASE).lock();
   const manifestBefore = fs.readFileSync(path.join(vault, "documents", "manifest.json"), "utf8");
+  const parsedBefore = JSON.parse(manifestBefore);
+  assert.equal(parsedBefore.version, 1, "setup must produce a genuine legacy v1 manifest, not a v2 tombstone");
+  assert.equal(typeof parsedBefore.kdf?.salt, "string");
+  assert.ok(parsedBefore.kdf.salt.length > 0);
+  assert.equal(fs.existsSync(path.join(vault, "keyring.json")), false, "no keyring.json must exist yet");
 
   // A keyring.json that exists (so detectVaultFormat reports "keyring") but is
   // unreadable — e.g. corrupted mid-write.
@@ -219,14 +227,26 @@ test("C1: migrate refuses to tombstone the legacy manifest when a present keyrin
   assert.throws(() => migrateToKeyring(vault, PASSPHRASE));
 
   // The legacy manifest — the vault's only copy of the salt — must survive
-  // completely untouched by the refused migrate call.
-  assert.equal(fs.readFileSync(path.join(vault, "documents", "manifest.json"), "utf8"), manifestBefore);
+  // completely untouched by the refused migrate call: still version 1, with
+  // the same salt, not tombstoned into the v2 { version: 2, keyring: true }
+  // marker.
+  const manifestAfter = fs.readFileSync(path.join(vault, "documents", "manifest.json"), "utf8");
+  assert.equal(manifestAfter, manifestBefore);
+  const parsedAfter = JSON.parse(manifestAfter);
+  assert.equal(parsedAfter.version, 1);
+  assert.equal(parsedAfter.kdf.salt, parsedBefore.kdf.salt);
 });
 
 test("C1 (wrong-passphrase variant): migrate refuses to tombstone when the passphrase cannot open a present keyring", () => {
   const vault = tempDir("c1-wrong-passphrase");
+  seedLegacyVault(vault);
   new DocumentVault(vault, PASSPHRASE).lock();
   const manifestBefore = fs.readFileSync(path.join(vault, "documents", "manifest.json"), "utf8");
+  const parsedBefore = JSON.parse(manifestBefore);
+  assert.equal(parsedBefore.version, 1, "setup must produce a genuine legacy v1 manifest, not a v2 tombstone");
+  assert.equal(typeof parsedBefore.kdf?.salt, "string");
+  assert.ok(parsedBefore.kdf.salt.length > 0);
+  assert.equal(fs.existsSync(path.join(vault, "keyring.json")), false, "no keyring.json must exist yet");
 
   // Simulate a keyring written for a different passphrase than the one about
   // to be used to resume migration (e.g. an earlier run crashed after writing
@@ -236,7 +256,13 @@ test("C1 (wrong-passphrase variant): migrate refuses to tombstone when the passp
   forgetVaultKeys(vault);
 
   assert.throws(() => migrateToKeyring(vault, PASSPHRASE));
-  assert.equal(fs.readFileSync(path.join(vault, "documents", "manifest.json"), "utf8"), manifestBefore);
+
+  // Still version 1 with the original salt — not tombstoned into a v2 marker.
+  const manifestAfter = fs.readFileSync(path.join(vault, "documents", "manifest.json"), "utf8");
+  assert.equal(manifestAfter, manifestBefore);
+  const parsedAfter = JSON.parse(manifestAfter);
+  assert.equal(parsedAfter.version, 1);
+  assert.equal(parsedAfter.kdf.salt, parsedBefore.kdf.salt);
 });
 
 // --- C2: legacyDocumentKey must throw, not return null, when it sees a
