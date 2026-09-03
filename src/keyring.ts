@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import path from "node:path";
 import { assertNotSymlink, writeFileAtomic } from "./fs-safe.js";
 import { resolveInside } from "./safety.js";
 
@@ -253,4 +254,81 @@ export function unwrapKeyring(file: KeyringFile, passphrase: string): KeySet {
     }
   }
   throw new Error("Unable to unlock this vault: wrong passphrase, or the keyring is damaged.");
+}
+
+export type VaultFormat = "keyring" | "legacy" | "empty";
+
+const LEGACY_MARKERS = [
+  path.join("documents", "manifest.json"),
+  "audit.meta.json",
+  "grants.enc",
+  "schema.json",
+];
+
+/**
+ * A vault is legacy when it holds material an earlier release wrote. Detection
+ * never writes anything: creating a keyring is `vbrain migrate`'s job, not a
+ * side effect of opening a vault.
+ */
+export function detectVaultFormat(vaultDir: string): VaultFormat {
+  if (fs.existsSync(keyringPath(vaultDir))) return "keyring";
+  if (!fs.existsSync(vaultDir)) return "empty";
+  for (const marker of LEGACY_MARKERS) {
+    if (fs.existsSync(resolveInside(vaultDir, marker))) return "legacy";
+  }
+  if (fs.readdirSync(vaultDir).some((entry) => entry.endsWith(".kv.enc"))) return "legacy";
+  return "empty";
+}
+
+/**
+ * One resolved keyset per vault per passphrase, so unlocking does not pay the
+ * KDF again on every operation. The fingerprint identifies an already-unlocked
+ * in-process session; neither it nor the keyset is ever written to disk. This
+ * is the pattern `audit.ts` already uses for its chain key.
+ */
+const keySetCache = new Map<string, KeySet>();
+
+function cacheId(vaultDir: string, passphrase: string, file: KeyringFile): string {
+  const fingerprint = crypto
+    .createHash("sha256")
+    .update(file.slots[0].kdf.salt, "utf8")
+    .update("\0", "utf8")
+    .update(passphrase, "utf8")
+    .digest("hex");
+  return `${resolveInside(vaultDir, ".")}\0${fingerprint}`;
+}
+
+/**
+ * Returns the vault's keyset, or `null` when this vault has no keyring — which
+ * means the caller must use the legacy derivation it already has. Callers
+ * receive their own buffers: several of them zeroize what they are handed when
+ * they lock, and that must not blind the next caller.
+ */
+export function openVaultKeys(vaultDir: string, passphrase: string): KeySet | null {
+  const file = readKeyring(vaultDir);
+  if (!file) return null;
+  if (!passphrase) throw new Error("A non-empty vault passphrase is required.");
+
+  const id = cacheId(vaultDir, passphrase, file);
+  const cached = keySetCache.get(id);
+  if (cached) return copyKeySet(cached);
+
+  const keys = unwrapKeyring(file, passphrase);
+  keySetCache.set(id, keys);
+  return copyKeySet(keys);
+}
+
+/** Drops cached key material, for one vault or for all of them. */
+export function forgetVaultKeys(vaultDir?: string): void {
+  if (vaultDir === undefined) {
+    for (const keys of keySetCache.values()) zeroKeySet(keys);
+    keySetCache.clear();
+    return;
+  }
+  const prefix = `${resolveInside(vaultDir, ".")}\0`;
+  for (const [id, keys] of keySetCache) {
+    if (!id.startsWith(prefix)) continue;
+    zeroKeySet(keys);
+    keySetCache.delete(id);
+  }
 }
