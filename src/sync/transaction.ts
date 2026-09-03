@@ -227,6 +227,8 @@ export class SyncLocalTransaction {
   close(): void {
     if (this.closed) return;
     this.session.key.fill(0);
+    this.session.attachmentIdKey.fill(0);
+    this.session.syncChangeKey.fill(0);
     this.closed = true;
   }
 
@@ -390,6 +392,8 @@ export class SyncApplyReceiptStore {
   close(): void {
     if (this.closed) return;
     this.session.key.fill(0);
+    this.session.attachmentIdKey.fill(0);
+    this.session.syncChangeKey.fill(0);
     this.closed = true;
   }
 

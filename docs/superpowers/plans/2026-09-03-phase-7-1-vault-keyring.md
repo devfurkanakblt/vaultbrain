@@ -50,7 +50,11 @@
 - `package.json` — add the two new test files to the `test` script.
 - `scripts/make-fixtures.mjs`, `test/fixtures/README.md`, `docs/ROADMAP.md` — the new fixture and its documentation.
 
-`src/sync/transaction.ts` needs no change: it only reads `session.rootDir` and `session.key`.
+`src/sync/transaction.ts` reads `session.rootDir` and `session.key`, and its two
+session-holding classes zeroize `session.key` in their `close()` methods. Because
+this task widens the session to three key buffers, both `close()` methods must
+zeroize all three — otherwise `close()` reports success while live key material
+stays in process memory.
 
 ---
 

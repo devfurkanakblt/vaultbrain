@@ -23,6 +23,8 @@ import { addGrant, emptyGrantFile, loadGrants, saveGrants } from "../dist/grants
 import { appendAudit, verifyAudit } from "../dist/audit.js";
 import { openDocumentKey } from "../dist/document-crypto.js";
 import { DocumentVault } from "../dist/documents.js";
+import { SyncChangeLog } from "../dist/sync/change-log.js";
+import { SyncLocalTransaction, SyncApplyReceiptStore } from "../dist/sync/transaction.js";
 
 const PASSPHRASE = "keyring-test-passphrase";
 
@@ -330,6 +332,43 @@ test("locking zeroizes every key the session was handed", () => {
   const second = new DocumentVault(vault, PASSPHRASE);
   assert.deepEqual(second.list(), []);
   second.lock();
+  // Verify that all three keys were zeroized
+  assert.ok(documents.session.key.every((byte) => byte === 0), "key should be zeroed");
+  assert.ok(documents.session.attachmentIdKey.every((byte) => byte === 0), "attachmentIdKey should be zeroed");
+  assert.ok(documents.session.syncChangeKey.every((byte) => byte === 0), "syncChangeKey should be zeroed");
+});
+
+test("SyncChangeLog.close() zeroizes all keys", () => {
+  const vault = tempVault();
+  seedKeyring(vault, PASSPHRASE);
+  const log = new SyncChangeLog(vault, PASSPHRASE);
+  log.close();
+  // Verify that all three keys were zeroized
+  assert.ok(log.session.key.every((byte) => byte === 0), "key should be zeroed");
+  assert.ok(log.session.attachmentIdKey.every((byte) => byte === 0), "attachmentIdKey should be zeroed");
+  assert.ok(log.session.syncChangeKey.every((byte) => byte === 0), "syncChangeKey should be zeroed");
+});
+
+test("SyncLocalTransaction.close() zeroizes all keys", () => {
+  const vault = tempVault();
+  seedKeyring(vault, PASSPHRASE);
+  const transaction = new SyncLocalTransaction(vault, PASSPHRASE);
+  transaction.close();
+  // Verify that all three keys were zeroized
+  assert.ok(transaction.session.key.every((byte) => byte === 0), "key should be zeroed");
+  assert.ok(transaction.session.attachmentIdKey.every((byte) => byte === 0), "attachmentIdKey should be zeroed");
+  assert.ok(transaction.session.syncChangeKey.every((byte) => byte === 0), "syncChangeKey should be zeroed");
+});
+
+test("SyncApplyReceiptStore.close() zeroizes all keys", () => {
+  const vault = tempVault();
+  seedKeyring(vault, PASSPHRASE);
+  const store = new SyncApplyReceiptStore(vault, PASSPHRASE);
+  store.close();
+  // Verify that all three keys were zeroized
+  assert.ok(store.session.key.every((byte) => byte === 0), "key should be zeroed");
+  assert.ok(store.session.attachmentIdKey.every((byte) => byte === 0), "attachmentIdKey should be zeroed");
+  assert.ok(store.session.syncChangeKey.every((byte) => byte === 0), "syncChangeKey should be zeroed");
 });
 
 test("a version 2 manifest without a keyring fails closed", () => {
