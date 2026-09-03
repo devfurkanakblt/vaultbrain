@@ -14,6 +14,7 @@ They contain dummy data only. Never point a fixture at a real vault.
 | `documents-v1/` | document vault manifest v1, index v2 | An encrypted note vault written by the current format still opens, searches and resolves links |
 | `documents-attachments-v1/` | document vault with chunk-encrypted attachments | Content-addressed attachments written by the TypeScript core still open in the Rust desktop core |
 | `documents-canvas-v1/` | document vault with encrypted canvas objects | Canvas objects, identities, references and AAD written by the TypeScript core stay readable |
+| `keyring-v2/` | vault keyring v2, keyset v1, key-value envelope v2 | A migrated vault opens through its wrapped keyset, its key-value files use the keyed envelope, and its adopted audit chain still verifies |
 
 Regenerate deliberately (see `scripts/make-fixtures.mjs`) — overwriting a
 fixture throws away the evidence it was there to provide. To cover a new

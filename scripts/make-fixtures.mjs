@@ -15,7 +15,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { appendAudit } from "../dist/audit.js";
 import { DocumentVault } from "../dist/documents.js";
+import { migrateToKeyring } from "../dist/keyring-migrate.js";
+import { upsertEntry } from "../dist/store.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixtures = path.resolve(here, "..", "test", "fixtures");
@@ -64,6 +67,12 @@ function writeCanvasFixture() {
 if (process.argv.includes("--canvas-only")) {
   writeCanvasFixture();
   console.log(`Canvas fixture written to ${path.join(fixtures, "documents-canvas-v1")}`);
+  process.exit(0);
+}
+
+if (process.argv.includes("--keyring-only")) {
+  writeKeyringFixture();
+  console.log(`Keyring fixture written to ${path.join(fixtures, "keyring-v2")}`);
   process.exit(0);
 }
 
@@ -151,12 +160,36 @@ fs.rmSync(path.join(attachmentDir, ".sbrain.lock"), { force: true });
 
 writeCanvasFixture();
 
+function writeKeyringFixture() {
+  const dir = path.join(fixtures, "keyring-v2");
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+
+  const vault = new DocumentVault(dir, FIXTURE_PASSPHRASE);
+  vault.put({
+    path: "Atlas/Keyring contract.md",
+    title: "Keyring contract",
+    body: "# Keyring contract\n\nThe wrapped keyset must stay openable. #fixture",
+    properties: { status: "frozen" },
+  });
+  vault.putAttachment(Buffer.from("keyring fixture attachment"), "keyring.txt", "text/plain");
+  vault.lock();
+
+  upsertEntry(dir, "health", "BLOOD_TYPE", "0 Rh+", "blood group", FIXTURE_PASSPHRASE);
+  appendAudit(dir, { actor: "cli-direct-write", file: "health", key: "BLOOD_TYPE" }, FIXTURE_PASSPHRASE);
+
+  migrateToKeyring(dir, FIXTURE_PASSPHRASE);
+  fs.rmSync(path.join(dir, ".sbrain.lock"), { force: true });
+}
+writeKeyringFixture();
+
 fs.writeFileSync(
   path.join(fixtures, "README.md"),
   `# Format fixtures
 
-Checked-in synthetic vaults for format-contract and compatibility tests. Tests
-open them to prove that storage behavior remains intentional across changes.
+Checked-in vaults written by earlier releases. Vault Brain is the product name,
+but these fixtures retain immutable pre-rename storage and cryptographic
+identifiers so tests prove upgrades do not orphan existing data.
 
 **Passphrase for every fixture here: \`${FIXTURE_PASSPHRASE}\`.**
 
@@ -168,9 +201,11 @@ They contain dummy data only. Never point a fixture at a real vault.
 | \`documents-v1/\` | document vault manifest v1, index v2 | An encrypted note vault written by the current format still opens, searches and resolves links |
 | \`documents-attachments-v1/\` | document vault with chunk-encrypted attachments | Content-addressed attachments written by the TypeScript core still open in the Rust desktop core |
 | \`documents-canvas-v1/\` | document vault with encrypted canvas objects | Canvas objects, identities, references and AAD written by the TypeScript core stay readable |
+| \`keyring-v2/\` | vault keyring v2, keyset v1, key-value envelope v2 | A migrated vault opens through its wrapped keyset, its key-value files use the keyed envelope, and its adopted audit chain still verifies |
 
-Regenerate deliberately (see \`scripts/make-fixtures.mjs\`). After publication,
-preserve released-format fixtures and add a new directory for each new format.
+Regenerate deliberately (see \`scripts/make-fixtures.mjs\`) — overwriting a
+fixture throws away the evidence it was there to provide. To cover a new
+format version, add a new directory instead of editing an old one.
 `,
 );
 

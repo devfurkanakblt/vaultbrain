@@ -64,6 +64,7 @@ export type {
   EncryptedSyncChange,
   SyncChange,
   SyncChangeBody,
+  SyncChangeKeys,
   SyncJson,
   SyncMutation,
   SyncObjectType,

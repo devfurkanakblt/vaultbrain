@@ -85,6 +85,13 @@ or calling AI model may hold that plaintext.
 - Vault encryption does not defend against a compromised operating system,
   keylogger, malicious code running as the user, screen capture, destructive
   filesystem access or loss of all backups.
+- Upgrading a vault to the keyring format does not strengthen copies that
+  already exist. A backup taken before `vbrain migrate` keeps the older
+  key-derivation cost and still opens with the passphrase it was written under.
+- For a migrated vault, `keyring.json` is the only path to the data: it wraps
+  the keys that decrypt everything, migration removes the legacy manifest's
+  key-check material, and the correct passphrase alone cannot recover a vault
+  whose keyring is lost or corrupted. It must be included in every backup.
 - Key names and descriptions exported to `schema.json`, plus explicitly
   plaintext recovery metadata documented in the architecture, must be treated
   as non-secret metadata.

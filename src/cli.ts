@@ -7,7 +7,6 @@ import {
   DEFAULT_VAULT_DIR,
   listVaultFiles,
   loadVaultFile,
-  migrateVault,
   storeNote,
   upsertEntry,
   vaultFileEnvelopeVersion,
@@ -17,6 +16,8 @@ import { appendAudit, readAudit, verifyAudit } from "./audit.js";
 import { getPassphrase, readSecret } from "./passphrase.js";
 import { forgetPassphrase, keychain, recallPassphrase, rememberPassphrase } from "./keychain.js";
 import { startMcpServer } from "./mcp-server.js";
+import { migrateToKeyring } from "./keyring-migrate.js";
+import { detectVaultFormat } from "./keyring.js";
 import {
   addGrant,
   approveRequest,
@@ -1194,23 +1195,31 @@ program
 
 program
   .command("migrate")
-  .description("rewrite key-value vault files in the current encrypted envelope format")
+  .description("upgrade this vault to the encrypted keyring format and rewrite key-value files")
   .action(async () => {
     const dir = program.opts().vault;
     const passphrase = await getPassphrase({ vaultDir: dir });
-    const reports = migrateVault(dir, passphrase);
-    if (reports.length === 0) {
-      console.log("No key-value files found; nothing to migrate.");
-      return;
+    const report = migrateToKeyring(dir, passphrase);
+
+    if (report.created) {
+      console.log(`Wrote ${path.join(dir, "keyring.json")}.`);
+      if (report.adopted.length > 0) {
+        console.log(`Adopted existing keys: ${report.adopted.join(", ")}.`);
+        console.log(`Attachment identities, sync change IDs and the audit chain are unchanged.`);
+      }
+      console.log(`Generated new keys: ${report.generated.join(", ")}.`);
+    } else {
+      console.log("This vault already has a keyring.");
     }
-    for (const report of reports) {
-      console.log(
-        report.migrated
-          ? `${report.name}: envelope v${report.from} -> v${report.to}`
-          : `${report.name}: already envelope v${report.to}`,
-      );
+
+    if (report.kvFilesRewritten.length > 0) {
+      console.log(`Rewrote ${report.kvFilesRewritten.length} key-value file(s): ${report.kvFilesRewritten.join(", ")}.`);
     }
-    console.log(`${reports.filter((report) => report.migrated).length} of ${reports.length} file(s) migrated.`);
+    if (report.grantsRewritten) console.log("Rewrote grants.enc in the keyed envelope.");
+    if (report.manifestTombstoned) {
+      console.log("Replaced documents/manifest.json with a version marker; its passphrase verifier is gone.");
+    }
+    console.log("Desktop builds older than this release cannot open a migrated vault.");
   });
 
 program
@@ -1252,6 +1261,7 @@ program
     const dir = program.opts().vault;
     const backend = keychain();
     console.log(`Credential store: ${backend.name}${backend.available() ? "" : " (unavailable)"}`);
+    console.log(`Vault format: ${detectVaultFormat(dir)}`);
     console.log(`Remembered for ${dir}: ${recallPassphrase(dir) ? "yes" : "no"}`);
     for (const name of listVaultFiles(dir)) {
       console.log(`  ${name}.kv.enc: envelope v${vaultFileEnvelopeVersion(dir, name)}`);

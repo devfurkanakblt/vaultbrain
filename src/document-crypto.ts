@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { assertNoSymlinkComponents, assertNotSymlink, writeFileAtomic } from "./fs-safe.js";
 import { resolveInside } from "./safety.js";
+import { openVaultKeys } from "./keyring.js";
 
 const SCRYPT_N = 2 ** 15;
 const KEY_LENGTH = 32;
@@ -23,8 +24,16 @@ export interface DocumentPayload {
 
 export interface DocumentKeySession {
   rootDir: string;
+  /** Encrypts every object under `documents/`. */
   key: Buffer;
-  manifest: DocumentManifest;
+  /** Keys the content address of an attachment. Never rotated. */
+  attachmentIdKey: Buffer;
+  /** Keys sync change IDs. Never rotated: the causal DAG references them. */
+  syncChangeKey: Buffer;
+  /** Keys sync change body encryption (the envelope subkey). Rotatable. */
+  syncEnvelopeKey: Buffer;
+  /** The legacy manifest, or null when the keys came from the vault keyring. */
+  manifest: DocumentManifest | null;
 }
 
 function derive(passphrase: string, salt: Buffer, N: number): Buffer {
@@ -45,10 +54,25 @@ export function openDocumentKey(vaultDir: string, passphrase: string): DocumentK
   assertNoSymlinkComponents(vaultDir, rootDir);
   fs.mkdirSync(rootDir, { recursive: true, mode: 0o700 });
 
+  const vaultKeys = openVaultKeys(vaultDir, passphrase);
+  if (vaultKeys) {
+    return {
+      rootDir,
+      key: vaultKeys.documents,
+      attachmentIdKey: vaultKeys.attachmentId,
+      syncChangeKey: vaultKeys.syncChange,
+      syncEnvelopeKey: vaultKeys.syncEnvelope,
+      manifest: null,
+    };
+  }
+
   let manifest: DocumentManifest;
   if (fs.existsSync(manifestPath)) {
     assertNotSymlink(manifestPath);
     manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as DocumentManifest;
+    if ((manifest.version as number) === 2) {
+      throw new Error("This vault was upgraded to a keyring, but keyring.json is missing or unreadable.");
+    }
     if (
       manifest.version !== 1 ||
       manifest.kdf?.name !== "scrypt" ||
@@ -58,25 +82,38 @@ export function openDocumentKey(vaultDir: string, passphrase: string): DocumentK
     ) {
       throw new Error("Unsupported or invalid document vault manifest.");
     }
-  } else {
-    const salt = crypto.randomBytes(16);
-    const key = derive(passphrase, salt, SCRYPT_N);
-    manifest = {
-      version: 1,
-      kdf: { name: "scrypt", N: SCRYPT_N, salt: salt.toString("base64") },
-      verifier: verifier(key),
+    const key = derive(passphrase, Buffer.from(manifest.kdf.salt, "base64"), manifest.kdf.N);
+    const actual = Buffer.from(verifier(key), "hex");
+    const expected = Buffer.from(manifest.verifier, "hex");
+    if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) {
+      throw new Error("Unable to unlock document vault: wrong passphrase or damaged manifest.");
+    }
+    return {
+      rootDir,
+      key,
+      attachmentIdKey: Buffer.from(key),
+      syncChangeKey: Buffer.from(key),
+      syncEnvelopeKey: Buffer.from(key),
+      manifest,
     };
-    writeFileAtomic(manifestPath, JSON.stringify(manifest, null, 2), { mode: 0o600 });
-    return { rootDir, key, manifest };
   }
 
-  const key = derive(passphrase, Buffer.from(manifest.kdf.salt, "base64"), manifest.kdf.N);
-  const actual = Buffer.from(verifier(key), "hex");
-  const expected = Buffer.from(manifest.verifier, "hex");
-  if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) {
-    throw new Error("Unable to unlock document vault: wrong passphrase or damaged manifest.");
-  }
-  return { rootDir, key, manifest };
+  const salt = crypto.randomBytes(16);
+  const key = derive(passphrase, salt, SCRYPT_N);
+  manifest = {
+    version: 1,
+    kdf: { name: "scrypt", N: SCRYPT_N, salt: salt.toString("base64") },
+    verifier: verifier(key),
+  };
+  writeFileAtomic(manifestPath, JSON.stringify(manifest, null, 2), { mode: 0o600 });
+  return {
+    rootDir,
+    key,
+    attachmentIdKey: Buffer.from(key),
+    syncChangeKey: Buffer.from(key),
+    syncEnvelopeKey: Buffer.from(key),
+    manifest,
+  };
 }
 
 export function encryptDocument(plaintext: string, key: Buffer, aad: string): DocumentPayload {

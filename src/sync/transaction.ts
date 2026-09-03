@@ -8,6 +8,7 @@ import {
   type DocumentPayload,
 } from "../document-crypto.js";
 import { assertNoSymlinkComponents, assertNotSymlink, writeFileAtomic } from "../fs-safe.js";
+import { forgetVaultKeys } from "../keyring.js";
 import { resolveInside } from "../safety.js";
 import {
   CHANGE_ID,
@@ -213,7 +214,7 @@ export class SyncLocalTransaction {
   private closed = false;
 
   constructor(
-    vaultDir: string,
+    private readonly vaultDir: string,
     passphrase: string,
     private readonly options: SyncTransactionOptions = {},
   ) {
@@ -227,6 +228,10 @@ export class SyncLocalTransaction {
   close(): void {
     if (this.closed) return;
     this.session.key.fill(0);
+    this.session.attachmentIdKey.fill(0);
+    this.session.syncChangeKey.fill(0);
+    this.session.syncEnvelopeKey.fill(0);
+    forgetVaultKeys(this.vaultDir);
     this.closed = true;
   }
 
@@ -376,7 +381,7 @@ export class SyncApplyReceiptStore {
   private closed = false;
 
   constructor(
-    vaultDir: string,
+    private readonly vaultDir: string,
     passphrase: string,
     private readonly options: SyncTransactionOptions = {},
   ) {
@@ -390,6 +395,10 @@ export class SyncApplyReceiptStore {
   close(): void {
     if (this.closed) return;
     this.session.key.fill(0);
+    this.session.attachmentIdKey.fill(0);
+    this.session.syncChangeKey.fill(0);
+    this.session.syncEnvelopeKey.fill(0);
+    forgetVaultKeys(this.vaultDir);
     this.closed = true;
   }
 

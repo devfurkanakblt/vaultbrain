@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import { assertNotSymlink, writeFileAtomic } from "./fs-safe.js";
 import { resolveInside } from "./safety.js";
+import { openVaultKey } from "./keyring.js";
 
 export interface AuditEntry {
   timestamp: string;
@@ -89,6 +90,17 @@ function auditKey(vaultDir: string, passphrase: string, meta: AuditMeta): Buffer
 }
 
 /**
+ * A keyring vault keeps its chain key in the keyset, so changing the
+ * passphrase later cannot orphan the audit history. A legacy vault keeps
+ * deriving from `audit.meta.json` exactly as before.
+ */
+function chainKeyForAppend(vaultDir: string, passphrase: string): Buffer {
+  const key = openVaultKey(vaultDir, passphrase, "audit");
+  if (key) return key;
+  return auditKey(vaultDir, passphrase, loadOrCreateMeta(vaultDir));
+}
+
+/**
  * The grant fields are folded in only when an entry carries them, so a log
  * written before this build hashes byte-for-byte as it did and keeps verifying,
  * while everything new — including who asked and how much they got — is signed.
@@ -126,7 +138,7 @@ export function appendAudit(
   const previousSigned = [...existing].reverse().find((item) => item.hash);
   const prevHash = previousSigned?.hash ?? GENESIS_HASH;
   const unsigned = { timestamp: new Date().toISOString(), ...entry, prevHash };
-  const hash = calculateHash(unsigned, auditKey(vaultDir, passphrase, loadOrCreateMeta(vaultDir)));
+  const hash = calculateHash(unsigned, chainKeyForAppend(vaultDir, passphrase));
   const full: AuditEntry = { ...unsigned, hash };
   fs.appendFileSync(p, JSON.stringify(full) + "\n", { encoding: "utf8", mode: 0o600 });
 }
@@ -151,12 +163,18 @@ export function verifyAudit(vaultDir: string, passphrase: string): AuditVerifica
   );
   if (signed.length === 0) return { valid: true, signedEntries: 0, legacyEntries };
 
-  const meta = loadMeta(vaultDir);
-  if (!meta) {
-    return { valid: false, signedEntries: signed.length, legacyEntries, error: "Missing audit metadata." };
+  const keyringKey = openVaultKey(vaultDir, passphrase, "audit");
+  let key: Buffer;
+  if (keyringKey) {
+    key = keyringKey;
+  } else {
+    const meta = loadMeta(vaultDir);
+    if (!meta) {
+      return { valid: false, signedEntries: signed.length, legacyEntries, error: "Missing audit metadata." };
+    }
+    key = auditKey(vaultDir, passphrase, meta);
   }
 
-  const key = auditKey(vaultDir, passphrase, meta);
   let expectedPrevious = GENESIS_HASH;
   for (let index = 0; index < signed.length; index += 1) {
     const entry = signed[index];

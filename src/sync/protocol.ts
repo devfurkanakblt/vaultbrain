@@ -51,6 +51,21 @@ export interface SyncChange extends SyncChangeBody {
   id: string;
 }
 
+/**
+ * The two keys `sealSyncChange`/`openSyncChange` need, named so a call site
+ * cannot silently transpose them. `syncChangeKey` is permanent: it derives
+ * only the change's identity (its ID), which must never move because the
+ * causal DAG references it. `syncEnvelopeKey` is rotatable: it derives the
+ * key that encrypts the change body, so a re-key can rotate it and
+ * re-encrypt bodies while every change ID stays byte-identical.
+ */
+export interface SyncChangeKeys {
+  /** Keys the change's identity. Permanent — never rotated. */
+  syncChangeKey: Buffer;
+  /** Keys the body's encryption. Rotatable. */
+  syncEnvelopeKey: Buffer;
+}
+
 function assertUnicode(value: string, label: string): void {
   for (let index = 0; index < value.length; index += 1) {
     const code = value.charCodeAt(index);
@@ -193,11 +208,11 @@ function changeEncryptionKey(key: Buffer, id: string): Buffer {
   return crypto.createHmac("sha256", key).update(CHANGE_KEY_CONTEXT).update("\0").update(id).digest();
 }
 
-export function sealSyncChange(body: SyncChangeBody, key: Buffer): EncryptedSyncChange {
+export function sealSyncChange(body: SyncChangeBody, keys: SyncChangeKeys): EncryptedSyncChange {
   const normalized = validateSyncChangeBody(body);
   const canonical = canonicalSyncJson(normalized as unknown as SyncJson);
-  const id = changeId(normalized, key);
-  const envelopeKey = changeEncryptionKey(key, id);
+  const id = changeId(normalized, keys.syncChangeKey);
+  const envelopeKey = changeEncryptionKey(keys.syncEnvelopeKey, id);
   try {
     return { version: 1, id, payload: encryptDocument(canonical, envelopeKey, `${CHANGE_AAD_PREFIX}${id}`) };
   } finally {
@@ -235,9 +250,9 @@ export function validateEncryptedSyncChange(value: unknown): EncryptedSyncChange
   return structuredClone(envelope);
 }
 
-export function openSyncChange(value: unknown, key: Buffer): SyncChange {
+export function openSyncChange(value: unknown, keys: SyncChangeKeys): SyncChange {
   const envelope = validateEncryptedSyncChange(value);
-  const envelopeKey = changeEncryptionKey(key, envelope.id);
+  const envelopeKey = changeEncryptionKey(keys.syncEnvelopeKey, envelope.id);
   let plaintext: string;
   try {
     plaintext = decryptDocument(envelope.payload, envelopeKey, `${CHANGE_AAD_PREFIX}${envelope.id}`);
@@ -246,7 +261,7 @@ export function openSyncChange(value: unknown, key: Buffer): SyncChange {
   }
   if (Buffer.byteLength(plaintext, "utf8") > MAX_CHANGE_BYTES) throw new Error("Sync change exceeds 8 MiB.");
   const body = validateSyncChangeBody(JSON.parse(plaintext));
-  const actual = Buffer.from(changeId(body, key), "hex");
+  const actual = Buffer.from(changeId(body, keys.syncChangeKey), "hex");
   const expected = Buffer.from(envelope.id, "hex");
   if (!crypto.timingSafeEqual(actual, expected)) throw new Error("Sync change ID does not match its content.");
   if (plaintext !== canonicalSyncJson(body as unknown as SyncJson))

@@ -12,6 +12,7 @@ import {
   type DocumentPayload,
 } from "./document-crypto.js";
 import { assertNoSymlinkComponents, assertNotSymlink, writeFileAtomic } from "./fs-safe.js";
+import { forgetVaultKeys } from "./keyring.js";
 import {
   analyzeMarkdown,
   makeExcerpt,
@@ -509,16 +510,24 @@ export class DocumentVault {
   }
 
   /**
-   * Ends the session: the derived key is overwritten in place and the decrypted
-   * index is dropped, so nothing readable survives in this process. Every
-   * subsequent operation fails until a new DocumentVault is constructed with
-   * the passphrase again — locking is a state change, not a UI gesture.
+   * Ends the session: the session's own key copies are overwritten in place,
+   * the module-level keyring cache for this vault is dropped too (a keyring
+   * vault's master keyset would otherwise stay resident and re-serve the next
+   * caller in this process), and the decrypted index is dropped, so nothing
+   * readable survives in this process. Every subsequent operation fails until
+   * a new DocumentVault is constructed with the passphrase again — re-deriving
+   * on the next unlock is the correct cost of locking — locking is a state
+   * change, not a UI gesture.
    */
   lock(): void {
     this.sessionGeneration += 1;
     for (const index of this.semanticIndexes.values()) index.clear();
     this.semanticIndexes.clear();
     this.session.key.fill(0);
+    this.session.attachmentIdKey.fill(0);
+    this.session.syncChangeKey.fill(0);
+    this.session.syncEnvelopeKey.fill(0);
+    forgetVaultKeys(this.vaultDir);
     this.indexCache = undefined;
     this.notesCache = undefined;
     this.searchCache.clear();
@@ -2127,7 +2136,7 @@ export class DocumentVault {
       throw new Error("Invalid attachment MIME type.");
     }
     const id = crypto
-      .createHmac("sha256", this.session.key)
+      .createHmac("sha256", this.session.attachmentIdKey)
       .update("secondbrain-vault:attachment-id:v1\0", "utf8")
       .update(data)
       .digest("hex");
@@ -2163,7 +2172,7 @@ export class DocumentVault {
       throw new Error("Invalid attachment MIME type.");
     }
     const id = crypto
-      .createHmac("sha256", this.session.key)
+      .createHmac("sha256", this.session.attachmentIdKey)
       .update("secondbrain-vault:attachment-id:v1\0", "utf8")
       .update(data)
       .digest("hex");
@@ -2204,7 +2213,7 @@ export class DocumentVault {
     }
     const data = Buffer.concat(parts);
     const actualId = crypto
-      .createHmac("sha256", this.session.key)
+      .createHmac("sha256", this.session.attachmentIdKey)
       .update("secondbrain-vault:attachment-id:v1\0", "utf8")
       .update(data)
       .digest("hex");
