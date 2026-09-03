@@ -5,6 +5,13 @@ Versioning once the encrypted storage format reaches 1.0.
 
 ## Unreleased
 
+- Taught the Rust desktop core to open passphrase-wrapped keyring vaults, and
+  made new vaults keyring-native in both the TypeScript and Rust cores, with a
+  manifest version tombstone that makes an older build fail closed instead of
+  silently misreading the vault. A vault whose `keyring.json` is missing or
+  corrupted now reports that the keyring is unreadable rather than a generic
+  missing-field error. The wire format is pinned by a deterministic cross-core
+  test vector shared by both cores' test suites.
 - Added synchronized document sessions that automatically capture note, canvas
   and attachment puts/deletes, keep an encrypted per-object application cursor,
   and idempotently apply conflict-free remote histories to the live vault.
