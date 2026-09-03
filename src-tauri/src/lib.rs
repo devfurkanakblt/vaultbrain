@@ -33,6 +33,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 type HmacSha256 = Hmac<Sha256>;
+mod keyring;
 const INDEX_AAD: &str = "secondbrain-vault:document-index:v1";
 const DERIVED_LAYOUT: u8 = 5;
 const KEY_CHECK_CONTEXT: &str = "secondbrain-vault:document-key:v1";
@@ -782,7 +783,7 @@ fn decrypt(payload: &EncryptedPayload, key: &[u8], aad: &str) -> Result<Vec<u8>,
     Ok(ciphertext)
 }
 
-fn write_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
+pub(crate) fn write_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
     let parent = path.parent().ok_or("target has no parent directory")?;
     fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     reject_symlink(path)?;
@@ -841,7 +842,7 @@ fn replace_atomic(source: &Path, destination: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn reject_symlink(path: &Path) -> Result<(), String> {
+pub(crate) fn reject_symlink(path: &Path) -> Result<(), String> {
     if path.exists()
         && fs::symlink_metadata(path)
             .map_err(|error| error.to_string())?

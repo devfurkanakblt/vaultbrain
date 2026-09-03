@@ -39,3 +39,21 @@ codegen-units = 1
 lto = true
 opt-level = "s"
 strip = true
+
+# scrypt is unusably slow unoptimized, and the test profile inherits dev, so a
+# debug `cargo test` would spend minutes deriving keys. Only dependencies are
+# optimized; this crate itself still compiles with full debug info.
+[profile.dev.package.scrypt]
+opt-level = 3
+
+[profile.dev.package.salsa20]
+opt-level = 3
+
+[profile.dev.package.pbkdf2]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.aes]
+opt-level = 3
