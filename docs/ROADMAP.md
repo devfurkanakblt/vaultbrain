@@ -81,7 +81,7 @@ Each phase must ship a usable vertical slice and keep older vaults readable.
 
 ## Phase 7 — Key wrapping, passphrase change and re-key
 
-- [ ] Encrypted keyring: passphrase-wrapped keyset, adopting migration, keyed key-value envelope
+- [x] Encrypted keyring: passphrase-wrapped keyset, adopting migration, keyed key-value envelope
   - [x] Keyring format, vault format detection and cached keyset resolution
   - [x] Key-value and grant files encrypted by the keyset and bound to their file identity
   - [x] Document, attachment-identity and sync-change keys separated
