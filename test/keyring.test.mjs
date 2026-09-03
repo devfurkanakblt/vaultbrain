@@ -256,3 +256,19 @@ test("a keyed grant file throws a clear error when the keyring is missing", () =
   // Loading the keyed grant file without a keyring must throw with a clear message.
   assert.throws(() => loadGrants(vault, PASSPHRASE), /keyring-encrypted but the vault has no readable keyring/u);
 });
+
+test("a keyed key-value file throws a clear error when the keyring is missing", () => {
+  const vault = tempVault();
+  seedKeyring(vault, PASSPHRASE);
+
+  // Save a key-value file, which uses the keyed envelope.
+  saveVaultFile(vault, "health", [{ key: "BLOOD_TYPE", value: "0 Rh+", desc: "blood group" }], PASSPHRASE);
+  assert.equal(vaultFileEnvelopeVersion(vault, "health"), 2);
+
+  // Delete the keyring and forget the cached keys.
+  fs.rmSync(path.join(vault, "keyring.json"));
+  forgetVaultKeys(vault);
+
+  // Loading the keyed key-value file without a keyring must throw with a clear message.
+  assert.throws(() => loadVaultFile(vault, "health", PASSPHRASE), /keyring-encrypted but the vault has no readable keyring/u);
+});
