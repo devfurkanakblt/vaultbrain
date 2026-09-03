@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -15,6 +16,8 @@ import {
   wrapKeySet,
   writeKeyring,
 } from "../dist/keyring.js";
+
+import { decrypt, decryptWithKey, encryptWithKey, envelopeVersion } from "../dist/crypto.js";
 
 const PASSPHRASE = "keyring-test-passphrase";
 
@@ -133,4 +136,27 @@ test("forgetVaultKeys drops the cached keyset", () => {
   fs.rmSync(path.join(vault, "keyring.json"));
   forgetVaultKeys(vault);
   assert.equal(openVaultKeys(vault, PASSPHRASE), null);
+});
+
+test("the keyed envelope binds its ciphertext to one file identity", () => {
+  const key = crypto.randomBytes(32);
+  const payload = encryptWithKey("BLOOD_TYPE=0 Rh+", key, "health");
+
+  assert.equal(payload.version, 2);
+  assert.equal(payload.cipher, "aes-256-gcm");
+  assert.equal(payload.keyId, "kv");
+  assert.equal(envelopeVersion(payload), 2);
+  assert.equal(decryptWithKey(payload, key, "health"), "BLOOD_TYPE=0 Rh+");
+
+  // Moving health.kv.enc onto finance.kv.enc must not decrypt.
+  assert.throws(() => decryptWithKey(payload, key, "finance"));
+  assert.throws(() => decryptWithKey(payload, crypto.randomBytes(32), "health"));
+  assert.throws(() =>
+    decryptWithKey({ ...payload, ciphertext: `${payload.ciphertext.slice(0, -2)}AA` }, key, "health"),
+  );
+});
+
+test("the passphrase envelope refuses a keyed payload with a usable message", () => {
+  const payload = encryptWithKey("secret", crypto.randomBytes(32), "health");
+  assert.throws(() => decrypt(payload, PASSPHRASE), /keyring/u);
 });
