@@ -21,6 +21,8 @@ import { decrypt, decryptWithKey, encrypt, encryptWithKey, envelopeVersion } fro
 import { loadVaultFile, saveVaultFile, vaultFileEnvelopeVersion } from "../dist/store.js";
 import { addGrant, emptyGrantFile, loadGrants, saveGrants } from "../dist/grants.js";
 import { appendAudit, verifyAudit } from "../dist/audit.js";
+import { openDocumentKey } from "../dist/document-crypto.js";
+import { DocumentVault } from "../dist/documents.js";
 
 const PASSPHRASE = "keyring-test-passphrase";
 
@@ -293,4 +295,46 @@ test("the audit chain keeps verifying after a keyring appears", () => {
   assert.equal(verified.valid, true);
   assert.equal(verified.signedEntries, 1);
   assert.equal(fs.existsSync(path.join(fresh, "audit.meta.json")), false);
+});
+
+test("a legacy session uses one key for content and identity, a keyring session does not", () => {
+  const legacy = tempVault();
+  const legacySession = openDocumentKey(legacy, PASSPHRASE);
+  assert.equal(legacySession.attachmentIdKey.toString("base64"), legacySession.key.toString("base64"));
+  assert.equal(legacySession.syncChangeKey.toString("base64"), legacySession.key.toString("base64"));
+
+  const keyed = tempVault();
+  const keys = seedKeyring(keyed, PASSPHRASE);
+  const session = openDocumentKey(keyed, PASSPHRASE);
+  assert.equal(session.key.toString("base64"), keys.documents.toString("base64"));
+  assert.equal(session.attachmentIdKey.toString("base64"), keys.attachmentId.toString("base64"));
+  assert.equal(session.syncChangeKey.toString("base64"), keys.syncChange.toString("base64"));
+  assert.equal(session.manifest, null);
+});
+
+test("a keyring vault stores and reads attachments end to end", () => {
+  const vault = tempVault();
+  seedKeyring(vault, PASSPHRASE);
+  const documents = new DocumentVault(vault, PASSPHRASE);
+  const info = documents.putAttachment(Buffer.from("attachment bytes"), "note.txt", "text/plain");
+  assert.equal(documents.getAttachment(info.id).data.toString("utf8"), "attachment bytes");
+  documents.lock();
+});
+
+test("locking zeroizes every key the session was handed", () => {
+  const vault = tempVault();
+  seedKeyring(vault, PASSPHRASE);
+  const documents = new DocumentVault(vault, PASSPHRASE);
+  documents.lock();
+  // A second vault opened afterwards must still work: the cache handed out copies.
+  const second = new DocumentVault(vault, PASSPHRASE);
+  assert.deepEqual(second.list(), []);
+  second.lock();
+});
+
+test("a version 2 manifest without a keyring fails closed", () => {
+  const vault = tempVault();
+  fs.mkdirSync(path.join(vault, "documents"), { recursive: true });
+  fs.writeFileSync(path.join(vault, "documents", "manifest.json"), JSON.stringify({ version: 2, keyring: true }));
+  assert.throws(() => openDocumentKey(vault, PASSPHRASE), /keyring/u);
 });

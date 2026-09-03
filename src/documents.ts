@@ -519,6 +519,8 @@ export class DocumentVault {
     for (const index of this.semanticIndexes.values()) index.clear();
     this.semanticIndexes.clear();
     this.session.key.fill(0);
+    this.session.attachmentIdKey.fill(0);
+    this.session.syncChangeKey.fill(0);
     this.indexCache = undefined;
     this.notesCache = undefined;
     this.searchCache.clear();
@@ -2127,7 +2129,7 @@ export class DocumentVault {
       throw new Error("Invalid attachment MIME type.");
     }
     const id = crypto
-      .createHmac("sha256", this.session.key)
+      .createHmac("sha256", this.session.attachmentIdKey)
       .update("secondbrain-vault:attachment-id:v1\0", "utf8")
       .update(data)
       .digest("hex");
@@ -2163,7 +2165,7 @@ export class DocumentVault {
       throw new Error("Invalid attachment MIME type.");
     }
     const id = crypto
-      .createHmac("sha256", this.session.key)
+      .createHmac("sha256", this.session.attachmentIdKey)
       .update("secondbrain-vault:attachment-id:v1\0", "utf8")
       .update(data)
       .digest("hex");
@@ -2204,7 +2206,7 @@ export class DocumentVault {
     }
     const data = Buffer.concat(parts);
     const actualId = crypto
-      .createHmac("sha256", this.session.key)
+      .createHmac("sha256", this.session.attachmentIdKey)
       .update("secondbrain-vault:attachment-id:v1\0", "utf8")
       .update(data)
       .digest("hex");
