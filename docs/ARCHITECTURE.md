@@ -298,6 +298,34 @@ The first checkpoint ID must arrive through a trusted channel; without an
 independent witness, a relay can still hide updates newer than the last checkpoint
 known to the client.
 
+Content keys follow an epoch hierarchy under the master key. Epoch 1 is the
+historical, pre-rotation epoch: it has no stored key of its own and its changes
+stay sealed with the master key, exactly as before. Revoking a device advances
+the registry to a new epoch and mints a fresh `crypto.randomBytes(32)` content
+key for it — deliberately not derived from the passphrase, since a derived key
+would stay reproducible by anyone who later learns the passphrase, which is
+exactly the party rotation must exclude. That key is stored locally under
+`sync/identity/epochs/<n>.key.enc`, encrypted with the master key, so the
+device that already holds it can reopen historical epochs after a restart and
+a full encrypted-vault backup still restores everything. It reaches other
+devices only in wrapped form: for each remaining active device, `sync-epoch.ts`
+generates a fresh ephemeral X25519 key pair, computes the X25519 shared secret
+with that device's enrolled `keyAgreementKey`, and derives a wrap key with
+HKDF-SHA256 over a zero-length salt, using
+`secondbrain-vault:sync-epoch-wrap:v1:<epoch>:<deviceId>` as both the HKDF info
+and the AES-256-GCM associated data. Binding the epoch number and device ID
+into both the info and the AAD means a wrap cannot be replayed onto a
+different device or presented as belonging to a different epoch. The wraps
+live inside the owner-signed registry body's `epochKeys`, so they are covered
+by the authority signature and travel over the existing `sync devices export`
+/ `sync devices import` channel with no new transport. A device opens the
+current epoch by finding its own wrap, unwrapping it with its X25519 private
+key, and caching the result alongside its other epoch keys. Rotation is
+forward-only: a revoked device keeps whatever epoch keys it already held and
+can still decrypt everything sealed before the revocation. It only loses
+changes sealed under epochs minted after it was revoked, since only active
+devices receive a wrap for those.
+
 `src/sync-relay.ts` is an optional self-hosted HTTP transport. It authenticates
 with a high-entropy bearer token, accepts only opaque IDs and structurally valid
 encrypted envelopes, performs immutable content-addressed writes, and enforces
@@ -306,8 +334,8 @@ and deletion remain outside the confidentiality/integrity boundary, while signed
 registries, per-device changes and pinned checkpoints provide client-side trust.
 Operational details and recovery limits are in `docs/SYNC-RELAY.md`.
 
-Epoch content-key rotation, independently witnessed freshness, desktop/mobile
-product integration and external cryptographic review remain later Phase 6 work.
+Independently witnessed freshness, desktop/mobile product integration and
+external cryptographic review remain later Phase 6 work.
 The original format contract and threat analysis are recorded in
 `docs/superpowers/specs/2026-08-31-encrypted-sync-change-protocol-design.md`.
 

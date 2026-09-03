@@ -836,10 +836,13 @@ syncDevices
     try {
       const registry = manager.state();
       if (!registry) throw new Error("Sync device enrollment is not initialized.");
-      console.log(`Authority ${manager.fingerprint()} — registry revision ${registry.body.revision}`);
+      console.log(
+        `Authority ${manager.fingerprint()} — registry revision ${registry.body.revision}, epoch ${registry.body.epoch}`,
+      );
       for (const record of registry.body.devices) {
+        const state = record.revokedAt ? `revoked-after=${record.revokedAfterSequence}` : "active";
         console.log(
-          `${record.certificate.deviceId}  ${record.certificate.name}  serial=${record.certificate.serial}  ${record.revokedAt ? `revoked-after=${record.revokedAfterSequence}` : "active"}`,
+          `${record.certificate.deviceId}  ${record.certificate.name}  serial=${record.certificate.serial}  epoch=${record.certificate.epoch}  ${state}`,
         );
       }
     } finally {
@@ -902,7 +905,12 @@ syncDevices
     const manager = new SyncDeviceManager(dir, passphrase);
     try {
       const registry = manager.revoke(deviceId, cutoff);
-      console.log(`Revoked ${deviceId} after sequence ${cutoff}; registry revision ${registry.body.revision}.`);
+      console.log(
+        `Revoked ${deviceId} after sequence ${cutoff}; registry revision ${registry.body.revision}, rotated to epoch ${registry.body.epoch}.`,
+      );
+      console.log(
+        "Export the registry to every remaining device so they adopt the new epoch key; changes written before this rotation stay readable to the revoked device.",
+      );
     } finally {
       manager.close();
     }

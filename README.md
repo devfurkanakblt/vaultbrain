@@ -584,12 +584,22 @@ sbrain --experimental-trusted-sync --vault ./restored-vault \
 
 Unresolved heads fail before live storage is touched. Synchronized attachment
 snapshots currently share the 8 MiB change limit (about 6 MiB of raw bytes);
-larger blob transport, epoch content-key rotation, independently witnessed
-freshness and mobile clients remain Phase 6 work. The relay is not key escrow:
-first-device recovery needs an encrypted vault backup containing the original
-key-derivation metadata. A normal device clone must never carry another
-device's `documents/sync/identity` directory; private identity keys are local-only
-and absent from sync exports. See the [sync protocol design](docs/superpowers/specs/2026-08-31-encrypted-sync-change-protocol-design.md)
+larger blob transport, independently witnessed freshness and mobile clients
+remain Phase 6 work. The relay is not key escrow: first-device recovery needs
+an encrypted vault backup containing the original key-derivation metadata. A
+normal device clone must never carry another device's `documents/sync/identity`
+directory; private identity keys are local-only and absent from sync exports.
+
+Revoking a device rotates the content key: the registry advances to a new epoch,
+a fresh random content key is wrapped to each remaining device's X25519 key, and
+the revoked device receives no wrap. Rotation is forward-only. A revoked device
+keeps the epoch keys it already held and can still decrypt every change written
+before the rotation; what it loses is everything written afterwards, including
+whatever the relay accumulates from then on. Recovering historical plaintext
+still only takes the passphrase and an encrypted vault backup — the passphrase
+remains the security boundary.
+
+See the [sync protocol design](docs/superpowers/specs/2026-08-31-encrypted-sync-change-protocol-design.md)
 and [relay operations guide](docs/SYNC-RELAY.md).
 
 ## The "fast find" layer
@@ -621,14 +631,20 @@ cost scales with the number of _keys_, not the size of your notes.
   through the MCP tools instead.
 - This is an MVP. It has not been audited. Don't put real medical or
   financial identifiers in it yet — validate the model with dummy data first.
+- Rotation is forward-only. A revoked device keeps the epoch keys it already
+  held and can still decrypt every change written before the rotation; what
+  it loses is everything written afterwards, including whatever the relay
+  accumulates from then on. Recovering historical plaintext still only takes
+  the passphrase and an encrypted vault backup — the passphrase remains the
+  security boundary.
 
 ## Roadmap
 
 Phases 0–5 are implemented. Phase 6 now has the encrypted immutable change log,
 live note/canvas/attachment/plugin capture and application, owner-signed device
-enrollment and removal, owner-signed freshness checkpoints, an authenticated
-opaque self-hosted relay and an automated recovery drill. Epoch content-key
-rotation, multi-device desktop/mobile releases, independent review and a stable
+enrollment and removal with epoch content-key rotation, owner-signed freshness
+checkpoints, an authenticated opaque self-hosted relay and an automated recovery
+drill. Multi-device desktop/mobile releases, independent review and a stable
 1.0 format remain. The maintained checklist is in
 [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
