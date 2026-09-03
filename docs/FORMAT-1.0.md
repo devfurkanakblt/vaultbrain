@@ -301,6 +301,55 @@ history, a revision number):
 | Attachment manifest     | `attachmentManifestAad(id)`                      | `secondbrain-vault:attachment-manifest:v1:<id>`       |
 | Attachment chunk        | `attachmentChunkAad(id, index)`                  | `secondbrain-vault:attachment-chunk:v1:<id>:<index>`  |
 
+**Attachment `<id>` derivation.** Unlike note/canvas/plugin ids, which the
+caller supplies, an attachment's `id` is content-addressed: computed from the
+attachment's plaintext bytes, keyed by the vault master key, using a
+dedicated AAD constant distinct from `attachmentManifestAad`/
+`attachmentChunkAad` above:
+
+```ts
+// src/format-version.ts
+attachmentId: "secondbrain-vault:attachment-id:v1\0",
+```
+
+Note the trailing NUL (`\0`) — it is part of the constant, not a formatting
+artifact of this document. The id is an HMAC-SHA256, keyed by the vault
+master key, over that constant followed by the raw attachment bytes, in this
+exact order (`putAttachment` in `src/documents.ts`):
+
+```ts
+// src/documents.ts:1988-1992
+const id = crypto.createHmac("sha256", this.session.key).update(AAD.attachmentId, "utf8").update(data).digest("hex");
+```
+
+i.e. `id = HMAC-SHA256(vaultKey, AAD.attachmentId || data)`, hex-encoded.
+Because this construction is keyed (not a bare content hash), two vaults with
+different master keys assign different ids to identical bytes, and an
+attacker without the vault key cannot forge or predict an id. This is also
+how attachment deduplication works: re-adding bytes that hash to an id whose
+manifest already exists on disk is a no-op (`putAttachment` checks
+`fs.existsSync` on that id's manifest path before writing anything).
+
+The exact same HMAC is recomputed on every read as an integrity check,
+independent of the AES-GCM authentication already performed on each chunk and
+the manifest (`getAttachment` in `src/documents.ts`):
+
+```ts
+// src/documents.ts:2039-2044
+const actualId = crypto
+  .createHmac("sha256", this.session.key)
+  .update(AAD.attachmentId, "utf8")
+  .update(data)
+  .digest("hex");
+if (data.length !== info.size || actualId !== id) throw new Error("Attachment integrity check failed.");
+```
+
+A third-party implementation that derives attachment ids by a different
+construction (a bare `SHA-256(data)`, a different AAD string, arguments in a
+different order, or a missing trailing NUL) will compute different ids for
+the same bytes and produce a vault this build cannot open, and this build's
+attachments will fail this same check in the other direction.
+
 Two further single-purpose files also use this `DocumentPayload` shape under
 a fixed (non-id-keyed) AAD, but live outside `documents/objects/` and are not
 separate entries in `FORMAT_COMPATIBILITY`: the document index
