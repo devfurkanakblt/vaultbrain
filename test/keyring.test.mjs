@@ -20,6 +20,7 @@ import {
 import { decrypt, decryptWithKey, encrypt, encryptWithKey, envelopeVersion } from "../dist/crypto.js";
 import { loadVaultFile, saveVaultFile, vaultFileEnvelopeVersion } from "../dist/store.js";
 import { addGrant, emptyGrantFile, loadGrants, saveGrants } from "../dist/grants.js";
+import { appendAudit, verifyAudit } from "../dist/audit.js";
 
 const PASSPHRASE = "keyring-test-passphrase";
 
@@ -271,4 +272,25 @@ test("a keyed key-value file throws a clear error when the keyring is missing", 
 
   // Loading the keyed key-value file without a keyring must throw with a clear message.
   assert.throws(() => loadVaultFile(vault, "health", PASSPHRASE), /keyring-encrypted but the vault has no readable keyring/u);
+});
+
+test("the audit chain keeps verifying after a keyring appears", () => {
+  const vault = tempVault();
+  appendAudit(vault, { actor: "cli-direct", file: "health", key: "BLOOD_TYPE" }, PASSPHRASE);
+  assert.equal(verifyAudit(vault, PASSPHRASE).valid, true);
+
+  seedKeyring(vault, PASSPHRASE);
+
+  // The keyring's audit key is new material, so entries signed with the old
+  // one no longer verify. Migration adopts the old key precisely to avoid
+  // this; here we prove the two keys are genuinely distinct.
+  assert.equal(verifyAudit(vault, PASSPHRASE).valid, false);
+
+  const fresh = tempVault();
+  seedKeyring(fresh, PASSPHRASE);
+  appendAudit(fresh, { actor: "cli-direct", file: "health", key: "BLOOD_TYPE" }, PASSPHRASE);
+  const verified = verifyAudit(fresh, PASSPHRASE);
+  assert.equal(verified.valid, true);
+  assert.equal(verified.signedEntries, 1);
+  assert.equal(fs.existsSync(path.join(fresh, "audit.meta.json")), false);
 });
