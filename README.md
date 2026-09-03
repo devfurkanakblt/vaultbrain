@@ -350,7 +350,7 @@ a manifest and one JavaScript file, and its reach is finite and declared.
   "manifestVersion": 1,
   "id": "word-count",
   "name": "Word count",
-  "version": "1.0.0",
+  "version": "0.2.0",
   "description": "Shows how many words the open note holds",
   "author": "example",
   "capabilities": ["notes:read", "ui:panel", "commands"]
@@ -601,6 +601,9 @@ remains the security boundary.
 
 See the [sync protocol design](docs/superpowers/specs/2026-08-31-encrypted-sync-change-protocol-design.md)
 and [relay operations guide](docs/SYNC-RELAY.md).
+
+The on-disk format is frozen at 1.0 — see [`docs/FORMAT-1.0.md`](docs/FORMAT-1.0.md).
+The product itself remains pre-1.0 pending independent review.
 
 ## The "fast find" layer
 
