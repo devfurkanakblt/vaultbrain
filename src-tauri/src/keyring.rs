@@ -182,13 +182,19 @@ fn decode_base64(value: &str, min: usize, max: usize, label: &str) -> Result<Vec
 
 fn validate_slot(slot: &KeyringSlot) -> Result<(), String> {
     if slot.kind != "passphrase" {
-        return Err(format!("unsupported vault keyring slot type: {}", slot.kind));
+        return Err(format!(
+            "unsupported vault keyring slot type: {}",
+            slot.kind
+        ));
     }
     // The shape `src/keyring.ts` checks with /^[0-9a-f-]{36}$/, matched the way
     // `attachment_dir` matches a content address rather than by building a
     // regex on every validation.
     if slot.id.len() != 36
-        || !slot.id.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f' | b'-'))
+        || !slot
+            .id
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f' | b'-'))
     {
         return Err("vault keyring slot has a malformed id".into());
     }
@@ -245,8 +251,8 @@ fn slot_aad(slot: &KeyringSlot) -> Result<Vec<u8>, String> {
 fn derive_slot_key(passphrase: &str, kdf: &SlotKdf) -> Result<Zeroizing<[u8; KEY_LENGTH]>, String> {
     let log_n = validate_kdf(kdf)?;
     let salt = decode_base64(&kdf.salt, 16, 64, "salt")?;
-    let params = ScryptParams::new(log_n, kdf.r, kdf.p, KEY_LENGTH)
-        .map_err(|error| error.to_string())?;
+    let params =
+        ScryptParams::new(log_n, kdf.r, kdf.p, KEY_LENGTH).map_err(|error| error.to_string())?;
     let mut key = Zeroizing::new([0u8; KEY_LENGTH]);
     scrypt(passphrase.as_bytes(), &salt, &params, key.as_mut())
         .map_err(|error| format!("key derivation failed: {error}"))?;
@@ -595,6 +601,9 @@ mod tests {
         let mut documents = BASE64.encode([7u8; KEY_LENGTH]);
         assert!(!documents.is_empty());
         documents.zeroize();
-        assert!(documents.is_empty(), "zeroize must clear the string's content");
+        assert!(
+            documents.is_empty(),
+            "zeroize must clear the string's content"
+        );
     }
 }
