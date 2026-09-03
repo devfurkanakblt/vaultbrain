@@ -29,4 +29,5 @@ test("sync devices list reports the active epoch and per-device state", () => {
 
   assert.match(listed, /epoch 1/u, "the header names the active epoch");
   assert.match(listed, new RegExp(`${DEVICE_A}.*epoch=1.*active`, "u"), "each row carries its epoch and state");
+  fs.rmSync(vaultDir, { recursive: true, force: true });
 });
