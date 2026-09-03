@@ -318,6 +318,7 @@ test("a keyed key-value file throws a clear error when the keyring is missing", 
 
 test("the audit chain keeps verifying after a keyring appears", () => {
   const vault = tempVault();
+  seedLegacyVault(vault);
   appendAudit(vault, { actor: "cli-direct", file: "health", key: "BLOOD_TYPE" }, PASSPHRASE);
   assert.equal(verifyAudit(vault, PASSPHRASE).valid, true);
 
@@ -493,9 +494,47 @@ test("the cross-core vector unwraps to its recorded keyset", () => {
 });
 
 test("the cross-core vector records the keyset plaintext in key order", () => {
-  const parsed = JSON.parse(VECTOR.keysetPlaintext);
-  assert.equal(parsed.version, 1);
-  assert.deepEqual(Object.keys(parsed.keys), [...KEY_NAMES]);
+  // The vector's keysetPlaintext is a static string written by
+  // scripts/make-keyring-vector.mjs, not production output. Parsing it and
+  // checking its own key order proves nothing about `serializeKeySet` in
+  // src/keyring.ts: this would pass unchanged even if the real serializer had
+  // a different field order, a bug, or did not exist.
+  //
+  // Instead, drive the real write path: wrap the vector's own six keys with
+  // production `wrapKeySet`, then peel that slot open by hand (mirroring what
+  // scripts/make-keyring-vector.mjs does) to recover the plaintext
+  // `wrapKeySet` actually encrypted, and compare it to the recorded vector
+  // byte for byte. This fails if `serializeKeySet` changes a field name, a
+  // field order, its version, or its base64 encoding.
+  const keys = {};
+  for (const name of KEY_NAMES) keys[name] = Buffer.from(VECTOR.keys[name], "base64");
+
+  const slot = wrapKeySet(keys, PASSPHRASE);
+
+  const kek = crypto.scryptSync(PASSPHRASE, Buffer.from(slot.kdf.salt, "base64"), 32, {
+    N: slot.kdf.N,
+    r: slot.kdf.r,
+    p: slot.kdf.p,
+    maxmem: 256 * 1024 * 1024,
+  });
+  // Mirrors slotAad in src/keyring.ts / scripts/make-keyring-vector.mjs.
+  const aad = JSON.stringify({
+    context: "secondbrain-vault:keyring-slot:v1",
+    version: 2,
+    id: slot.id,
+    type: slot.type,
+    kdf: { name: slot.kdf.name, N: slot.kdf.N, r: slot.kdf.r, p: slot.kdf.p, salt: slot.kdf.salt },
+  });
+
+  const decipher = crypto.createDecipheriv("aes-256-gcm", kek, Buffer.from(slot.wrapped.iv, "base64"));
+  decipher.setAAD(Buffer.from(aad, "utf8"));
+  decipher.setAuthTag(Buffer.from(slot.wrapped.authTag, "base64"));
+  const plaintext = Buffer.concat([
+    decipher.update(Buffer.from(slot.wrapped.ciphertext, "base64")),
+    decipher.final(),
+  ]).toString("utf8");
+
+  assert.equal(plaintext, VECTOR.keysetPlaintext);
 });
 
 test("the cross-core vector fails closed when its slot header is rewritten", () => {
