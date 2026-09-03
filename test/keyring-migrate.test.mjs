@@ -9,8 +9,15 @@ import { appendAudit, verifyAudit } from "../dist/audit.js";
 import { encrypt } from "../dist/crypto.js";
 import { DocumentVault } from "../dist/documents.js";
 import { serializeKV } from "../dist/format.js";
-import { detectVaultFormat } from "../dist/keyring.js";
+import {
+  detectVaultFormat,
+  forgetVaultKeys,
+  randomKeySet,
+  wrapKeySet,
+  writeKeyring,
+} from "../dist/keyring.js";
 import { migrateToKeyring } from "../dist/keyring-migrate.js";
+import { SyncedDocumentVault } from "../dist/sync.js";
 import { loadVaultFile, saveVaultFile, upsertEntry, vaultFileEnvelopeVersion } from "../dist/store.js";
 
 const FIXTURES = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
@@ -170,4 +177,114 @@ test("the checked-in keyring fixture still opens", () => {
   ]);
   assert.equal(vaultFileEnvelopeVersion(vault, "health"), 2);
   assert.equal(verifyAudit(vault, FIXTURE_PASSPHRASE).valid, true);
+});
+
+// --- C1: the resume branch must prove the keyring opens before tombstoning
+// documents/manifest.json, which holds the only copy of the legacy scrypt
+// salt. Before the fix, an interrupted-migration vault (keyring present but
+// unreadable, manifest still v1, no key-value files, no grants) let the
+// resume branch's loops run zero times and fall straight through to the
+// tombstone, reporting success while destroying the vault's only path to its
+// document key.
+
+test("C1: migrate refuses to tombstone the legacy manifest when a present keyring cannot be read", () => {
+  const vault = tempDir("c1-corrupt-keyring");
+  // A legacy document vault: manifest.json v1 with the real salt, and
+  // deliberately no key-value files and no grants.enc — the interrupted-
+  // migration state this branch exists to handle.
+  new DocumentVault(vault, PASSPHRASE).lock();
+  const manifestBefore = fs.readFileSync(path.join(vault, "documents", "manifest.json"), "utf8");
+
+  // A keyring.json that exists (so detectVaultFormat reports "keyring") but is
+  // unreadable — e.g. corrupted mid-write.
+  fs.writeFileSync(path.join(vault, "keyring.json"), JSON.stringify({ version: 2, slots: [{ bogus: true }] }));
+
+  assert.throws(() => migrateToKeyring(vault, PASSPHRASE));
+
+  // The legacy manifest — the vault's only copy of the salt — must survive
+  // completely untouched by the refused migrate call.
+  assert.equal(fs.readFileSync(path.join(vault, "documents", "manifest.json"), "utf8"), manifestBefore);
+});
+
+test("C1 (wrong-passphrase variant): migrate refuses to tombstone when the passphrase cannot open a present keyring", () => {
+  const vault = tempDir("c1-wrong-passphrase");
+  new DocumentVault(vault, PASSPHRASE).lock();
+  const manifestBefore = fs.readFileSync(path.join(vault, "documents", "manifest.json"), "utf8");
+
+  // Simulate a keyring written for a different passphrase than the one about
+  // to be used to resume migration (e.g. an earlier run crashed after writing
+  // the keyring but before the tombstone, and the caller now supplies the
+  // wrong passphrase).
+  writeKeyring(vault, { version: 2, slots: [wrapKeySet(randomKeySet(), "a-different-passphrase", 2 ** 14)] });
+  forgetVaultKeys(vault);
+
+  assert.throws(() => migrateToKeyring(vault, PASSPHRASE));
+  assert.equal(fs.readFileSync(path.join(vault, "documents", "manifest.json"), "utf8"), manifestBefore);
+});
+
+// --- C2: legacyDocumentKey must throw, not return null, when it sees a
+// version-2 manifest with no keyring.json. That state is unambiguous: the
+// vault was upgraded to a keyring and the keyring was then lost. Returning
+// null let the caller treat the vault as having no legacy material at all,
+// generating a brand-new keyset and reporting `created: true` while every
+// existing note became permanently undecryptable.
+
+test("C2: migrate refuses to fabricate a fresh keyset when a v2 manifest has lost its keyring", () => {
+  const vault = tempDir("c2-lost-keyring");
+  fs.mkdirSync(path.join(vault, "documents"), { recursive: true });
+  fs.writeFileSync(path.join(vault, "documents", "manifest.json"), JSON.stringify({ version: 2, keyring: true }));
+  assert.equal(fs.existsSync(path.join(vault, "keyring.json")), false);
+  assert.equal(detectVaultFormat(vault), "legacy");
+
+  assert.throws(() => migrateToKeyring(vault, PASSPHRASE), /keyring\.json is missing or unreadable/u);
+});
+
+// --- I8: no test previously asserted the design's central claim — that sync
+// change IDs and resolved heads stay byte-identical across migration. Only
+// `report.adopted.includes("syncChange")` was checked, which is a report
+// field, not the invariant itself.
+
+test("sync change IDs and resolved heads are byte-identical across migration", () => {
+  const DEVICE_A = "11111111-1111-4111-8111-111111111111";
+  const vault = tempDir("sync-identity");
+
+  const before = new SyncedDocumentVault(vault, PASSPHRASE, DEVICE_A);
+  const note = before.put({ path: "Plans/Launch.md", body: "first" });
+  before.put({ id: note.id, path: note.path, title: note.title, body: "second", baseRevision: note.revision });
+  const changeIdsBefore = before.changeLog.changes().map((change) => change.id);
+  assert.ok(changeIdsBefore.length >= 2, "the vault must contain sync changes to make this assertion meaningful");
+  const resolutionBefore = before.changeLog.resolve("note", note.id);
+  before.lock();
+
+  const report = migrateToKeyring(vault, PASSPHRASE);
+  assert.equal(report.created, true);
+  assert.ok(report.adopted.includes("syncChange"));
+
+  const after = new SyncedDocumentVault(vault, PASSPHRASE);
+  const changeIdsAfter = after.changeLog.changes().map((change) => change.id);
+  const resolutionAfter = after.changeLog.resolve("note", note.id);
+
+  assert.deepEqual(changeIdsAfter, changeIdsBefore);
+  assert.equal(resolutionAfter.winner.id, resolutionBefore.winner.id);
+  assert.deepEqual(resolutionAfter.heads, resolutionBefore.heads);
+  after.lock();
+});
+
+test("migrating the documents-canvas-v1 fixture keeps getCanvas output identical", () => {
+  const vault = copyFixture("documents-canvas-v1");
+
+  const before = new DocumentVault(vault, FIXTURE_PASSPHRASE);
+  const [summary] = before.listCanvases();
+  assert.ok(summary, "the fixture must contain a canvas");
+  const canvasBefore = before.getCanvas(summary.id);
+  before.lock();
+
+  const report = migrateToKeyring(vault, FIXTURE_PASSPHRASE);
+  assert.equal(report.created, true);
+  assert.equal(detectVaultFormat(vault), "keyring");
+
+  const after = new DocumentVault(vault, FIXTURE_PASSPHRASE);
+  const canvasAfter = after.getCanvas(summary.id);
+  assert.deepEqual(canvasAfter, canvasBefore);
+  after.lock();
 });

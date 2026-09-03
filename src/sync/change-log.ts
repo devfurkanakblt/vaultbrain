@@ -10,6 +10,7 @@ import {
   type DocumentPayload,
 } from "../document-crypto.js";
 import { assertNoSymlinkComponents, assertNotSymlink, writeFileAtomic } from "../fs-safe.js";
+import { forgetVaultKeys } from "../keyring.js";
 import { resolveInside } from "../safety.js";
 import { withVaultLock } from "../vault-lock.js";
 import {
@@ -193,6 +194,7 @@ export class SyncChangeLog {
     this.session.key.fill(0);
     this.session.attachmentIdKey.fill(0);
     this.session.syncChangeKey.fill(0);
+    forgetVaultKeys(this.vaultDir);
     this.closed = true;
   }
 

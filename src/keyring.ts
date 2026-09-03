@@ -99,8 +99,17 @@ export function validateSlot(value: unknown): KeyringSlot {
   return { id: slot.id, type: "passphrase", label: slot.label, kdf, createdAt: slot.createdAt, wrapped };
 }
 
-function scryptMaxmem(kdf: SlotKdf): number {
-  return Math.max(256 * 1024 * 1024, 256 * kdf.N * kdf.r);
+/**
+ * Deliberately fixed, not derived from `kdf`: `validateKdf` accepts N and r
+ * values that are each individually in range but whose product still implies
+ * a multi-gigabyte scrypt allocation (e.g. N = 2**20, r = 32). Scaling the
+ * ceiling with parameters the keyring file itself declares would let a
+ * tampered file dictate its own memory budget; a fixed ceiling instead makes
+ * an out-of-policy cost fail fast with "memory limit exceeded", the same
+ * policy `crypto.ts`'s MAX_MEM enforces for the key-value envelope.
+ */
+function scryptMaxmem(_kdf: SlotKdf): number {
+  return 256 * 1024 * 1024;
 }
 
 function deriveSlotKey(passphrase: string, kdf: SlotKdf): Buffer {
@@ -316,6 +325,26 @@ export function openVaultKeys(vaultDir: string, passphrase: string): KeySet | nu
   const keys = unwrapKeyring(file, passphrase);
   keySetCache.set(id, keys);
   return copyKeySet(keys);
+}
+
+/**
+ * Returns a copy of a single named key from the vault's keyset, or `null`
+ * when this vault has no keyring — exactly like `openVaultKeys`, but for
+ * callers that only ever need one key. `openVaultKeys(...)?.kv`-style call
+ * sites were each allocating and then silently dropping four other 32-byte
+ * key copies (including the permanent `attachmentId` and `syncChange` keys)
+ * with no `.fill(0)`, scattering unused key material across the heap on
+ * every call over a long-lived process. This zeroizes the other four before
+ * returning so only the wanted key survives past this call.
+ */
+export function openVaultKey(vaultDir: string, passphrase: string, name: KeyName): Buffer | null {
+  const keys = openVaultKeys(vaultDir, passphrase);
+  if (!keys) return null;
+  const wanted = keys[name];
+  for (const other of KEY_NAMES) {
+    if (other !== name) keys[other].fill(0);
+  }
+  return wanted;
 }
 
 /** Drops cached key material, for one vault or for all of them. */

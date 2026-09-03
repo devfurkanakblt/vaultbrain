@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import { assertNotSymlink, writeFileAtomic } from "./fs-safe.js";
 import { resolveInside } from "./safety.js";
-import { openVaultKeys } from "./keyring.js";
+import { openVaultKey } from "./keyring.js";
 
 export interface AuditEntry {
   timestamp: string;
@@ -95,8 +95,8 @@ function auditKey(vaultDir: string, passphrase: string, meta: AuditMeta): Buffer
  * deriving from `audit.meta.json` exactly as before.
  */
 function chainKeyForAppend(vaultDir: string, passphrase: string): Buffer {
-  const keys = openVaultKeys(vaultDir, passphrase);
-  if (keys) return keys.audit;
+  const key = openVaultKey(vaultDir, passphrase, "audit");
+  if (key) return key;
   return auditKey(vaultDir, passphrase, loadOrCreateMeta(vaultDir));
 }
 
@@ -163,10 +163,10 @@ export function verifyAudit(vaultDir: string, passphrase: string): AuditVerifica
   );
   if (signed.length === 0) return { valid: true, signedEntries: 0, legacyEntries };
 
-  const keys = openVaultKeys(vaultDir, passphrase);
+  const keyringKey = openVaultKey(vaultDir, passphrase, "audit");
   let key: Buffer;
-  if (keys) {
-    key = keys.audit;
+  if (keyringKey) {
+    key = keyringKey;
   } else {
     const meta = loadMeta(vaultDir);
     if (!meta) {

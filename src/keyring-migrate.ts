@@ -6,6 +6,7 @@ import { loadGrants, saveGrants } from "./grants.js";
 import {
   detectVaultFormat,
   forgetVaultKeys,
+  openVaultKeys,
   randomKeySet,
   wrapKeySet,
   writeKeyring,
@@ -48,7 +49,14 @@ function legacyDocumentKey(vaultDir: string, passphrase: string): Buffer | null 
     kdf?: { name?: string; N?: number; salt?: string };
     verifier?: string;
   };
-  if (manifest.version === 2) return null;
+  if (manifest.version === 2) {
+    // Reachable only when detectVaultFormat(vaultDir) !== "keyring", i.e. a
+    // version-2 manifest with no keyring.json: the keyring was lost. Returning
+    // null here would make the caller generate fresh document/attachmentId/
+    // syncChange keys, silently orphaning every existing note behind an opaque
+    // GCM error instead of this diagnostic.
+    throw new Error("This vault was upgraded to a keyring, but keyring.json is missing or unreadable.");
+  }
   if (
     manifest.version !== 1 ||
     manifest.kdf?.name !== "scrypt" ||
@@ -152,6 +160,12 @@ export function migrateToKeyring(vaultDir: string, passphrase: string): KeyringM
     }
 
     // Resume: the keyring exists, so finish anything an earlier run left behind.
+    // Prove the keyring opens before touching anything: the tombstone below
+    // destroys the legacy salt, and a corrupt or wrong-passphrase keyring would
+    // otherwise leave the vault with no way to derive its document key at all.
+    if (!openVaultKeys(vaultDir, passphrase)) {
+      throw new Error("This vault has a keyring but it could not be read; refusing to modify the vault.");
+    }
     const kvFilesRewritten: string[] = [];
     for (const name of listVaultFiles(vaultDir)) {
       if (vaultFileEnvelopeVersion(vaultDir, name) === 2) continue;

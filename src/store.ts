@@ -12,7 +12,7 @@ import {
   type AnyEncryptedPayload,
   type KeyedEncryptedPayload,
 } from "./crypto.js";
-import { openVaultKeys } from "./keyring.js";
+import { openVaultKey } from "./keyring.js";
 import { parseKV, serializeKV, type KVEntry } from "./format.js";
 import { assertNotSymlink, writeFileAtomic } from "./fs-safe.js";
 import {
@@ -40,7 +40,7 @@ export function listVaultFiles(vaultDir: string): string[] {
 
 /** The keyed key-value key when this vault has a keyring, otherwise null. */
 function kvKey(vaultDir: string, passphrase: string): Buffer | null {
-  return openVaultKeys(vaultDir, passphrase)?.kv ?? null;
+  return openVaultKey(vaultDir, passphrase, "kv");
 }
 
 export function loadVaultFile(

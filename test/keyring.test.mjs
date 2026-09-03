@@ -77,6 +77,19 @@ test("a hostile slot cannot dictate an unacceptable derivation", () => {
   assert.throws(() => unwrapSlot({ ...slot, kdf: { ...slot.kdf, salt: "AAAA" } }, PASSPHRASE), /out-of-range salt/u);
 });
 
+test("a slot whose in-range N and r together imply a multi-gigabyte allocation is refused, quickly", () => {
+  const slot = wrapKeySet(randomKeySet(), PASSPHRASE);
+  // N = 2**20 and r = 32 are each individually within validateKdf's accepted
+  // bounds, but together they would demand roughly 256 * 2**20 * 32 bytes
+  // (~8 GiB) of scrypt memory if the ceiling scaled with what the file
+  // declares. The fixed 256MB ceiling must make this fail fast instead.
+  const hostile = { ...slot, kdf: { ...slot.kdf, N: 2 ** 20, r: 32 } };
+  const start = Date.now();
+  assert.throws(() => unwrapSlot(hostile, PASSPHRASE), /memory limit exceeded/iu);
+  const elapsedMs = Date.now() - start;
+  assert.ok(elapsedMs < 5000, `expected the hostile derivation to fail fast, took ${elapsedMs}ms`);
+});
+
 test("wrapping refuses an empty passphrase", () => {
   assert.throws(() => wrapKeySet(randomKeySet(), ""), /non-empty vault passphrase/u);
 });
@@ -358,6 +371,23 @@ test("SyncLocalTransaction.close() zeroizes all keys", () => {
   assert.ok(transaction.session.key.every((byte) => byte === 0), "key should be zeroed");
   assert.ok(transaction.session.attachmentIdKey.every((byte) => byte === 0), "attachmentIdKey should be zeroed");
   assert.ok(transaction.session.syncChangeKey.every((byte) => byte === 0), "syncChangeKey should be zeroed");
+});
+
+test("DocumentVault.lock() drops the module-level keyset cache, not just its own copies", () => {
+  const vault = tempVault();
+  seedKeyring(vault, PASSPHRASE);
+  const documents = new DocumentVault(vault, PASSPHRASE);
+  // Prime the module-level cache independently, the way any other caller
+  // (store.ts, grants.ts, audit.ts) would.
+  assert.ok(openVaultKeys(vault, PASSPHRASE));
+
+  documents.lock();
+
+  // The observable proxy for "the cache no longer holds this vault's keys":
+  // delete keyring.json, then openVaultKeys must re-read the file (and so
+  // return null) instead of serving a cached keyset.
+  fs.rmSync(path.join(vault, "keyring.json"));
+  assert.equal(openVaultKeys(vault, PASSPHRASE), null);
 });
 
 test("SyncApplyReceiptStore.close() zeroizes all keys", () => {
