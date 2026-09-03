@@ -103,7 +103,10 @@ The wrapped plaintext is the keyset:
 ```
 
 Every slot wraps the same keyset. Associated data for the wrap is the canonical
-JSON of `{ version, id, type, kdf }`, so a slot header cannot be downgraded to a
+JSON of `{ context, version, id, type, kdf }`, where `context` is the string
+`"secondbrain-vault:keyring-slot:v1"`, `version` is 2, `id` is the slot ID, `type`
+is `"passphrase"`, and `kdf` is the serialized KDF object with fields
+`{ name, N, r, p, salt }` all included. A slot header cannot be downgraded to a
 weaker cost, retyped, or transplanted onto another slot's ciphertext without the
 tag check failing.
 
@@ -139,11 +142,13 @@ keyring:
 { "version": 2, "cipher": "aes-256-gcm", "keyId": "kv", "iv": "<b64>", "authTag": "<b64>", "ciphertext": "<b64>" }
 ```
 
-Associated data is the canonical JSON of `{ version, cipher, keyId, name }`,
-where `name` is the logical file identity (`health`, `finance`, `grants`). Two
-defects are fixed at once: the KDF no longer runs on every write, and the
-ciphertext is now bound to the file it belongs to, so `health.kv.enc` and
-`finance.kv.enc` can no longer be swapped undetected.
+Associated data is the canonical JSON of `{ context, version, cipher, keyId, name }`,
+where `context` is the string `"secondbrain-vault:kv:v2"`, `version` is 2,
+`cipher` is `"aes-256-gcm"`, `keyId` is the string `"kv"`, and `name` is the
+logical file identity (`health`, `finance`, `grants`). Two defects are fixed at
+once: the KDF no longer runs on every write, and the ciphertext is now bound to
+the file it belongs to, so `health.kv.enc` and `finance.kv.enc` can no longer be
+swapped undetected.
 
 Envelope versions 0 and 1 stay readable exactly as today, because a v1 vault is
 still a supported vault until its owner migrates it.

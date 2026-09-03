@@ -4,6 +4,8 @@ desktop-dist/
 src-tauri/target/
 *.log
 vault/**/audit.log
+# Fixture audit logs must not be ignored: they are test artifacts with assertions.
+!test/fixtures/**/audit.log
 .env
 .sbrain.lock
 src-tauri/gen/

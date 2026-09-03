@@ -40,6 +40,7 @@ The target vault is versioned and self-describing:
 ```text
 vault/
   manifest.json              # format/KDF versions; no content
+  keyring.json               # wrapped keyset for v2 vaults; lost keyring loses vault
   objects/                   # encrypted notes and attachments
   index.db.enc               # encrypted derived search/link index
   views.enc                  # encrypted saved property queries
