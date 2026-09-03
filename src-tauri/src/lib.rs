@@ -5043,7 +5043,7 @@ struct SyncStatus {
     devices: Vec<SyncDeviceSummary>,
     checkpoint: Option<SyncCheckpointSummary>,
     change_count: usize,
-    unapplied_count: usize,
+    applied_object_count: usize,
     readable: bool,
 }
 
@@ -5061,6 +5061,19 @@ fn registry_is_readable(registry: &SignedDeviceRegistry) -> bool {
 /// so the keys are sorted explicitly here rather than relying on it. This
 /// must match the TypeScript signer byte-for-byte or Ed25519 verification of
 /// otherwise-valid registries fails.
+///
+/// Sort-order caveat: keys are ordered here by `String`'s `Ord`, which
+/// compares UTF-8 bytes, while `Object.keys(value).sort()` on the
+/// TypeScript side compares UTF-16 code units. The two orderings agree for
+/// every key this build ever sorts, because every schema this function
+/// serializes (`DeviceRegistryBody`, `DeviceRecord`, `DeviceCertificate`,
+/// and whatever opaque `Value`s ride along inside `epochKeys`) uses fixed
+/// ASCII field names. They can diverge for a key containing a
+/// supplementary-plane character (one encoded as a UTF-16 surrogate pair)
+/// mixed with a key in the U+E000-U+FFFF range: UTF-16 code-unit order
+/// places the surrogate-pair key first, UTF-8 byte order places it last.
+/// If this function is ever reused for JSON with dynamic or non-ASCII
+/// object keys, that divergence needs to be closed first.
 fn canonical_json(value: &Value) -> String {
     match value {
         Value::Object(map) => {
@@ -5226,7 +5239,7 @@ fn sync_status(state: State<'_, AppState>) -> Result<SyncStatus, String> {
     let registry = load_device_registry(session)?;
     let checkpoint = load_checkpoint(session)?;
     let change_count = count_sync_changes(session)?;
-    let unapplied_count = change_count.saturating_sub(count_applied_objects(session)?);
+    let applied_object_count = count_applied_objects(session)?;
 
     let checkpoint = checkpoint.map(|checkpoint| SyncCheckpointSummary {
         id: checkpoint.id,
@@ -5245,7 +5258,7 @@ fn sync_status(state: State<'_, AppState>) -> Result<SyncStatus, String> {
             devices: Vec::new(),
             checkpoint,
             change_count,
-            unapplied_count,
+            applied_object_count,
             readable: true,
         });
     };
@@ -5273,7 +5286,7 @@ fn sync_status(state: State<'_, AppState>) -> Result<SyncStatus, String> {
         devices,
         checkpoint,
         change_count,
-        unapplied_count,
+        applied_object_count,
         readable,
     })
 }
