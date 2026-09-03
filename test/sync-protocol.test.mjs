@@ -14,6 +14,10 @@ const fixtures = path.join(import.meta.dirname, "fixtures", "sync-v1");
 const golden = JSON.parse(fs.readFileSync(path.join(fixtures, "golden.json"), "utf8"));
 const adversarial = JSON.parse(fs.readFileSync(path.join(fixtures, "adversarial.json"), "utf8"));
 const key = Buffer.from(golden.keyHex, "hex");
+// The golden fixture predates the syncChange/syncEnvelope split. Passing the
+// same legacy key in both roles is exactly what compatibility requires: it
+// proves output stays byte-identical to what the single-key protocol wrote.
+const keys = { syncChangeKey: key, syncEnvelopeKey: key };
 
 function change(body = golden.body) {
   return { ...body, mutation: { ...body.mutation, value: structuredClone(body.mutation.value) } };
@@ -33,12 +37,12 @@ function tempVault(label) {
 
 test("v1 golden body, keyed ID, opened result, and compatibility barrel are frozen", () => {
   assert.equal(canonicalSyncJson(golden.body), golden.canonical);
-  const envelope = sealSyncChange(golden.body, key);
+  const envelope = sealSyncChange(golden.body, keys);
   assert.equal(envelope.id, golden.id);
-  assert.deepEqual(openSyncChange(envelope, key), { id: golden.id, ...golden.body });
+  assert.deepEqual(openSyncChange(envelope, keys), { id: golden.id, ...golden.body });
   assert.equal(syncCompatibility.canonicalSyncJson(golden.body), golden.canonical);
-  assert.equal(syncCompatibility.sealSyncChange(golden.body, key).id, golden.id);
-  assert.deepEqual(syncCompatibility.openSyncChange(envelope, key), { id: golden.id, ...golden.body });
+  assert.equal(syncCompatibility.sealSyncChange(golden.body, keys).id, golden.id);
+  assert.deepEqual(syncCompatibility.openSyncChange(envelope, keys), { id: golden.id, ...golden.body });
   assert.deepEqual(syncCompatibility.validateSyncChangeBody(golden.body), golden.body);
   assert.deepEqual(syncCompatibility.verifySyncChanges([{ id: golden.id, ...golden.body }]), {
     changes: 1,
@@ -64,8 +68,11 @@ test("v1 golden body, keyed ID, opened result, and compatibility barrel are froz
 });
 
 test("v1 protocol rejects deterministic adversarial inputs", () => {
-  const envelope = sealSyncChange(golden.body, key);
-  throwsError(() => openSyncChange(envelope, Buffer.alloc(32, 7)), new RegExp(adversarial.errorPatterns.wrongKey, "u"));
+  const envelope = sealSyncChange(golden.body, keys);
+  throwsError(
+    () => openSyncChange(envelope, { syncChangeKey: Buffer.alloc(32, 7), syncEnvelopeKey: Buffer.alloc(32, 7) }),
+    new RegExp(adversarial.errorPatterns.wrongKey, "u"),
+  );
   throwsError(
     () =>
       openSyncChange(
@@ -76,17 +83,17 @@ test("v1 protocol rejects deterministic adversarial inputs", () => {
             authTag: `${envelope.payload.authTag.startsWith("A") ? "B" : "A"}${envelope.payload.authTag.slice(1)}`,
           },
         },
-        key,
+        keys,
       ),
     new RegExp(adversarial.errorPatterns.tamper, "u"),
   );
   throwsError(
-    () => openSyncChange({ ...envelope, id: replacementId(envelope.id) }, key),
+    () => openSyncChange({ ...envelope, id: replacementId(envelope.id) }, keys),
     /authenticate|does not match/u,
   );
   for (const value of adversarial.malformedBase64)
     throwsError(
-      () => openSyncChange({ ...envelope, payload: { ...envelope.payload, iv: value } }, key),
+      () => openSyncChange({ ...envelope, payload: { ...envelope.payload, iv: value } }, keys),
       /malformed nonce/u,
     );
   const envelopeKey = crypto
@@ -101,7 +108,7 @@ test("v1 protocol rejects deterministic adversarial inputs", () => {
   };
   envelopeKey.fill(0);
   throwsError(
-    () => openSyncChange(noncanonical, key),
+    () => openSyncChange(noncanonical, keys),
     new RegExp(adversarial.errorPatterns.noncanonicalPlaintext, "u"),
   );
   for (const unsafeKey of adversarial.unsafeKeys) {
@@ -112,7 +119,7 @@ test("v1 protocol rejects deterministic adversarial inputs", () => {
   }
   throwsError(() => canonicalSyncJson("\ud800"), new RegExp(adversarial.errorPatterns.surrogate, "u"));
   for (const id of adversarial.invalidChangeIds) {
-    throwsError(() => openSyncChange({ ...envelope, id }, key), new RegExp(adversarial.errorPatterns.malformedId, "u"));
+    throwsError(() => openSyncChange({ ...envelope, id }, keys), new RegExp(adversarial.errorPatterns.malformedId, "u"));
   }
 });
 

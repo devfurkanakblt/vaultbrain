@@ -23,6 +23,7 @@ import {
   validateSyncChangeBody,
   type EncryptedSyncChange,
   type SyncChange,
+  type SyncChangeKeys,
   type SyncObjectType,
   type SyncOperation,
   type SyncMutation,
@@ -194,6 +195,7 @@ export class SyncChangeLog {
     this.session.key.fill(0);
     this.session.attachmentIdKey.fill(0);
     this.session.syncChangeKey.fill(0);
+    this.session.syncEnvelopeKey.fill(0);
     forgetVaultKeys(this.vaultDir);
     this.closed = true;
   }
@@ -203,10 +205,13 @@ export class SyncChangeLog {
     return this.session.key;
   }
 
-  /** Change IDs and their envelope subkeys are keyed by an identity key that survives a re-key. */
-  private syncKey(): Buffer {
+  /**
+   * Change identity (permanent) and body encryption (rotatable) are two
+   * different keys; sealing/opening a change always needs both.
+   */
+  private syncKeys(): SyncChangeKeys {
     if (this.closed) throw new Error("Sync change log is closed.");
-    return this.session.syncChangeKey;
+    return { syncChangeKey: this.session.syncChangeKey, syncEnvelopeKey: this.session.syncEnvelopeKey };
   }
 
   private readAppliedState(): SyncAppliedState {
@@ -283,8 +288,8 @@ export class SyncChangeLog {
           createdAt: new Date(Date.parse(createdAt) + mutationIndex).toISOString(),
           mutation,
         });
-        const envelope = sealSyncChange(body, this.syncKey());
-        const change = openSyncChange(envelope, this.syncKey());
+        const envelope = sealSyncChange(body, this.syncKeys());
+        const change = openSyncChange(envelope, this.syncKeys());
         validateChangeSet([...current, change]);
         prepared.push(envelope);
         current = [...current, change];
@@ -301,7 +306,7 @@ export class SyncChangeLog {
   /** @internal Atomically move every affected object cursor to the prepared chain's final member. */
   markPreparedLocalChangesApplied(envelopes: readonly EncryptedSyncChange[]): void {
     withVaultLock(this.vaultDir, () => {
-      const prepared = envelopes.map((envelope) => openSyncChange(envelope, this.syncKey()));
+      const prepared = envelopes.map((envelope) => openSyncChange(envelope, this.syncKeys()));
       const known = new Map(this.changes().map((change) => [change.id, change]));
       for (const change of prepared) {
         if (!known.has(change.id)) throw new Error(`Cannot mark an unknown sync change as applied: ${change.id}`);
@@ -339,12 +344,12 @@ export class SyncChangeLog {
 
   envelopes(): EncryptedSyncChange[] {
     const envelopes = this.readEnvelopes();
-    validateChangeSet(envelopes.map((envelope) => openSyncChange(envelope, this.syncKey())));
+    validateChangeSet(envelopes.map((envelope) => openSyncChange(envelope, this.syncKeys())));
     return structuredClone(envelopes);
   }
 
   changes(): SyncChange[] {
-    const changes = this.readEnvelopes().map((envelope) => openSyncChange(envelope, this.syncKey()));
+    const changes = this.readEnvelopes().map((envelope) => openSyncChange(envelope, this.syncKeys()));
     validateChangeSet(changes);
     return changes.sort(
       (left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
@@ -356,7 +361,7 @@ export class SyncChangeLog {
   }
 
   private storeEnvelope(envelope: EncryptedSyncChange): boolean {
-    openSyncChange(envelope, this.syncKey());
+    openSyncChange(envelope, this.syncKeys());
     const destination = resolveInside(this.changesDir, changeFilename(envelope.id));
     assertNotSymlink(destination);
     if (fs.existsSync(destination)) return false;
@@ -401,8 +406,8 @@ export class SyncChangeLog {
         createdAt,
         mutation,
       });
-      const envelope = sealSyncChange(body, this.syncKey());
-      const change = openSyncChange(envelope, this.syncKey());
+      const envelope = sealSyncChange(body, this.syncKeys());
+      const change = openSyncChange(envelope, this.syncKeys());
       validateChangeSet([...current, change]);
       this.storeEnvelope(envelope);
       return change;
@@ -412,7 +417,7 @@ export class SyncChangeLog {
   import(envelopes: readonly EncryptedSyncChange[]): { imported: number; existing: number } {
     return withVaultLock(this.vaultDir, () => {
       const current = this.changes();
-      const incoming = envelopes.map((envelope) => openSyncChange(envelope, this.syncKey()));
+      const incoming = envelopes.map((envelope) => openSyncChange(envelope, this.syncKeys()));
       const known = new Set(current.map((change) => change.id));
       const additions = incoming.filter((change) => !known.has(change.id));
       validateChangeSet([...current, ...additions]);

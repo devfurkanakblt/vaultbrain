@@ -24,6 +24,7 @@ import { appendAudit, verifyAudit } from "../dist/audit.js";
 import { openDocumentKey } from "../dist/document-crypto.js";
 import { DocumentVault } from "../dist/documents.js";
 import { SyncChangeLog } from "../dist/sync/change-log.js";
+import { openSyncChange, sealSyncChange } from "../dist/sync/protocol.js";
 import { SyncLocalTransaction, SyncApplyReceiptStore } from "../dist/sync/transaction.js";
 
 const PASSPHRASE = "keyring-test-passphrase";
@@ -46,7 +47,7 @@ test("a wrapped keyset round-trips and records its own cost", () => {
   }
 });
 
-test("a fresh keyset uses five independent keys", () => {
+test("a fresh keyset uses six independent keys", () => {
   const keys = randomKeySet();
   const seen = new Set(KEY_NAMES.map((name) => keys[name].toString("base64")));
   assert.equal(seen.size, KEY_NAMES.length);
@@ -124,7 +125,7 @@ test("a vault holding legacy material is a legacy vault", () => {
   assert.equal(detectVaultFormat(kvOnly), "legacy");
 });
 
-test("a keyring vault resolves all five keys and rejects a wrong passphrase", () => {
+test("a keyring vault resolves all six keys and rejects a wrong passphrase", () => {
   const vault = tempVault();
   const keys = seedKeyring(vault, PASSPHRASE);
 
@@ -317,6 +318,7 @@ test("a legacy session uses one key for content and identity, a keyring session 
   const legacySession = openDocumentKey(legacy, PASSPHRASE);
   assert.equal(legacySession.attachmentIdKey.toString("base64"), legacySession.key.toString("base64"));
   assert.equal(legacySession.syncChangeKey.toString("base64"), legacySession.key.toString("base64"));
+  assert.equal(legacySession.syncEnvelopeKey.toString("base64"), legacySession.key.toString("base64"));
 
   const keyed = tempVault();
   const keys = seedKeyring(keyed, PASSPHRASE);
@@ -324,7 +326,53 @@ test("a legacy session uses one key for content and identity, a keyring session 
   assert.equal(session.key.toString("base64"), keys.documents.toString("base64"));
   assert.equal(session.attachmentIdKey.toString("base64"), keys.attachmentId.toString("base64"));
   assert.equal(session.syncChangeKey.toString("base64"), keys.syncChange.toString("base64"));
+  assert.equal(session.syncEnvelopeKey.toString("base64"), keys.syncEnvelope.toString("base64"));
   assert.equal(session.manifest, null);
+});
+
+test("syncChange and syncEnvelope are independent: a change sealed with one pair does not open with a mismatched pair", () => {
+  const vault = tempVault();
+  const keys = seedKeyring(vault, PASSPHRASE);
+  assert.notEqual(keys.syncChange.toString("base64"), keys.syncEnvelope.toString("base64"));
+
+  const session = openDocumentKey(vault, PASSPHRASE);
+  const correctKeys = { syncChangeKey: session.syncChangeKey, syncEnvelopeKey: session.syncEnvelopeKey };
+  const body = {
+    version: 1,
+    deviceId: "11111111-1111-4111-8111-111111111111",
+    sequence: 1,
+    previousDeviceChange: null,
+    parents: [],
+    createdAt: "2026-09-03T00:00:00.000Z",
+    mutation: {
+      objectType: "note",
+      objectId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      operation: "put",
+      baseRevision: null,
+      revision: 1,
+      value: { title: "Plan", body: "keyring split" },
+    },
+  };
+  const sealed = sealSyncChange(body, correctKeys);
+  assert.deepEqual(openSyncChange(sealed, correctKeys).mutation.value, body.mutation.value);
+
+  // Rotating only syncEnvelope, exactly what a future re-key does, must not
+  // change the change's identity: the ID depends only on syncChangeKey.
+  const rotatedEnvelope = { syncChangeKey: session.syncChangeKey, syncEnvelopeKey: crypto.randomBytes(32) };
+  const resealed = sealSyncChange(body, rotatedEnvelope);
+  assert.equal(resealed.id, sealed.id, "rotating syncEnvelope alone must not change the change ID");
+  assert.notEqual(resealed.payload.ciphertext, sealed.payload.ciphertext);
+
+  // A change sealed under one (syncChangeKey, syncEnvelopeKey) pair must not
+  // open under a mismatched pair, in either direction.
+  assert.throws(() => openSyncChange(sealed, rotatedEnvelope));
+  const rotatedIdentity = { syncChangeKey: crypto.randomBytes(32), syncEnvelopeKey: session.syncEnvelopeKey };
+  assert.throws(() => openSyncChange(sealed, rotatedIdentity), /does not match its content/u);
+
+  session.key.fill(0);
+  session.attachmentIdKey.fill(0);
+  session.syncChangeKey.fill(0);
+  session.syncEnvelopeKey.fill(0);
 });
 
 test("a keyring vault stores and reads attachments end to end", () => {
@@ -345,10 +393,11 @@ test("locking zeroizes every key the session was handed", () => {
   const second = new DocumentVault(vault, PASSPHRASE);
   assert.deepEqual(second.list(), []);
   second.lock();
-  // Verify that all three keys were zeroized
+  // Verify that all four keys were zeroized
   assert.ok(documents.session.key.every((byte) => byte === 0), "key should be zeroed");
   assert.ok(documents.session.attachmentIdKey.every((byte) => byte === 0), "attachmentIdKey should be zeroed");
   assert.ok(documents.session.syncChangeKey.every((byte) => byte === 0), "syncChangeKey should be zeroed");
+  assert.ok(documents.session.syncEnvelopeKey.every((byte) => byte === 0), "syncEnvelopeKey should be zeroed");
 });
 
 test("SyncChangeLog.close() zeroizes all keys", () => {
@@ -356,10 +405,11 @@ test("SyncChangeLog.close() zeroizes all keys", () => {
   seedKeyring(vault, PASSPHRASE);
   const log = new SyncChangeLog(vault, PASSPHRASE);
   log.close();
-  // Verify that all three keys were zeroized
+  // Verify that all four keys were zeroized
   assert.ok(log.session.key.every((byte) => byte === 0), "key should be zeroed");
   assert.ok(log.session.attachmentIdKey.every((byte) => byte === 0), "attachmentIdKey should be zeroed");
   assert.ok(log.session.syncChangeKey.every((byte) => byte === 0), "syncChangeKey should be zeroed");
+  assert.ok(log.session.syncEnvelopeKey.every((byte) => byte === 0), "syncEnvelopeKey should be zeroed");
 });
 
 test("SyncLocalTransaction.close() zeroizes all keys", () => {
@@ -367,10 +417,11 @@ test("SyncLocalTransaction.close() zeroizes all keys", () => {
   seedKeyring(vault, PASSPHRASE);
   const transaction = new SyncLocalTransaction(vault, PASSPHRASE);
   transaction.close();
-  // Verify that all three keys were zeroized
+  // Verify that all four keys were zeroized
   assert.ok(transaction.session.key.every((byte) => byte === 0), "key should be zeroed");
   assert.ok(transaction.session.attachmentIdKey.every((byte) => byte === 0), "attachmentIdKey should be zeroed");
   assert.ok(transaction.session.syncChangeKey.every((byte) => byte === 0), "syncChangeKey should be zeroed");
+  assert.ok(transaction.session.syncEnvelopeKey.every((byte) => byte === 0), "syncEnvelopeKey should be zeroed");
 });
 
 test("DocumentVault.lock() drops the module-level keyset cache, not just its own copies", () => {
@@ -395,10 +446,11 @@ test("SyncApplyReceiptStore.close() zeroizes all keys", () => {
   seedKeyring(vault, PASSPHRASE);
   const store = new SyncApplyReceiptStore(vault, PASSPHRASE);
   store.close();
-  // Verify that all three keys were zeroized
+  // Verify that all four keys were zeroized
   assert.ok(store.session.key.every((byte) => byte === 0), "key should be zeroed");
   assert.ok(store.session.attachmentIdKey.every((byte) => byte === 0), "attachmentIdKey should be zeroed");
   assert.ok(store.session.syncChangeKey.every((byte) => byte === 0), "syncChangeKey should be zeroed");
+  assert.ok(store.session.syncEnvelopeKey.every((byte) => byte === 0), "syncEnvelopeKey should be zeroed");
 });
 
 test("a version 2 manifest without a keyring fails closed", () => {

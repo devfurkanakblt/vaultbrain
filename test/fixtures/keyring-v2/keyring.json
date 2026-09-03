@@ -2,7 +2,7 @@
   "version": 2,
   "slots": [
     {
-      "id": "2feaf923-7cc2-48e8-be66-a2545d75f0d6",
+      "id": "9900a4c7-2c75-478b-bdd1-f9625275490e",
       "type": "passphrase",
       "label": "primary",
       "kdf": {
@@ -10,13 +10,13 @@
         "N": 131072,
         "r": 8,
         "p": 1,
-        "salt": "jBu1ENnLgVrpJ7RiT6D7TA=="
+        "salt": "SJ12+HhV2eOrw6Swf7jwiA=="
       },
-      "createdAt": "2026-09-03T10:01:25.802Z",
+      "createdAt": "2026-09-03T10:59:43.207Z",
       "wrapped": {
-        "iv": "6svAz6r5RmYNt17o",
-        "authTag": "u9eEgLSDu+94ifWWCAgfdA==",
-        "ciphertext": "rzwsv8xK4+3dF2nUkCwHuKeRtbTfdeo3+PY7bI7HA0b3utWl5hd7hvFB6IaFSmLEan4T0mK6/5/MbEtt6L1zmaEVof1cYav1DrohNIRfaF6BAdWHcBjUePJyj18aItIX5iSaPOSj3B6oDVGga2ZT5zsdLGKPLN3dORxIOlOyZA3MnLyg6Y8qFXUI0oujWtBt7+Ayq2Z2EYzSUMJtJtLykPQjaTydf/bpjpwMJ+brekmP+zj2fs1pI8LWzwIpw5hlXmuGc/9dRirTPILX3cHYB15Hu1kEwArTiBy6SDlvHQEdExZqIYXjqRMNkvgmCzpW8aG3GdUPWQ23d0NjNU3OMNmZW0mKCM8L3w0oaA6WqOluULP/eRZXqtPDKZ59Rs8Z5aShSbYQHxGJDx1OJAWbKJYqshtdbg=="
+        "iv": "u22+JA/KpdmQR+ZL",
+        "authTag": "aN33vD+dwDtu0aXFIvd/Jw==",
+        "ciphertext": "C7FMXu1IIAXoFj+xkX8ea1N7NCS25GNBEHXc8b1d0KBPoHSEJQxzdtZPGSh5LPO6vs4niPAiAScKbM8bMNx5QTNY5qnmMuz7EbLQ9p/VjvshkLG4yqnqNyWpu8eEwuDi3ESgAWhKLQUHS63MUBhHH7kaHJlEpfUnExD+IShZHaml9gWjag0ZNsh2EFMWNrAXKhiy8JBHYebhb6lKnEfjYadNUIWLCCFgTfrh4hD4vl5v5e57Pa4lPqMVLV0A4y4xN/+eePVnM+SM9WAuYJqit+e0lwzSNY7GUVKftcysysYqbfbr0Dgo69lX+nocf4PStfL+UBIXR7fc7chzveWn3vBP/zOAdbmGy2QxIANXW1QSVOoJcNxe4QE+ygkHV96vrH1sGk2S8+oYnV1ueMaejk28KjJXPSy4mNShCEeUXtUQySD1pOypQ6uzO0h/0UmmvkoIQ2YljBuZ4yP9klfidp/qWGduqLcJs4Pnr316pw6w/umn"
       }
     }
   ]

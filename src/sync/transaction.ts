@@ -230,6 +230,7 @@ export class SyncLocalTransaction {
     this.session.key.fill(0);
     this.session.attachmentIdKey.fill(0);
     this.session.syncChangeKey.fill(0);
+    this.session.syncEnvelopeKey.fill(0);
     forgetVaultKeys(this.vaultDir);
     this.closed = true;
   }
@@ -396,6 +397,7 @@ export class SyncApplyReceiptStore {
     this.session.key.fill(0);
     this.session.attachmentIdKey.fill(0);
     this.session.syncChangeKey.fill(0);
+    this.session.syncEnvelopeKey.fill(0);
     forgetVaultKeys(this.vaultDir);
     this.closed = true;
   }

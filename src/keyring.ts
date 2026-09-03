@@ -15,7 +15,7 @@ const KEY_LENGTH = 32;
 const SLOT_AAD_CONTEXT = "secondbrain-vault:keyring-slot:v1";
 
 /** The order is part of the format: it is what `serializeKeySet` writes. */
-export const KEY_NAMES = ["documents", "kv", "attachmentId", "syncChange", "audit"] as const;
+export const KEY_NAMES = ["documents", "kv", "attachmentId", "syncChange", "syncEnvelope", "audit"] as const;
 export type KeyName = (typeof KEY_NAMES)[number];
 export type KeySet = { [K in KeyName]: Buffer };
 

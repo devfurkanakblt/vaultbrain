@@ -70,6 +70,12 @@ if (process.argv.includes("--canvas-only")) {
   process.exit(0);
 }
 
+if (process.argv.includes("--keyring-only")) {
+  writeKeyringFixture();
+  console.log(`Keyring fixture written to ${path.join(fixtures, "keyring-v2")}`);
+  process.exit(0);
+}
+
 /** The pre-versioning envelope, reproduced exactly as v0 wrote it. */
 function encryptLegacy(plaintext, passphrase) {
   const salt = crypto.randomBytes(16);

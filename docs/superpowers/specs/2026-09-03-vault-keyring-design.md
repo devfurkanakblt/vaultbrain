@@ -50,20 +50,35 @@ passphrase ──scrypt(N=2^17, r=8, p=1, per-slot salt)──► KEK
                                               ┌──────── keyset ────────┐
                        rotatable │ documents     32B │ every object under documents/
                                  │ kv            32B │ *.kv.enc, grants.enc
+                                 │ syncEnvelope  32B │ sync change body encryption
                        ──────────┼───────────────────┤
                        permanent │ attachmentId  32B │ attachment content-address HMAC
-                                 │ syncChange    32B │ sync change ID and envelope subkey
+                                 │ syncChange    32B │ sync change ID (identity only)
                                  │ audit         32B │ audit chain HMAC
                                               └────────────────────────┘
 ```
 
 The keyset stores final keys rather than deriving them from one root. That is a
 deliberate choice in service of migration: an existing vault adopts its legacy
-key into `documents`, `attachmentId` and `syncChange` verbatim, so every
-attachment ID and sync change ID it has already written stays valid and not one
-object is re-encrypted. A vault created fresh gets five independent random keys.
+key into `documents`, `attachmentId`, `syncChange` and `syncEnvelope` verbatim,
+so every attachment ID and sync change ID it has already written stays valid,
+every sync change body it has already written still decrypts, and not one
+object is re-encrypted. A vault created fresh gets six independent random keys.
 
-Rotation acts on the two rotatable keys only. The permanent keys keep
+Sync change identity and sync change body encryption are deliberately two
+different keys, `syncChange` and `syncEnvelope`, even though a legacy vault
+adopts the same bytes into both. `syncChange` keys the change ID
+(`src/sync/protocol.ts`'s `changeId`); it is permanent because the causal DAG
+references change IDs by value, and moving them would invalidate every parent
+pointer already written. `syncEnvelope` keys the per-change subkey that
+encrypts the change body (`changeEncryptionKey`); it is rotatable, so a re-key
+can hand every sync change a fresh body-encryption key while every change ID —
+and therefore the DAG — stays byte-identical. `sealSyncChange`/`openSyncChange`
+take both keys as a single named `SyncChangeKeys` argument
+(`{ syncChangeKey, syncEnvelopeKey }`) specifically so a call site cannot
+transpose the two roles unnoticed.
+
+Rotation acts on the three rotatable keys only. The permanent keys keep
 identities, references, the sync DAG and historical audit verification intact
 across a re-key.
 
@@ -97,10 +112,16 @@ The wrapped plaintext is the keyset:
     "kv": "<base64, 32 bytes>",
     "attachmentId": "<base64, 32 bytes>",
     "syncChange": "<base64, 32 bytes>",
+    "syncEnvelope": "<base64, 32 bytes>",
     "audit": "<base64, 32 bytes>"
   }
 }
 ```
+
+Key order is part of the format: `syncEnvelope` sits immediately after
+`syncChange`, matching `KEY_NAMES` in `src/keyring.ts`, which every keyset
+function (`randomKeySet`, `copyKeySet`, `zeroKeySet`, `serializeKeySet`,
+`parseKeySet`) iterates.
 
 Every slot wraps the same keyset. Associated data for the wrap is the canonical
 JSON of `{ context, version, id, type, kdf }`, where `context` is the string
@@ -160,8 +181,8 @@ stays idempotent. Under `withVaultLock`, in this order:
 
 1. Derive the legacy document key `K` from `documents/manifest.json` and the
    legacy audit key `A` from `audit.meta.json`.
-2. Build the keyset: `documents = attachmentId = syncChange = K`, `audit = A`,
-   `kv` fresh random.
+2. Build the keyset: `documents = attachmentId = syncChange = syncEnvelope = K`,
+   `audit = A`, `kv` fresh random.
 3. Wrap it in a new slot with a fresh 16-byte salt at N=2^17, write
    `keyring.json` atomically.
 4. Re-encrypt `*.kv.enc` and `grants.enc` into envelope v2 under the new `kv`
@@ -172,21 +193,27 @@ stays idempotent. Under `withVaultLock`, in this order:
 Nothing under `documents/objects/` is read or rewritten. A 100,000-note vault
 migrates in the time it takes to write a handful of small files.
 
-The reason `documents`, `attachmentId` and `syncChange` all adopt the same `K`
-is that the legacy code used `K` directly for all three purposes. Splitting them
-at migration time would invalidate every attachment ID and sync change ID
-already written.
+The reason `documents`, `attachmentId`, `syncChange` and `syncEnvelope` all
+adopt the same `K` is that the legacy code used `K` directly for all four
+purposes: the pre-keyring protocol had no `syncEnvelope` key at all, and
+derived the sync change body's encryption subkey from the same key it used
+for the change ID. Splitting `syncChange` from `syncEnvelope` at migration time
+— adopting `K` into one but not the other — would leave every existing sync
+change body unable to decrypt, since it was written under a subkey derived
+from `K`. Adopting `K` into both keeps every attachment ID, every sync change
+ID, and every sync change body working unchanged; only a later `vbrain rekey`
+moves `syncEnvelope` away from `K`.
 
 Adoption is per key and conditional on the legacy material actually existing. A
 vault that only ever used the key-value commands has no
 `documents/manifest.json`, and a vault that was never written to has no
 `audit.meta.json`. Each key is adopted when its source file is present and
 generated randomly when it is not, so a key-value-only vault migrates to a
-keyring whose `documents`, `attachmentId` and `syncChange` keys are fresh
-random. Step 5 is skipped when there is no manifest to replace.
+keyring whose `documents`, `attachmentId`, `syncChange` and `syncEnvelope` keys
+are fresh random. Step 5 is skipped when there is no manifest to replace.
 
 A vault created after this change never adopts anything; `openVaultKeys` creates
-a keyring with five independent random keys on first use.
+a keyring with six independent random keys on first use.
 
 ## Session API
 
@@ -211,8 +238,9 @@ to the legacy manifest path unchanged. `keys.attachmentId` is required because
 `src-tauri/src/lib.rs:4341-4378` computes attachment content IDs itself.
 
 The Rust core touches neither the audit chain nor sync, so it ignores those
-three keys. It must refuse a manifest with `version == 2` when `keyring.json` is
-absent, rather than treating the vault as legacy.
+four keys (`kv`, `syncChange`, `syncEnvelope`, `audit`). It must refuse a
+manifest with `version == 2` when `keyring.json` is absent, rather than
+treating the vault as legacy.
 
 `N` is read from the slot and bounds-checked. It is never compared against a
 compiled-in constant again — that comparison is the bug this design removes.
@@ -238,18 +266,23 @@ changing their passphrase, without touching a single note.
 
 ## Re-key
 
-`vbrain rekey` generates new random `documents` and `kv` keys and re-encrypts
-every object under them. The permanent keys are untouched, so attachment IDs,
-note references, the sync DAG and audit history all survive.
+`vbrain rekey` generates new random `documents`, `kv` and `syncEnvelope` keys
+and re-encrypts every object under them, including every sync change body. The
+permanent keys — `attachmentId`, `syncChange` and `audit` — are untouched, so
+attachment IDs, sync change IDs, the sync DAG's causal structure and audit
+history all survive. Because `syncEnvelope` rotates, an attacker who learned
+the old passphrase and later obtains a copy of the vault cannot decrypt a sync
+change body written after the re-key, even though they can still see that the
+change exists and where it sits in the DAG.
 
 Crash safety without doubling disk usage: for the duration of the operation the
 keyset carries an optional `retiring` map alongside `keys`, holding the outgoing
-`documents` and `kv` keys. Readers try the current key and fall back to the
-retiring one on authentication failure — the AAD already binds each object's
-identity, so a fallback cannot succeed against the wrong object. Objects are
-rewritten one at a time, each write followed by a journal entry, the same
-pattern `src/sync/transaction.ts` uses. On completion the retiring entry is
-dropped. After a crash, `vbrain rekey` resumes from the journal.
+`documents`, `kv` and `syncEnvelope` keys. Readers try the current key and fall
+back to the retiring one on authentication failure — the AAD already binds each
+object's identity, so a fallback cannot succeed against the wrong object.
+Objects are rewritten one at a time, each write followed by a journal entry,
+the same pattern `src/sync/transaction.ts` uses. On completion the retiring
+entry is dropped. After a crash, `vbrain rekey` resumes from the journal.
 
 A keyset containing `retiring` is written as `version: 2`. Builds from phases
 7.1 through 7.3, and the Rust core until it is taught the field, reject an
@@ -292,7 +325,8 @@ directory, migrates it, and asserts that:
 
 - every note, canvas, revision and attachment still opens;
 - attachment content IDs are byte-identical before and after;
-- sync change IDs and the applied cursor are byte-identical before and after;
+- sync change IDs, sync change bodies and the applied cursor are byte-identical
+  before and after;
 - `vbrain audit verify` still validates the pre-migration chain;
 - migrating twice is a no-op.
 
@@ -327,7 +361,16 @@ Changing the passphrase does not re-encrypt content. An attacker who learned the
 old passphrase and holds a copy of the vault reads what that copy contains. Only
 `vbrain rekey` protects content written afterwards.
 
-Even after a re-key, `attachmentId` and `syncChange` remain the keys they always
-were. Someone who knew the old passphrase can still test whether a specific file
-is present in the vault. They cannot read it. Rotating identity keys would
-invalidate every reference in the vault and is deliberately not offered.
+Even after a re-key, `attachmentId`, `syncChange` and `audit` remain the keys
+they always were. Someone who knew the old passphrase can still test whether a
+specific file is present in the vault, and can still see the shape of the sync
+DAG — which change IDs exist, their parents, their device and sequence, and
+which object each one touches. They cannot read what those changes contain: a
+re-key rotates `syncEnvelope`, the key that encrypts each sync change's body
+(previously conflated with `syncChange` itself, which is what made this
+paragraph's first draft claim more than the format actually delivered), so a
+change written after the re-key decrypts only under the new `syncEnvelope` key.
+The same holds for note and canvas content generally, which lives under the
+rotatable `documents` key. Rotating the identity keys themselves —
+`attachmentId`, `syncChange`, `audit` — would invalidate every reference
+already in the vault and is deliberately not offered.

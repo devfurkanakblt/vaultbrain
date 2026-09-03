@@ -57,6 +57,7 @@ test("migration adopts the legacy key so attachment identities never move", () =
   assert.ok(report.adopted.includes("documents"));
   assert.ok(report.adopted.includes("attachmentId"));
   assert.ok(report.adopted.includes("syncChange"));
+  assert.ok(report.adopted.includes("syncEnvelope"));
   assert.equal(detectVaultFormat(vault), "keyring");
 
   const after = new DocumentVault(vault, FIXTURE_PASSPHRASE);
@@ -128,7 +129,7 @@ test("a key-value-only vault generates the keys it cannot adopt", () => {
   const report = migrateToKeyring(vault, PASSPHRASE);
   assert.equal(report.created, true);
   assert.deepEqual(report.adopted, []);
-  assert.deepEqual(report.generated.sort(), ["attachmentId", "audit", "documents", "kv", "syncChange"]);
+  assert.deepEqual(report.generated.sort(), ["attachmentId", "audit", "documents", "kv", "syncChange", "syncEnvelope"]);
   assert.equal(report.manifestTombstoned, false);
   assert.deepEqual(loadVaultFile(vault, "health", PASSPHRASE), [
     { key: "BLOOD_TYPE", value: "0 Rh+", desc: "blood group" },
@@ -244,27 +245,35 @@ test("C2: migrate refuses to fabricate a fresh keyset when a v2 manifest has los
 // `report.adopted.includes("syncChange")` was checked, which is a report
 // field, not the invariant itself.
 
-test("sync change IDs and resolved heads are byte-identical across migration", () => {
+test("sync change IDs and bodies are byte-identical across migration, and resolved heads agree", () => {
   const DEVICE_A = "11111111-1111-4111-8111-111111111111";
   const vault = tempDir("sync-identity");
 
   const before = new SyncedDocumentVault(vault, PASSPHRASE, DEVICE_A);
   const note = before.put({ path: "Plans/Launch.md", body: "first" });
   before.put({ id: note.id, path: note.path, title: note.title, body: "second", baseRevision: note.revision });
-  const changeIdsBefore = before.changeLog.changes().map((change) => change.id);
-  assert.ok(changeIdsBefore.length >= 2, "the vault must contain sync changes to make this assertion meaningful");
+  const changesBefore = before.changeLog.changes();
+  assert.ok(changesBefore.length >= 2, "the vault must contain sync changes to make this assertion meaningful");
   const resolutionBefore = before.changeLog.resolve("note", note.id);
   before.lock();
 
   const report = migrateToKeyring(vault, PASSPHRASE);
   assert.equal(report.created, true);
   assert.ok(report.adopted.includes("syncChange"));
+  assert.ok(report.adopted.includes("syncEnvelope"));
 
   const after = new SyncedDocumentVault(vault, PASSPHRASE);
-  const changeIdsAfter = after.changeLog.changes().map((change) => change.id);
+  const changesAfter = after.changeLog.changes();
   const resolutionAfter = after.changeLog.resolve("note", note.id);
 
-  assert.deepEqual(changeIdsAfter, changeIdsBefore);
+  // Not just the IDs: the full decrypted body (deviceId, sequence, parents,
+  // createdAt and the mutation itself, including its plaintext value) must
+  // come back byte-identical. This is what proves migration adopted the
+  // legacy key into syncEnvelope, not just syncChange: if it had not, every
+  // change body would still fail to decrypt (or decrypt to something else)
+  // under the freshly generated syncEnvelope key, even though the change
+  // IDs (keyed by the correctly adopted syncChange key) would still match.
+  assert.deepEqual(changesAfter, changesBefore);
   assert.equal(resolutionAfter.winner.id, resolutionBefore.winner.id);
   assert.deepEqual(resolutionAfter.heads, resolutionBefore.heads);
   after.lock();

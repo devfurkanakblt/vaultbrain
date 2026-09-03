@@ -121,13 +121,18 @@ export function migrateToKeyring(vaultDir: string, passphrase: string): KeyringM
       const keys: KeySet = randomKeySet();
 
       if (documentKey) {
-        for (const name of ["documents", "attachmentId", "syncChange"] as const) {
+        // Legacy code used K directly for content, attachment identity and
+        // sync change identity/encryption alike; adopting it into all four
+        // keeps every existing attachment ID, sync change ID and sync change
+        // body decrypting unchanged. syncEnvelope is rotatable going forward
+        // (unlike syncChange), so this is only where the two keys start out equal.
+        for (const name of ["documents", "attachmentId", "syncChange", "syncEnvelope"] as const) {
           keys[name] = Buffer.from(documentKey);
           adopted.push(name);
         }
         documentKey.fill(0);
       } else {
-        generated.push("documents", "attachmentId", "syncChange");
+        generated.push("documents", "attachmentId", "syncChange", "syncEnvelope");
       }
 
       if (auditKey) {

@@ -28,8 +28,10 @@ export interface DocumentKeySession {
   key: Buffer;
   /** Keys the content address of an attachment. Never rotated. */
   attachmentIdKey: Buffer;
-  /** Keys sync change IDs and their envelope subkeys. Never rotated. */
+  /** Keys sync change IDs. Never rotated: the causal DAG references them. */
   syncChangeKey: Buffer;
+  /** Keys sync change body encryption (the envelope subkey). Rotatable. */
+  syncEnvelopeKey: Buffer;
   /** The legacy manifest, or null when the keys came from the vault keyring. */
   manifest: DocumentManifest | null;
 }
@@ -59,6 +61,7 @@ export function openDocumentKey(vaultDir: string, passphrase: string): DocumentK
       key: vaultKeys.documents,
       attachmentIdKey: vaultKeys.attachmentId,
       syncChangeKey: vaultKeys.syncChange,
+      syncEnvelopeKey: vaultKeys.syncEnvelope,
       manifest: null,
     };
   }
@@ -85,7 +88,14 @@ export function openDocumentKey(vaultDir: string, passphrase: string): DocumentK
     if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) {
       throw new Error("Unable to unlock document vault: wrong passphrase or damaged manifest.");
     }
-    return { rootDir, key, attachmentIdKey: Buffer.from(key), syncChangeKey: Buffer.from(key), manifest };
+    return {
+      rootDir,
+      key,
+      attachmentIdKey: Buffer.from(key),
+      syncChangeKey: Buffer.from(key),
+      syncEnvelopeKey: Buffer.from(key),
+      manifest,
+    };
   }
 
   const salt = crypto.randomBytes(16);
@@ -96,7 +106,14 @@ export function openDocumentKey(vaultDir: string, passphrase: string): DocumentK
     verifier: verifier(key),
   };
   writeFileAtomic(manifestPath, JSON.stringify(manifest, null, 2), { mode: 0o600 });
-  return { rootDir, key, attachmentIdKey: Buffer.from(key), syncChangeKey: Buffer.from(key), manifest };
+  return {
+    rootDir,
+    key,
+    attachmentIdKey: Buffer.from(key),
+    syncChangeKey: Buffer.from(key),
+    syncEnvelopeKey: Buffer.from(key),
+    manifest,
+  };
 }
 
 export function encryptDocument(plaintext: string, key: Buffer, aad: string): DocumentPayload {
