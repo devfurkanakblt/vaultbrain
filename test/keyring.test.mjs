@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   DEFAULT_SCRYPT_N,
@@ -28,6 +29,14 @@ import { openSyncChange, sealSyncChange } from "../dist/sync/protocol.js";
 import { SyncLocalTransaction, SyncApplyReceiptStore } from "../dist/sync/transaction.js";
 
 const PASSPHRASE = "keyring-test-passphrase";
+const FIXTURES = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
+
+const VECTOR = JSON.parse(
+  fs.readFileSync(
+    path.resolve(FIXTURES, "keyring-vector.json"),
+    "utf8",
+  ),
+);
 
 test("a wrapped keyset round-trips and records its own cost", () => {
   const keys = randomKeySet();
@@ -474,4 +483,27 @@ test("a version 2 manifest without a keyring fails closed", () => {
   fs.mkdirSync(path.join(vault, "documents"), { recursive: true });
   fs.writeFileSync(path.join(vault, "documents", "manifest.json"), JSON.stringify({ version: 2, keyring: true }));
   assert.throws(() => openDocumentKey(vault, PASSPHRASE), /keyring/u);
+});
+
+test("the cross-core vector unwraps to its recorded keyset", () => {
+  const keys = unwrapSlot(VECTOR.slot, VECTOR.passphrase);
+  for (const name of KEY_NAMES) {
+    assert.deepEqual(keys[name], Buffer.from(VECTOR.keys[name], "base64"), name);
+  }
+});
+
+test("the cross-core vector records the keyset plaintext in key order", () => {
+  const parsed = JSON.parse(VECTOR.keysetPlaintext);
+  assert.equal(parsed.version, 1);
+  assert.deepEqual(Object.keys(parsed.keys), [...KEY_NAMES]);
+});
+
+test("the cross-core vector fails closed when its slot header is rewritten", () => {
+  for (const rewrite of [
+    { id: "00000000-0000-4000-8000-000000000002" },
+    { type: "recovery" },
+    { kdf: { ...VECTOR.slot.kdf, N: 2 ** 15 } },
+  ]) {
+    assert.throws(() => unwrapSlot({ ...VECTOR.slot, ...rewrite }, VECTOR.passphrase));
+  }
 });

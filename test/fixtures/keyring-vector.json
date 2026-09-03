@@ -1,0 +1,32 @@
+{
+  "note": "Deterministic cross-core keyring vector. Both cores must unwrap this slot to these keys and must serialize this keyset to keysetPlaintext byte-for-byte. Dummy key material; never a real vault.",
+  "passphrase": "vector-only-passphrase",
+  "aad": "{\"context\":\"secondbrain-vault:keyring-slot:v1\",\"version\":2,\"id\":\"00000000-0000-4000-8000-000000000001\",\"type\":\"passphrase\",\"kdf\":{\"name\":\"scrypt\",\"N\":16384,\"r\":8,\"p\":1,\"salt\":\"EREREREREREREREREREREQ==\"}}",
+  "keysetPlaintext": "{\"version\":1,\"keys\":{\"documents\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\",\"kv\":\"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=\",\"attachmentId\":\"AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=\",\"syncChange\":\"BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ=\",\"syncEnvelope\":\"BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU=\",\"audit\":\"BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY=\"}}",
+  "keys": {
+    "documents": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+    "kv": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+    "attachmentId": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=",
+    "syncChange": "BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ=",
+    "syncEnvelope": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU=",
+    "audit": "BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY="
+  },
+  "slot": {
+    "id": "00000000-0000-4000-8000-000000000001",
+    "type": "passphrase",
+    "label": "primary",
+    "kdf": {
+      "name": "scrypt",
+      "N": 16384,
+      "r": 8,
+      "p": 1,
+      "salt": "EREREREREREREREREREREQ=="
+    },
+    "createdAt": "2026-09-03T00:00:00.000Z",
+    "wrapped": {
+      "iv": "IiIiIiIiIiIiIiIi",
+      "authTag": "3kzdr29smdxDo4klZvT1NA==",
+      "ciphertext": "IlfaZy9WqLzukgzl6MvH/fHzUHnkXnZgFFP6wExfXGVCumSvtFe4UBiR0K6f7xXFfgeVEuxX+NbCPE1H33mwsIrlh5tn+oX4ZnMxjsIgA/BT+wBRP8CIBSibaTdx9UvdHc00TWV1HstUGjQKmc5HuQDcnHgz4JWi6NlD/+U+KNafYXaPDyYh7Ir0kwK+mE+7iLxi+MyNCIPdeaIYUSNmozCVX4bYcATMzfXH32MiNeuTxWBUPe2VF2w7CeDkfLLUZUbaEjv/pFrlPTa0dZ8HPcBgRZemg4Q01RfnJMUwlACooTePb408jkh2xxuMkk+cIPVBAHX5ZUau6CjfakodL8GlxOZc3MUzMCIEwkruDf2iaulH/U6TKHy++/97COdg6RxltxpfNsJi5eaZ86EydgepPL8vl0oyAtSUHtlJd/96nd6x1WIZ3eh2QNyGg9lHm57J781rF2KZvXgjGgJtRDFWJPXwSwLZufGmUaAzAmB79HVG"
+    }
+  }
+}
