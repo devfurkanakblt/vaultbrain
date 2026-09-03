@@ -34,6 +34,11 @@ import {
   syncChangeAad,
   syncDeviceKeyAad,
 } from "./format-version.js";
+import {
+  agreementPublicKeyFromBase64,
+  validateEpochKeyWrap,
+  type EpochKeyWrap,
+} from "./sync-epoch.js";
 
 const MAX_CHANGE_BYTES = 8 * 1024 * 1024;
 const MAX_ENVELOPE_BYTES = 12 * 1024 * 1024;
@@ -100,11 +105,13 @@ export interface SyncEnrollmentRequest {
 }
 
 export interface SyncDeviceCertificate {
-  version: 1;
+  version: 1 | 2;
   serial: number;
   deviceId: string;
   name: string;
   publicKey: string;
+  /** base64 X25519 SPKI DER. Present on version 2 certificates only. */
+  keyAgreementKey?: string;
   enrolledAt: string;
   epoch: number;
 }
@@ -117,13 +124,15 @@ export interface SyncDeviceRecord {
 }
 
 export interface SyncDeviceRegistryBody {
-  version: 1;
+  version: 1 | 2;
   revision: number;
   epoch: number;
   authorityPublicKey: string;
   updatedAt: string;
   legacyChangeIds: string[];
   devices: SyncDeviceRecord[];
+  /** Present at epoch 2 and above: one wrap per active device. */
+  epochKeys?: EpochKeyWrap[];
 }
 
 export interface SignedSyncDeviceRegistry {
@@ -595,14 +604,19 @@ function certificatePayload(certificate: SyncDeviceCertificate): SyncJson {
 
 function validateCertificate(value: unknown): SyncDeviceCertificate {
   const certificate = value as SyncDeviceCertificate | undefined;
-  if (!certificate || typeof certificate !== "object" || Array.isArray(certificate) || certificate.version !== 1) {
+  if (
+    !certificate ||
+    typeof certificate !== "object" ||
+    Array.isArray(certificate) ||
+    (certificate.version !== 1 && certificate.version !== 2)
+  ) {
     throw new Error("Unsupported or invalid sync device certificate.");
   }
   if (typeof certificate.deviceId !== "string" || !DEVICE_ID.test(certificate.deviceId)) {
     throw new Error("Certificate device ID must be a lowercase UUID.");
   }
-  return {
-    version: 1,
+  const normalized: SyncDeviceCertificate = {
+    version: certificate.version,
     serial: integer(certificate.serial, 1, "Device certificate serial"),
     deviceId: certificate.deviceId,
     name: deviceName(certificate.name),
@@ -610,6 +624,14 @@ function validateCertificate(value: unknown): SyncDeviceCertificate {
     enrolledAt: canonicalTimestamp(certificate.enrolledAt, "Device enrollment time"),
     epoch: integer(certificate.epoch, 1, "Device certificate epoch"),
   };
+  if (certificate.version === 2) {
+    // Validated as X25519 rather than by length: Ed25519 SPKI is also 44 bytes.
+    agreementPublicKeyFromBase64(certificate.keyAgreementKey, "Certificate key agreement key");
+    normalized.keyAgreementKey = certificate.keyAgreementKey;
+  } else if (certificate.keyAgreementKey !== undefined) {
+    throw new Error("A version 1 device certificate cannot carry a key agreement key.");
+  }
+  return normalized;
 }
 
 function registryBodyPayload(body: SyncDeviceRegistryBody): SyncJson {
@@ -619,7 +641,13 @@ function registryBodyPayload(body: SyncDeviceRegistryBody): SyncJson {
 function validateSignedDeviceRegistry(value: unknown): SignedSyncDeviceRegistry {
   const registry = value as SignedSyncDeviceRegistry | undefined;
   const raw = registry?.body;
-  if (!registry || typeof registry !== "object" || Array.isArray(registry) || !raw || raw.version !== 1) {
+  if (
+    !registry ||
+    typeof registry !== "object" ||
+    Array.isArray(registry) ||
+    !raw ||
+    (raw.version !== 1 && raw.version !== 2)
+  ) {
     throw new Error("Unsupported or invalid sync device registry.");
   }
   const authorityPublicKey = canonicalBase64(raw.authorityPublicKey, 44, "authority public key");
@@ -664,7 +692,7 @@ function validateSignedDeviceRegistry(value: unknown): SignedSyncDeviceRegistry 
     throw new Error("Registry devices must have unique IDs and serials and be sorted by ID.");
   }
   const body: SyncDeviceRegistryBody = {
-    version: 1,
+    version: raw.version,
     revision: integer(raw.revision, 1, "Device registry revision"),
     epoch: integer(raw.epoch, 1, "Device registry epoch"),
     authorityPublicKey,
@@ -672,11 +700,54 @@ function validateSignedDeviceRegistry(value: unknown): SignedSyncDeviceRegistry 
     legacyChangeIds,
     devices,
   };
+  if (raw.version === 2) {
+    if (!Array.isArray(raw.epochKeys)) throw new Error("A version 2 device registry must list epoch keys.");
+    body.epochKeys = raw.epochKeys.map((wrap) => validateEpochKeyWrap(wrap));
+  } else if (raw.epochKeys !== undefined) {
+    throw new Error("A version 1 device registry cannot carry epoch keys.");
+  }
+
+  const active = devices.filter((record) => !record.revokedAt);
   for (const record of devices) {
     if (record.certificate.epoch > body.epoch) {
       throw new Error("A device certificate cannot target a future registry epoch.");
     }
   }
+
+  if (body.epoch === 1) {
+    if (body.epochKeys !== undefined) {
+      throw new Error("Epoch 1 is sealed with the vault key and carries no wrapped epoch keys.");
+    }
+  } else {
+    if (body.version !== 2 || !body.epochKeys) {
+      throw new Error("A registry at epoch 2 or above must be version 2 and carry epoch keys.");
+    }
+    for (const record of active) {
+      if (record.certificate.version !== 2) {
+        throw new Error("An active device at epoch 2 or above needs a version 2 certificate.");
+      }
+      if (record.certificate.epoch !== body.epoch) {
+        throw new Error("An active device certificate must sit at the current registry epoch.");
+      }
+    }
+    for (const record of devices) {
+      if (record.revokedAt && record.certificate.epoch >= body.epoch) {
+        throw new Error("A revoked device certificate must sit below the current registry epoch.");
+      }
+    }
+    const wrapped = body.epochKeys.map((wrap) => wrap.deviceId);
+    const expected = active.map((record) => record.certificate.deviceId).sort();
+    if (new Set(wrapped).size !== wrapped.length) {
+      throw new Error("Registry epoch keys must not repeat a device.");
+    }
+    if ([...wrapped].sort().some((id, index) => id !== wrapped[index])) {
+      throw new Error("Registry epoch keys must be sorted by device ID.");
+    }
+    if (wrapped.length !== expected.length || expected.some((id, index) => id !== wrapped[index])) {
+      throw new Error("Registry epoch keys must cover exactly the active devices.");
+    }
+  }
+
   const signature = verifyCanonical(registryBodyPayload(body), registry.signature, authorityKey, "Device registry signature");
   return { body, signature };
 }
