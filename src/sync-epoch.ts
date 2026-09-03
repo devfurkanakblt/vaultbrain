@@ -1,5 +1,10 @@
 import crypto from "node:crypto";
-import { AAD, canonicalBase64 } from "./format-version.js";
+import fs from "node:fs";
+import path from "node:path";
+import { decryptDocument, encryptDocument, type DocumentPayload } from "./document-crypto.js";
+import { assertNotSymlink, readTextFileLimited, writeFileAtomic } from "./fs-safe.js";
+import { resolveInside } from "./safety.js";
+import { AAD, canonicalBase64, syncEpochKeyAad } from "./format-version.js";
 
 /** AES-256 content key for one sync epoch. */
 export const EPOCH_KEY_BYTES = 32;
@@ -104,6 +109,7 @@ export function unwrapEpochKey(
   deviceId: string,
   devicePrivateKey: crypto.KeyObject,
 ): Buffer {
+  if (!Number.isSafeInteger(epoch) || epoch < 2) throw new Error("Only epoch 2 and above carry wrapped keys.");
   const normalized = validateEpochKeyWrap(wrap);
   if (normalized.deviceId !== deviceId) throw new Error("Epoch key wrap is addressed to a different device.");
   const ephemeral = agreementPublicKeyFromBase64(normalized.ephemeralPublicKey, "Epoch wrap ephemeral key");
@@ -140,4 +146,42 @@ export function validateEpochKeyWrap(value: unknown): EpochKeyWrap {
     authTag: canonicalBase64(wrap.authTag, 16, "authentication tag"),
     ciphertext: canonicalBase64(wrap.ciphertext, EPOCH_KEY_BYTES, "epoch key ciphertext"),
   };
+}
+
+export function epochKeyDir(rootDir: string): string {
+  return resolveInside(rootDir, path.join("sync", "identity", "epochs"));
+}
+
+function assertStorableEpoch(epoch: number): number {
+  if (!Number.isSafeInteger(epoch) || epoch < 2) {
+    throw new Error("Only epoch 2 and above have a stored content key; epoch 1 uses the vault key.");
+  }
+  return epoch;
+}
+
+function epochKeyPath(rootDir: string, epoch: number): string {
+  return resolveInside(epochKeyDir(rootDir), `${assertStorableEpoch(epoch)}.key.enc`);
+}
+
+export function readEpochKey(rootDir: string, vaultKey: Buffer, epoch: number): Buffer | undefined {
+  const filePath = epochKeyPath(rootDir, epoch);
+  if (!fs.existsSync(filePath)) return undefined;
+  assertNotSymlink(filePath);
+  const payload = JSON.parse(
+    readTextFileLimited(filePath, 64 * 1024, `Sync epoch ${epoch} key`),
+  ) as DocumentPayload;
+  const key = Buffer.from(decryptDocument(payload, vaultKey, syncEpochKeyAad(epoch)), "base64");
+  if (key.length !== EPOCH_KEY_BYTES) throw new Error(`Stored sync epoch ${epoch} key is malformed.`);
+  return key;
+}
+
+export function saveEpochKey(rootDir: string, vaultKey: Buffer, epoch: number, epochKey: Buffer): void {
+  if (epochKey.length !== EPOCH_KEY_BYTES) throw new Error("An epoch content key must be 32 bytes.");
+  const filePath = epochKeyPath(rootDir, epoch);
+  fs.mkdirSync(epochKeyDir(rootDir), { recursive: true, mode: 0o700 });
+  writeFileAtomic(
+    filePath,
+    JSON.stringify(encryptDocument(epochKey.toString("base64"), vaultKey, syncEpochKeyAad(epoch))),
+    { mode: 0o600 },
+  );
 }

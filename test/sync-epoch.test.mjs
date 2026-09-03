@@ -1,12 +1,18 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
+import { openDocumentKey } from "../dist/document-crypto.js";
 import {
   EPOCH_KEY_BYTES,
   agreementPublicKeyFromBase64,
   exportAgreementPublicKey,
   generateAgreementKeyPair,
+  readEpochKey,
+  saveEpochKey,
   unwrapEpochKey,
   validateEpochKeyWrap,
   wrapEpochKey,
@@ -68,4 +74,41 @@ test("malformed wraps are rejected before any cryptographic work", () => {
   assert.throws(() => validateEpochKeyWrap({ ...wrap, deviceId: "not-a-uuid" }), /device ID/u);
   assert.throws(() => validateEpochKeyWrap({ ...wrap, iv: "AAAA" }), /nonce/u);
   assert.throws(() => validateEpochKeyWrap({ ...wrap, authTag: "AAAA" }), /authentication tag/u);
+});
+
+test("unwrapEpochKey refuses epoch 1 and below before touching key material", () => {
+  const alice = generateAgreementKeyPair();
+  const wrap = wrapEpochKey(crypto.randomBytes(EPOCH_KEY_BYTES), 2, DEVICE_A, alice.publicKey);
+
+  // A malformed wrap (bad device ID) would normally fail structural validation
+  // first; using a below-epoch check with an otherwise-valid wrap proves the
+  // epoch guard runs before validateEpochKeyWrap or any decryption.
+  assert.throws(() => unwrapEpochKey(wrap, 1, DEVICE_A, alice.privateKey), /epoch 2 and above/u);
+  assert.throws(() => unwrapEpochKey(wrap, 0, DEVICE_A, alice.privateKey), /epoch 2 and above/u);
+  assert.throws(() => unwrapEpochKey(wrap, -1, DEVICE_A, alice.privateKey), /epoch 2 and above/u);
+
+  // The guard trips even when the wrap itself is structurally invalid, showing
+  // it runs strictly before validateEpochKeyWrap.
+  assert.throws(
+    () => unwrapEpochKey({ ...wrap, deviceId: "not-a-uuid" }, 1, DEVICE_A, alice.privateKey),
+    /epoch 2 and above/u,
+  );
+});
+
+test("epoch keys persist under the master key and refuse epoch 1", () => {
+  const vaultDir = fs.mkdtempSync(path.join(os.tmpdir(), "secondbrain-epoch-store-"));
+  const session = openDocumentKey(vaultDir, "epoch-store-test-passphrase");
+  const epochKey = crypto.randomBytes(EPOCH_KEY_BYTES);
+
+  assert.equal(readEpochKey(session.rootDir, session.key, 2), undefined, "an unknown epoch reads as absent");
+  saveEpochKey(session.rootDir, session.key, 2, epochKey);
+  assert.deepEqual(readEpochKey(session.rootDir, session.key, 2), epochKey);
+
+  // Epoch 1 is the master-key epoch and never has a stored key.
+  assert.throws(() => saveEpochKey(session.rootDir, session.key, 1, epochKey), /epoch 2 and above/u);
+  assert.throws(() => readEpochKey(session.rootDir, session.key, 1), /epoch 2 and above/u);
+
+  // The stored file is ciphertext, not the raw key.
+  const stored = fs.readFileSync(path.join(session.rootDir, "sync", "identity", "epochs", "2.key.enc"), "utf8");
+  assert.doesNotMatch(stored, new RegExp(epochKey.toString("base64").slice(0, 16), "u"));
 });
