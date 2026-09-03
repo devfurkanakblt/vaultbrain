@@ -10,7 +10,7 @@ import {
   type AnyEncryptedPayload,
   type KeyedEncryptedPayload,
 } from "./crypto.js";
-import { openVaultKey } from "./keyring.js";
+import { openOrCreateVaultKey, openVaultKey } from "./keyring.js";
 import { assertNotSymlink, writeFileAtomic } from "./fs-safe.js";
 import { isRedactionLevel, type RedactionLevel } from "./redaction.js";
 import { normalizeVaultName, resolveInside } from "./safety.js";
@@ -173,7 +173,7 @@ export function saveGrants(vaultDir: string, file: GrantFile, passphrase: string
     grants: file.grants,
     requests: file.requests.slice(-MAX_REQUESTS),
   };
-  const key = openVaultKey(vaultDir, passphrase, "kv");
+  const key = openOrCreateVaultKey(vaultDir, passphrase, "kv");
   const payload = key
     ? encryptWithKey(JSON.stringify(stored), key, GRANTS_FILE_IDENTITY)
     : encrypt(JSON.stringify(stored), passphrase);

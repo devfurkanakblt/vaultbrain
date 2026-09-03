@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { assertNoSymlinkComponents, assertNotSymlink, writeFileAtomic } from "./fs-safe.js";
 import { resolveInside } from "./safety.js";
-import { openVaultKeys } from "./keyring.js";
+import { openOrCreateVaultKeys } from "./keyring.js";
 
 const SCRYPT_N = 2 ** 15;
 const KEY_LENGTH = 32;
@@ -54,7 +54,7 @@ export function openDocumentKey(vaultDir: string, passphrase: string): DocumentK
   assertNoSymlinkComponents(vaultDir, rootDir);
   fs.mkdirSync(rootDir, { recursive: true, mode: 0o700 });
 
-  const vaultKeys = openVaultKeys(vaultDir, passphrase);
+  const vaultKeys = openOrCreateVaultKeys(vaultDir, passphrase);
   if (vaultKeys) {
     return {
       rootDir,

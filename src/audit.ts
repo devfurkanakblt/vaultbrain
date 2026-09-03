@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import { assertNotSymlink, writeFileAtomic } from "./fs-safe.js";
 import { resolveInside } from "./safety.js";
-import { openVaultKey } from "./keyring.js";
+import { openOrCreateVaultKey, openVaultKey } from "./keyring.js";
 
 export interface AuditEntry {
   timestamp: string;
@@ -95,7 +95,7 @@ function auditKey(vaultDir: string, passphrase: string, meta: AuditMeta): Buffer
  * deriving from `audit.meta.json` exactly as before.
  */
 function chainKeyForAppend(vaultDir: string, passphrase: string): Buffer {
-  const key = openVaultKey(vaultDir, passphrase, "audit");
+  const key = openOrCreateVaultKey(vaultDir, passphrase, "audit");
   if (key) return key;
   return auditKey(vaultDir, passphrase, loadOrCreateMeta(vaultDir));
 }
