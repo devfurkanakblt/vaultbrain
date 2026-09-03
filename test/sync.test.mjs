@@ -545,3 +545,42 @@ test("unresolved remote conflicts never mutate live vault storage", () => {
   fs.rmSync(firstDir, { recursive: true, force: true });
   fs.rmSync(secondDir, { recursive: true, force: true });
 });
+
+test("enrollment stores an X25519 agreement key that never leaves the device", () => {
+  const ownerVault = tempVault("agreement-owner");
+  const owner = new SyncDeviceManager(ownerVault, PASSPHRASE);
+  owner.initializeOwner("Owner laptop", DEVICE_A);
+
+  // A peer device shares the same vault (same passphrase-derived key material),
+  // as in the existing owner-signed-enrollment test: copy the vault, then strip
+  // the private keys that belong only to the owner's device.
+  const peerVault = tempVault("agreement-peer");
+  fs.rmSync(peerVault, { recursive: true, force: true });
+  fs.cpSync(ownerVault, peerVault, { recursive: true });
+  fs.rmSync(path.join(peerVault, "documents", "sync", "identity", "authority.key.enc"));
+  fs.rmSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.key.enc`));
+  fs.rmSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.x25519.key.enc`));
+  const peer = new SyncDeviceManager(peerVault, PASSPHRASE);
+  try {
+    const request = peer.createEnrollmentRequest("Travel laptop", DEVICE_B);
+
+    assert.equal(request.version, 2);
+    assert.equal(Buffer.from(request.keyAgreementKey, "base64").length, 44);
+
+    const registry = owner.enroll(request);
+    const enrolled = registry.body.devices.find((record) => record.certificate.deviceId === DEVICE_B);
+    assert.equal(enrolled.certificate.version, 2);
+    assert.equal(enrolled.certificate.keyAgreementKey, request.keyAgreementKey);
+
+    // The private half stays on the requesting device and is stored encrypted.
+    const keyFile = path.join(peerVault, "documents", "sync", "identity", `${DEVICE_B}.x25519.key.enc`);
+    assert.ok(fs.existsSync(keyFile), "the agreement private key is written locally");
+    assert.doesNotMatch(fs.readFileSync(keyFile, "utf8"), /-----BEGIN/u, "it is stored as ciphertext");
+
+    // It is absent from everything the owner ever sends.
+    assert.doesNotMatch(JSON.stringify(owner.exportRegistry()), new RegExp(DEVICE_B, "u"));
+  } finally {
+    owner.close();
+    peer.close();
+  }
+});

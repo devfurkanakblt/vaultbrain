@@ -31,11 +31,15 @@ import {
 import {
   AAD,
   canonicalBase64,
+  syncAgreementKeyAad,
   syncChangeAad,
   syncDeviceKeyAad,
 } from "./format-version.js";
 import {
+  agreementPrivateKeyFromBase64,
   agreementPublicKeyFromBase64,
+  exportAgreementPublicKey,
+  generateAgreementKeyPair,
   validateEpochKeyWrap,
   type EpochKeyWrap,
 } from "./sync-epoch.js";
@@ -95,10 +99,12 @@ export interface SyncChange extends SyncChangeBody {
 }
 
 export interface SyncEnrollmentRequest {
-  version: 1;
+  version: 1 | 2;
   deviceId: string;
   name: string;
   publicKey: string;
+  /** base64 X25519 SPKI DER. Present on version 2 requests only. */
+  keyAgreementKey?: string;
   requestedAt: string;
   nonce: string;
   proof: string;
@@ -566,14 +572,19 @@ function enrollmentRequestPayload(request: Omit<SyncEnrollmentRequest, "proof">)
 
 function validateEnrollmentRequest(value: unknown): SyncEnrollmentRequest {
   const request = value as SyncEnrollmentRequest | undefined;
-  if (!request || typeof request !== "object" || Array.isArray(request) || request.version !== 1) {
+  if (
+    !request ||
+    typeof request !== "object" ||
+    Array.isArray(request) ||
+    (request.version !== 1 && request.version !== 2)
+  ) {
     throw new Error("Unsupported or invalid sync enrollment request.");
   }
   if (typeof request.deviceId !== "string" || !DEVICE_ID.test(request.deviceId)) {
     throw new Error("Enrollment device ID must be a lowercase UUID.");
   }
   const normalized: SyncEnrollmentRequest = {
-    version: 1,
+    version: request.version,
     deviceId: request.deviceId,
     name: deviceName(request.name),
     publicKey: canonicalBase64(request.publicKey, 44, "enrollment public key"),
@@ -581,13 +592,20 @@ function validateEnrollmentRequest(value: unknown): SyncEnrollmentRequest {
     nonce: canonicalBase64(request.nonce, 32, "enrollment nonce"),
     proof: canonicalBase64(request.proof, 64, "enrollment proof"),
   };
+  if (request.version === 2) {
+    agreementPublicKeyFromBase64(request.keyAgreementKey, "Enrollment key agreement key");
+    normalized.keyAgreementKey = request.keyAgreementKey;
+  } else if (request.keyAgreementKey !== undefined) {
+    throw new Error("A version 1 enrollment request cannot carry a key agreement key.");
+  }
   const publicKey = publicKeyFromBase64(normalized.publicKey, "Enrollment public key");
   verifyCanonical(
     enrollmentRequestPayload({
-      version: 1,
+      version: normalized.version,
       deviceId: normalized.deviceId,
       name: normalized.name,
       publicKey: normalized.publicKey,
+      ...(normalized.keyAgreementKey !== undefined ? { keyAgreementKey: normalized.keyAgreementKey } : {}),
       requestedAt: normalized.requestedAt,
       nonce: normalized.nonce,
     }),
@@ -771,6 +789,45 @@ function authorityKeyPath(rootDir: string): string {
 function deviceKeyPath(rootDir: string, deviceId: string): string {
   if (!DEVICE_ID.test(deviceId)) throw new Error("Sync device ID must be a lowercase UUID.");
   return resolveInside(identityDir(rootDir), `${deviceId}.key.enc`);
+}
+
+function agreementKeyPath(rootDir: string, deviceId: string): string {
+  if (!DEVICE_ID.test(deviceId)) throw new Error("Sync device ID must be a lowercase UUID.");
+  return resolveInside(identityDir(rootDir), `${deviceId}.x25519.key.enc`);
+}
+
+export function readAgreementKey(rootDir: string, vaultKey: Buffer, deviceId: string): crypto.KeyObject {
+  const filePath = agreementKeyPath(rootDir, deviceId);
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`This device has no sync key agreement key; re-enroll device ${deviceId}.`);
+  }
+  assertNotSymlink(filePath);
+  const payload = JSON.parse(
+    readTextFileLimited(filePath, 64 * 1024, "Sync device agreement key"),
+  ) as DocumentPayload;
+  return agreementPrivateKeyFromBase64(
+    decryptDocument(payload, vaultKey, syncAgreementKeyAad(deviceId)),
+    "Sync device agreement key",
+  );
+}
+
+function saveAgreementKey(
+  rootDir: string,
+  vaultKey: Buffer,
+  deviceId: string,
+  key: crypto.KeyObject,
+): void {
+  writeFileAtomic(
+    agreementKeyPath(rootDir, deviceId),
+    JSON.stringify(
+      encryptDocument(
+        key.export({ format: "der", type: "pkcs8" }).toString("base64"),
+        vaultKey,
+        syncAgreementKeyAad(deviceId),
+      ),
+    ),
+    { mode: 0o600 },
+  );
 }
 
 function encryptPrivateKey(key: crypto.KeyObject, vaultKey: Buffer, aad: string): DocumentPayload {
@@ -1116,12 +1173,14 @@ export class SyncDeviceManager {
       const legacy = enrollmentLegacyChanges(this.session.rootDir, this.key()).map((change) => change.id);
       const authority = crypto.generateKeyPairSync("ed25519");
       const device = crypto.generateKeyPairSync("ed25519");
+      const agreement = generateAgreementKeyPair();
       const certificate: SyncDeviceCertificate = {
-        version: 1,
+        version: 2,
         serial: 1,
         deviceId,
         name: deviceName(name),
         publicKey: exportPublicKey(device.publicKey),
+        keyAgreementKey: exportAgreementPublicKey(agreement.publicKey),
         enrolledAt: normalizedTime,
         epoch: 1,
       };
@@ -1148,6 +1207,7 @@ export class SyncDeviceManager {
         this.key(),
         syncDeviceKeyAad(deviceId),
       );
+      saveAgreementKey(this.session.rootDir, this.key(), deviceId, agreement.privateKey);
       saveDeviceRegistry(this.session.rootDir, this.key(), registry);
       return structuredClone(registry);
     });
@@ -1169,11 +1229,13 @@ export class SyncDeviceManager {
         throw new Error(`A pending private key already exists for sync device ${deviceId}.`);
       }
       const pair = crypto.generateKeyPairSync("ed25519");
+      const agreement = generateAgreementKeyPair();
       const unsigned: Omit<SyncEnrollmentRequest, "proof"> = {
-        version: 1,
+        version: 2,
         deviceId,
         name: deviceName(name),
         publicKey: exportPublicKey(pair.publicKey),
+        keyAgreementKey: exportAgreementPublicKey(agreement.publicKey),
         requestedAt: canonicalTimestamp(now, "Enrollment request time"),
         nonce: crypto.randomBytes(32).toString("base64"),
       };
@@ -1187,6 +1249,7 @@ export class SyncDeviceManager {
         this.key(),
         syncDeviceKeyAad(deviceId),
       );
+      saveAgreementKey(this.session.rootDir, this.key(), deviceId, agreement.privateKey);
       return validateEnrollmentRequest(request);
     });
   }
@@ -1209,7 +1272,7 @@ export class SyncDeviceManager {
         throw new Error("The local enrollment authority key does not match the pinned registry authority.");
       }
       const certificate: SyncDeviceCertificate = {
-        version: 1,
+        version: request.version,
         serial: Math.max(0, ...registry.body.devices.map((record) => record.certificate.serial)) + 1,
         deviceId: request.deviceId,
         name: request.name,
@@ -1217,6 +1280,7 @@ export class SyncDeviceManager {
         enrolledAt: canonicalTimestamp(now, "Device enrollment time"),
         epoch: registry.body.epoch,
       };
+      if (request.version === 2) certificate.keyAgreementKey = request.keyAgreementKey;
       const nextBody: SyncDeviceRegistryBody = {
         ...registry.body,
         revision: registry.body.revision + 1,
