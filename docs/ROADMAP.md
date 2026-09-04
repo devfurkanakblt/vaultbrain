@@ -87,5 +87,5 @@ Each phase must ship a usable vertical slice and keep older vaults readable.
   - [x] Document, attachment-identity and sync-change keys separated
   - [x] `vbrain migrate` upgrades an existing vault without re-encrypting an object
   - [x] Rust core opens a keyring vault, and both cores create new vaults keyring-native
-- [ ] Passphrase change, including the KDF cost upgrade path
+- [x] Passphrase change, including the KDF cost upgrade path
 - [ ] Full re-key after a compromised passphrase

@@ -5,6 +5,8 @@ Versioning once the encrypted storage format reaches 1.0.
 
 ## Unreleased
 
+- `vbrain passphrase change`: re-wraps the vault keyring under a new passphrase
+  at the current key-derivation cost, without re-encrypting any object.
 - Taught the Rust desktop core to open passphrase-wrapped keyring vaults, and
   made new vaults keyring-native in both the TypeScript and Rust cores, with a
   manifest version tombstone that makes an older build fail closed instead of

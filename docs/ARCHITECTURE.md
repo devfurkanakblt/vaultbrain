@@ -126,7 +126,9 @@ The link index is updated in the same logical transaction as a note revision:
   possible. Both the TypeScript and Rust cores read this file; only the
   TypeScript core migrates a legacy vault into it. See
   `docs/superpowers/specs/2026-09-03-vault-keyring-design.md` for the full key
-  hierarchy and wire format.
+  hierarchy and wire format. A passphrase change re-wraps the keyset in place:
+  the slot gets a fresh salt at the current cost, the keys inside it do not
+  move, and no object is rewritten.
 - Notes and attachment chunks use an authenticated encryption mode with unique nonces.
 - Key rotation re-wraps data keys instead of rewriting every object.
 - Session keys are kept only in the privileged core and zeroized on lock.
