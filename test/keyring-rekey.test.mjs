@@ -294,8 +294,131 @@ test("an artifact re-encrypted under a new keyset carries the same plaintext", (
 
     assert.notDeepEqual(rewritten, raw, `${item.path} must not keep its ciphertext`);
     assert.deepEqual(decryptItem(item, newKeys, rewritten), plaintext, `${item.path} must round trip`);
-    assert.throws(() => decryptItem(item, oldKeys, rewritten), /.*/u, `${item.path} must not open under the old keyset`);
+    // Minor finding: any thrown error used to satisfy this assertion,
+    // including a TypeError from a broken cast. Pin the actual failure mode:
+    // GCM authentication rejecting ciphertext sealed under a different key.
+    assert.throws(
+      () => decryptItem(item, oldKeys, rewritten),
+      /Unsupported state or unable to authenticate data/u,
+      `${item.path} must not open under the old keyset`,
+    );
   }
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// Kills mutation A: changing the `kv` branch's `JSON.stringify(payload, null,
+// 2)` to compact (or the `document`/`sync-change` branches' compact
+// `JSON.stringify(payload)` to indented) would silently reformat every
+// artifact of that kind on disk. src/store.ts:133 and src/grants.ts:180 both
+// write two-space JSON for kv envelopes; every document, chunk and
+// sync-change writer in src/documents.ts and src/sync/protocol.ts writes
+// compact JSON. Asserted directly on the bytes `encryptItem` produced, not by
+// re-parsing into objects and comparing equality (which would not notice a
+// formatting change at all).
+test("encryptItem reproduces each owner's JSON formatting exactly", () => {
+  const { dir } = seedVault();
+  const oldKeys = openVaultKeys(dir, PASSPHRASE);
+
+  const items = planRekey(dir);
+  const kvItem = items.find((item) => item.path === "health.kv.enc");
+  const documentItem = items.find((item) => item.path === "documents/index.enc");
+  assert.ok(kvItem, "health.kv.enc should have been scheduled");
+  assert.ok(documentItem, "documents/index.enc should have been scheduled");
+
+  const kvRaw = fs.readFileSync(path.join(dir, kvItem.path));
+  const kvPlaintext = decryptItem(kvItem, oldKeys, kvRaw);
+  const kvRewritten = encryptItem(kvItem, oldKeys, kvPlaintext).toString("utf8");
+
+  // src/store.ts / src/grants.ts format: JSON.stringify(payload, null, 2).
+  assert.match(
+    kvRewritten,
+    /^\{\n {2}"version": 2,\n {2}"cipher": "aes-256-gcm",\n {2}"keyId": "kv",\n {2}"iv": "/u,
+    "kv envelopes must be two-space-indented JSON, like src/store.ts and src/grants.ts write",
+  );
+
+  const documentRaw = fs.readFileSync(path.join(dir, ...documentItem.path.split("/")));
+  const documentPlaintext = decryptItem(documentItem, oldKeys, documentRaw);
+  const documentRewritten = encryptItem(documentItem, oldKeys, documentPlaintext).toString("utf8");
+
+  // src/documents.ts format: compact JSON.stringify(payload), no whitespace.
+  assert.match(documentRewritten, /^\{"version":1,"iv":"/u, "document envelopes must be compact JSON");
+  assert.doesNotMatch(documentRewritten, /\n/u, "document envelopes must not contain any newlines");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// Kills mutation B: routing the `document` branch through `.toString("utf8")`
+// instead of decryptDocumentBytes/encryptDocumentBytes would corrupt any
+// attachment chunk holding bytes that are not valid UTF-8 — exactly the case
+// for arbitrary binary attachments. One chunk is well under the 1 MiB chunk
+// size (src/documents.ts ATTACHMENT_CHUNK_SIZE), so this does not exercise
+// the multi-chunk path; kept small so the test stays fast.
+test("an attachment with invalid UTF-8 bytes survives re-encryption byte for byte", () => {
+  const dir = tempDir();
+  const vault = new DocumentVault(dir, PASSPHRASE);
+  const binary = Buffer.from([
+    0x48, 0x65, 0x6c, 0x6c, 0x6f, // "Hello", so the payload isn't purely pathological
+    0x80, 0x81, // lone continuation bytes
+    0xff, 0xfe, // invalid standalone bytes
+    0xe2, 0x28, 0xa1, // truncated / invalid multi-byte sequence
+    0x00, // NUL
+  ]);
+  const attachment = vault.putAttachment(binary, "binary.bin");
+  vault.lock();
+
+  const oldKeys = openVaultKeys(dir, PASSPHRASE);
+  const newKeys = randomKeySet();
+  newKeys.attachmentId = Buffer.from(oldKeys.attachmentId);
+
+  const item = planRekey(dir).find(
+    (candidate) => candidate.path === `documents/attachments/${attachment.id}/0.chunk.enc`,
+  );
+  assert.ok(item, "the attachment chunk should have been scheduled");
+
+  const raw = fs.readFileSync(path.join(dir, ...item.path.split("/")));
+  const plaintext = decryptItem(item, oldKeys, raw);
+  assert.deepEqual(plaintext, binary, "decrypted chunk must match the original bytes exactly");
+
+  const rewritten = encryptItem(item, newKeys, plaintext);
+  const roundTripped = decryptItem(item, newKeys, rewritten);
+  assert.deepEqual(roundTripped, binary, "re-encrypted chunk must round trip byte for byte");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// Kills mutation C: disabling the `envelope.id !== item.identity` guard in
+// the sync-change branch of decryptItem would let a swapped or renamed
+// change file re-seal under the wrong subkey and AAD. Drives a real
+// SyncChangeLog for the envelope, then hands decryptItem an item whose
+// identity does not match what the file's own envelope carries.
+test("decryptItem refuses a sync change whose filename does not match its envelope", () => {
+  const dir = tempDir();
+  const log = new SyncChangeLog(dir, PASSPHRASE);
+  const deviceId = "33333333-3333-4333-8333-333333333333";
+  const change = log.append(deviceId, {
+    objectType: "note",
+    objectId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    operation: "put",
+    baseRevision: null,
+    revision: 1,
+    value: { title: "Plan", body: "private body" },
+  });
+  log.close();
+
+  const keys = openVaultKeys(dir, PASSPHRASE);
+  const item = planRekey(dir).find((candidate) => candidate.kind === "sync-change");
+  assert.ok(item, "a sync change should have been scheduled");
+  assert.equal(item.identity, change.id);
+
+  const raw = fs.readFileSync(path.join(dir, ...item.path.split("/")));
+  const mismatched = { ...item, identity: "0".repeat(64) };
+  assert.notEqual(mismatched.identity, change.id);
+
+  assert.throws(
+    () => decryptItem(mismatched, keys, raw),
+    /Sync change filename does not match its envelope/u,
+  );
 
   fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -334,6 +457,15 @@ test("a sync change keeps its ID and its envelope shape across a re-encryption",
   assert.equal(after.id, before.id);
   assert.equal(after.version, 1);
   assert.notEqual(after.payload.ciphertext, before.payload.ciphertext);
+
+  // Minor finding: nothing pinned that the re-sealed envelope's key order
+  // matches sealSyncChange (src/sync/protocol.ts) — {version, id, payload}.
+  // Object.keys on a JSON.parse result reflects the order the keys appeared
+  // in the source text (these are non-integer string keys, so JS does not
+  // reorder them), which lets this check speak to the actual serialized
+  // bytes rather than just the parsed shape.
+  assert.deepEqual(Object.keys(after), ["version", "id", "payload"]);
+  assert.match(rewritten.toString("utf8"), /^\{"version":1,"id":"[0-9a-f]{64}","payload":/u);
 
   fs.rmSync(dir, { recursive: true, force: true });
 });
