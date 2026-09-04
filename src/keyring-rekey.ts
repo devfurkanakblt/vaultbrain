@@ -13,7 +13,7 @@ import {
   pluginAad,
   pluginStoreAad,
 } from "./documents.js";
-import { normalizeVaultName, resolveInside } from "./safety.js";
+import { resolveInside } from "./safety.js";
 import { APPLIED_AAD } from "./sync/protocol.js";
 import { APPLY_RECEIPT_AAD, LOCAL_TRANSACTION_AAD } from "./sync/transaction.js";
 
@@ -47,11 +47,29 @@ const ROOT_PLAINTEXT = new Set([
 ]);
 
 const OBJECT_FILE = /^([a-f0-9-]{36})\.(note|canvas|plugin|pluginstore)\.enc$/u;
-const HISTORY_FILE = /^(\d+)\.(note|canvas)\.enc$/u;
-const CHUNK_FILE = /^(\d+)\.chunk\.enc$/u;
+// `(0|[1-9]\d*)` rather than `\d+` so acceptance matches round-trip: a
+// leading-zero filename like `007.note.enc` would classify but could never be
+// produced again by the writer that names files with `String(revision)`.
+const HISTORY_FILE = /^(0|[1-9]\d*)\.(note|canvas)\.enc$/u;
+const CHUNK_FILE = /^(0|[1-9]\d*)\.chunk\.enc$/u;
 const CHANGE_FILE = /^([a-f0-9]{64})\.change\.enc$/u;
 const DOCUMENT_ID = /^[a-f0-9-]{36}$/u;
 const CONTENT_ID = /^[a-f0-9]{64}$/u;
+
+/**
+ * `writeFileAtomic` (src/fs-safe.ts) and `SyncChangeLog.storeEnvelope`
+ * (src/sync/change-log.ts) both stage writes as a dot-prefixed sibling named
+ * `.<final-name>.<pid>.<uuid>.tmp` and remove it once the write lands. A hard
+ * crash between the write and the cleanup can leave one behind. Every reader
+ * in this codebase already ignores these — they filter directory listings by
+ * the suffix they care about, so a `.tmp` sibling is never opened as data —
+ * and the walk should agree: it is a known crash leftover no reader consults,
+ * not an artifact anything needs re-encrypted. This is different from an
+ * unrecognized `.enc` file, which fails closed below, because an unrecognized
+ * `.enc` may be live data the vault still depends on and must not be left
+ * behind under a key the re-key is about to discard.
+ */
+const WRITER_TEMP_FILE = /^\..+\.tmp$/u;
 
 const SYNC_STATE_AAD: Record<string, string> = {
   "applied.enc": APPLIED_AAD,
@@ -73,6 +91,8 @@ function classifyDocument(relative: string): RekeyItem | null {
     kind,
     identity,
   });
+
+  if (WRITER_TEMP_FILE.test(segments[segments.length - 1])) return null;
 
   if (segments.length === 1) {
     if (DOCUMENT_PLAINTEXT.has(segments[0])) return null;
@@ -121,12 +141,12 @@ function classifyDocument(relative: string): RekeyItem | null {
   throw new Error(`Refusing to re-key: cannot classify documents/${relative}.`);
 }
 
-function walkDocuments(rootDir: string, current: string, prefix: string, items: RekeyItem[]): void {
+function walkDocuments(current: string, prefix: string, items: RekeyItem[]): void {
   for (const entry of fs.readdirSync(current, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
     const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
     const full = path.join(current, entry.name);
     if (entry.isDirectory()) {
-      walkDocuments(rootDir, full, relative, items);
+      walkDocuments(full, relative, items);
       continue;
     }
     if (!entry.isFile()) continue;
@@ -147,9 +167,18 @@ export function planRekey(vaultDir: string): RekeyItem[] {
     if (entry.isDirectory()) continue;
     if (!entry.isFile()) continue;
     if (ROOT_PLAINTEXT.has(entry.name)) continue;
+    if (WRITER_TEMP_FILE.test(entry.name)) continue;
     if (entry.name.endsWith(".kv.enc")) {
       const base = entry.name.slice(0, -".kv.enc".length);
-      items.push({ path: entry.name, kind: "kv", identity: normalizeVaultName(base) });
+      // `base` is the filename `saveVaultFile` (src/store.ts) chose, and it
+      // already ran the user's input through `normalizeVaultName` before
+      // using the result as the filename — so the base IS the normalized
+      // identity. Re-normalizing here would strip a trailing ".kv" a second
+      // time: a file whose real identity is "backup.kv" (stored as
+      // "backup.kv.kv.enc") would be reported as "backup", and re-encrypting
+      // under that wrong identity produces a file `loadVaultFile` can never
+      // authenticate again.
+      items.push({ path: entry.name, kind: "kv", identity: base });
       continue;
     }
     if (entry.name === "grants.enc") {
@@ -162,7 +191,7 @@ export function planRekey(vaultDir: string): RekeyItem[] {
   }
 
   const documentsDir = resolveInside(vaultDir, "documents");
-  if (fs.existsSync(documentsDir)) walkDocuments(documentsDir, documentsDir, "", items);
+  if (fs.existsSync(documentsDir)) walkDocuments(documentsDir, "", items);
 
   return items;
 }
