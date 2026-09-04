@@ -193,3 +193,30 @@ export function recallPassphrase(vaultDir: string): string | undefined {
 export function forgetPassphrase(vaultDir: string): boolean {
   return keychain().forget(accountFor(vaultDir));
 }
+
+/**
+ * Replaces this vault's remembered passphrase after it has changed. A vault
+ * with nothing remembered is left alone: storing a credential the user never
+ * asked to store is `vbrain unlock --remember`'s job, not a side effect of a
+ * passphrase change. A store that refuses the write is reported rather than
+ * thrown, because by the time this runs the vault has already changed and the
+ * caller must not report failure for an operation that completed.
+ */
+export function updateRememberedPassphrase(
+  vaultDir: string,
+  passphrase: string,
+): { updated: boolean; backend: string; error?: string } {
+  const backend = keychain();
+  const account = accountFor(vaultDir);
+  try {
+    if (!backend.lookup(account)) return { updated: false, backend: backend.name };
+    backend.store(account, passphrase);
+    return { updated: true, backend: backend.name };
+  } catch (error) {
+    return {
+      updated: false,
+      backend: backend.name,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}

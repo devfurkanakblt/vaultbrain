@@ -15,6 +15,7 @@ import {
   wrapKeySet,
   writeKeyring,
 } from "../dist/keyring.js";
+import { accountFor, setKeychainBackend, updateRememberedPassphrase } from "../dist/keychain.js";
 import { changeVaultPassphrase, MIN_PASSPHRASE_LENGTH } from "../dist/keyring-passphrase.js";
 import { loadVaultFile, upsertEntry } from "../dist/store.js";
 
@@ -209,4 +210,75 @@ test("--allow-same-passphrase re-wraps at the current cost without changing the 
 
 test("the minimum length is the documented one", () => {
   assert.equal(MIN_PASSPHRASE_LENGTH, 12);
+});
+
+/** A fake credential store. `failOnStore` makes writes throw, as a locked keychain does. */
+function fakeKeychain({ failOnStore = false } = {}) {
+  const entries = new Map();
+  return {
+    entries,
+    backend: {
+      name: "fake",
+      available: () => true,
+      store(account, secret) {
+        if (failOnStore) throw new Error("credential store is locked");
+        entries.set(account, secret);
+      },
+      lookup: (account) => entries.get(account),
+      forget: (account) => entries.delete(account),
+    },
+
+  };
+}
+
+test("a remembered passphrase is replaced with the new one", () => {
+  const { dir } = seedVault();
+  const fake = fakeKeychain();
+  setKeychainBackend(fake.backend);
+  try {
+    fake.backend.store(accountFor(dir), PASSPHRASE);
+
+    const result = updateRememberedPassphrase(dir, NEW_PASSPHRASE);
+
+    assert.equal(result.updated, true);
+    assert.equal(result.backend, "fake");
+    assert.equal(result.error, undefined);
+    assert.equal(fake.entries.get(accountFor(dir)), NEW_PASSPHRASE);
+  } finally {
+    setKeychainBackend(undefined);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a vault with nothing remembered is left alone", () => {
+  const { dir } = seedVault();
+  const fake = fakeKeychain();
+  setKeychainBackend(fake.backend);
+  try {
+    const result = updateRememberedPassphrase(dir, NEW_PASSPHRASE);
+
+    assert.equal(result.updated, false);
+    assert.equal(result.error, undefined);
+    assert.equal(fake.entries.size, 0, "nothing may be stored for a vault that had nothing");
+  } finally {
+    setKeychainBackend(undefined);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a store that refuses the write is reported rather than thrown", () => {
+  const { dir } = seedVault();
+  const fake = fakeKeychain({ failOnStore: true });
+  setKeychainBackend(fake.backend);
+  try {
+    fake.entries.set(accountFor(dir), PASSPHRASE);
+
+    const result = updateRememberedPassphrase(dir, NEW_PASSPHRASE);
+
+    assert.equal(result.updated, false);
+    assert.match(result.error ?? "", /locked/u);
+  } finally {
+    setKeychainBackend(undefined);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
