@@ -11,12 +11,14 @@ import {
   randomKeySet,
   wrapKeySet,
   writeKeyring,
+  zeroKeySet,
   type KeyName,
   type KeySet,
 } from "./keyring.js";
 import { resolveInside } from "./safety.js";
 import { listVaultFiles, loadVaultFile, saveVaultFile, vaultFileEnvelopeVersion } from "./store.js";
 import { withVaultLock } from "./vault-lock.js";
+import { appendKeyringAuditWithKey, newKeyringAuditKey } from "./keyring-audit.js";
 
 const LEGACY_SCRYPT_N = 2 ** 15;
 const LEGACY_KEY_LENGTH = 32;
@@ -148,21 +150,31 @@ export function migrateToKeyring(vaultDir: string, passphrase: string): KeyringM
       // wrong passphrase cannot leave a vault half-converted.
       const pending = new Map(listVaultFiles(vaultDir).map((name) => [name, loadVaultFile(vaultDir, name, passphrase)]));
       const grants = loadGrants(vaultDir, passphrase);
+      const auditOperation = newKeyringAuditKey("migrate");
+      appendKeyringAuditWithKey(vaultDir, keys.audit, auditOperation, "pending");
+      try {
+        writeKeyring(vaultDir, { version: 2, slots: [wrapKeySet(keys, passphrase)] });
+        forgetVaultKeys(vaultDir);
 
-      writeKeyring(vaultDir, { version: 2, slots: [wrapKeySet(keys, passphrase)] });
-      forgetVaultKeys(vaultDir);
+        for (const [name, entries] of pending) saveVaultFile(vaultDir, name, entries, passphrase);
+        if (grants) saveGrants(vaultDir, grants, passphrase);
 
-      for (const [name, entries] of pending) saveVaultFile(vaultDir, name, entries, passphrase);
-      if (grants) saveGrants(vaultDir, grants, passphrase);
-
-      return {
-        created: true,
-        adopted,
-        generated,
-        kvFilesRewritten: [...pending.keys()],
-        grantsRewritten: grants !== null,
-        manifestTombstoned: tombstoneManifest(vaultDir),
-      };
+        const report = {
+          created: true,
+          adopted,
+          generated,
+          kvFilesRewritten: [...pending.keys()],
+          grantsRewritten: grants !== null,
+          manifestTombstoned: tombstoneManifest(vaultDir),
+        };
+        appendKeyringAuditWithKey(vaultDir, keys.audit, auditOperation, "allowed");
+        return report;
+      } catch (error) {
+        appendKeyringAuditWithKey(vaultDir, keys.audit, auditOperation, "denied");
+        throw error;
+      } finally {
+        zeroKeySet(keys);
+      }
     }
 
     // Resume: the keyring exists, so finish anything an earlier run left behind.

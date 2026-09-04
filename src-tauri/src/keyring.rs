@@ -534,6 +534,32 @@ mod tests {
     }
 
     #[test]
+    fn a_recovery_labeled_passphrase_slot_opens_the_same_keyset() {
+        let keys = random_key_set();
+        let primary = wrap_key_set(&keys, "correct horse battery staple", MIN_LOG_N).unwrap();
+        let mut recovery = wrap_key_set(
+            &keys,
+            "vbr1_abcdefghijklmnopqrstuvwxyzABCDEFGH012345678_deadbeef",
+            MIN_LOG_N,
+        )
+        .unwrap();
+        // label is intentionally display metadata; the authenticated slot type
+        // remains `passphrase`, preserving the phase 7.1 cross-core format.
+        recovery.label = "recovery".into();
+        let opened = unwrap_keyring(
+            &KeyringFile {
+                version: KEYRING_VERSION,
+                slots: vec![primary, recovery],
+            },
+            "vbr1_abcdefghijklmnopqrstuvwxyzABCDEFGH012345678_deadbeef",
+        )
+        .unwrap();
+        assert_eq!(*opened.documents, *keys.documents);
+        assert_eq!(*opened.kv, *keys.kv);
+        assert_eq!(*opened.audit, *keys.audit);
+    }
+
+    #[test]
     fn a_keyring_file_survives_a_write_and_a_read() {
         let dir = std::env::temp_dir().join(format!("vault-brain-keyring-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();

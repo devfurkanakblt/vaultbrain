@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import { appendAudit, verifyAudit } from "../dist/audit.js";
+import { appendAudit, readAudit, verifyAudit } from "../dist/audit.js";
 import { encrypt } from "../dist/crypto.js";
 import { DocumentVault } from "../dist/documents.js";
 import { serializeKV } from "../dist/format.js";
@@ -110,11 +110,14 @@ test("migration adopts the audit key so the existing chain still verifies", () =
   const report = migrateToKeyring(vault, PASSPHRASE);
   assert.ok(report.adopted.includes("audit"));
   assert.equal(verifyAudit(vault, PASSPHRASE).valid, true);
+  const migrationEvents = readAudit(vault).filter((entry) => entry.actor === "cli-keyring");
+  assert.deepEqual(migrationEvents.map((entry) => entry.outcome), ["pending", "allowed"]);
+  assert.equal(migrationEvents[0].key, migrationEvents[1].key);
 
   appendAudit(vault, { actor: "cli-direct", file: "health", key: "BLOOD_TYPE" }, PASSPHRASE);
   const verified = verifyAudit(vault, PASSPHRASE);
   assert.equal(verified.valid, true);
-  assert.equal(verified.signedEntries, 2);
+  assert.equal(verified.signedEntries, 4);
 });
 
 test("migration rewrites key-value files and the manifest tombstone", () => {
