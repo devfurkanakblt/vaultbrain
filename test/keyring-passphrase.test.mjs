@@ -21,7 +21,9 @@ import {
   accountFor,
   forgetPassphrase,
   keychain,
+  recallPassphrase,
   rememberPassphrase,
+  run,
   setKeychainBackend,
   updateRememberedPassphrase,
 } from "../dist/keychain.js";
@@ -338,6 +340,19 @@ test("a store that refuses the write is reported rather than thrown, and never l
   }
 });
 
+test("run() never reproduces its arguments in the thrown error, even a secret-looking one", () => {
+  const secretLikeArgument = "super-secret-passphrase-should-not-leak";
+
+  assert.throws(
+    () => run("vault-brain-nonexistent-command-xyz", ["-w", secretLikeArgument]),
+    (error) => {
+      assert.ok(error instanceof Error);
+      assert.ok(!error.message.includes(secretLikeArgument), `error must not contain the secret: ${error.message}`);
+      return true;
+    },
+  );
+});
+
 test("a failed credential update forgets the stale credential instead of leaving it behind", () => {
   const { dir } = seedVault();
   const fake = fakeKeychain({ failOnStore: true });
@@ -412,6 +427,7 @@ test("the CLI never takes the current passphrase from the OS credential store", 
 
   const { dir } = seedVault();
   rememberPassphrase(dir, PASSPHRASE);
+  assert.ok(recallPassphrase(dir), "the credential must actually be stored before this test proves anything");
   try {
     // VBRAIN_PASSPHRASE is deliberately unset, and stdin is not a TTY (the
     // default for a spawned child with no `input`), so it reads EOF rather
@@ -426,6 +442,7 @@ test("the CLI never takes the current passphrase from the OS credential store", 
       env: childEnv,
     });
 
+    assert.notEqual(result.status, 0);
     assert.doesNotMatch(result.stdout ?? "", /Passphrase changed/u);
 
     forgetVaultKeys();
@@ -434,6 +451,28 @@ test("the CLI never takes the current passphrase from the OS credential store", 
     forgetPassphrase(dir);
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("with stdin closed and no VBRAIN_PASSPHRASE, the command fails loudly instead of exiting 0", () => {
+  const { dir } = seedVault();
+
+  const childEnv = { ...process.env, VBRAIN_NEW_PASSPHRASE: NEW_PASSPHRASE };
+  delete childEnv.VBRAIN_PASSPHRASE;
+  const result = spawnSync(process.execPath, [cliPath, "--vault", dir, "passphrase", "change"], {
+    encoding: "utf8",
+    timeout: 10_000,
+    env: childEnv,
+    input: "",
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /end of file/iu);
+  assert.match(result.stderr, /VBRAIN_PASSPHRASE/u);
+
+  forgetVaultKeys();
+  assert.ok(openVaultKeys(dir, PASSPHRASE), "the vault must still open under the original passphrase");
+
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 test("the CLI's --allow-same-passphrase re-wraps the keyring end to end", () => {

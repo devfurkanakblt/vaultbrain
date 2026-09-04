@@ -1268,11 +1268,11 @@ passphraseCommand
       console.log(`Updated the remembered passphrase in the OS credential store (${keychainResult.backend}).`);
     } else if (keychainResult.error) {
       const credentialState = keychainResult.cleared
-        ? "the remembered credential was removed"
-        : "the remembered credential could not be removed either";
+        ? "The remembered credential was removed. Run 'vbrain unlock --remember' to store the new passphrase."
+        : "The remembered credential could not be removed either. Run 'vbrain lock' to clear it.";
       console.error(
         `Warning: the passphrase changed, but the OS credential store (${keychainResult.backend}) could not be updated (${keychainResult.error}). ` +
-          `${credentialState}. Run 'vbrain unlock --remember' to store the new passphrase.`,
+          credentialState,
       );
     }
 

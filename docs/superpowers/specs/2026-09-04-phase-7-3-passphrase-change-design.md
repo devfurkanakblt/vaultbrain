@@ -100,10 +100,23 @@ of the command is four scrypt derivations and one small file write, whatever
 the size of the vault: the unwrap of the current passphrase, the wrap under
 the new one, a pre-write verification that the freshly wrapped slot unwraps
 back to the same keyset, and a post-write read-back that proves the file
-actually on disk opens under the new passphrase — plus one further derivation
-per preserved slot, since the read-back step re-verifies those too. The two
-verification steps are not optional overhead: they are what makes a bad write
-fail loudly instead of leaving an unrecoverable vault.
+actually on disk opens under the new passphrase. The read-back does *not*
+re-verify preserved slots — `unwrapKeyring` returns as soon as it finds the
+first slot that opens under the new passphrase, and it never tries a
+preserved slot's own passphrase there. The extra derivation instead comes
+from the rewrite loop itself: locating which slot the current passphrase
+opens means calling `unwrapSlot` with the current passphrase against every
+slot in file order, including the ones that turn out to be preserved, so each
+preserved slot costs one failed derivation there regardless of its position.
+A preserved slot that sits *before* the rewritten slot in the keyring costs a
+second failed derivation too: the post-write read-back's `unwrapKeyring` walks
+the new file in the same order looking for a slot the new passphrase opens,
+so it tries that preserved slot with the new passphrase (and fails) before it
+reaches the rewritten slot that actually succeeds. A preserved slot that sits
+after the rewritten slot is never reached by the read-back at all, since
+`unwrapKeyring` already returned. The two verification steps are not optional
+overhead: they are what makes a bad write fail loudly instead of leaving an
+unrecoverable vault.
 
 ## Module boundary
 
@@ -158,10 +171,16 @@ passphrase, an unchanged passphrase without the flag.
 
 If step 10 fails — no credential store, or a store that rejects the write — the
 command still succeeds, because the vault genuinely did change, and says so in
-plain terms: the passphrase changed, the remembered credential is now stale,
-run `vbrain unlock --remember` to store the new one. Failing the command here
-would be worse, because it would report failure for an operation that
-completed.
+plain terms. It does not leave the stale credential in place: a credential
+that still verifies under the *old* passphrase would make every later command
+that consults it fail against a passphrase that is no longer current, with no
+indication why. Instead it attempts to remove the stale credential and reports
+which of the two outcomes happened — if the removal succeeds, it tells the
+user to run `vbrain unlock --remember` to store the new passphrase; if the
+removal also fails, nothing is left that can be trusted, and it tells the user
+to run `vbrain lock` to clear it. Failing the command itself here would be
+worse than either outcome, because it would report failure for an operation
+that completed.
 
 The closing output of the command states that changing the passphrase does not
 re-encrypt anything, and that a leaked passphrase needs `vbrain rekey`.
@@ -203,6 +222,18 @@ script:
 - Keychain: with a stubbed backend (`setKeychainBackend`) holding the old
   passphrase, the change updates it; with a backend whose write throws, the
   command still succeeds and warns.
+- Two slots that both open under the current passphrase but carry different
+  keysets are refused, and the refusal leaves the keyring file untouched.
+- CLI-level `--allow-same-passphrase`: end to end through `dist/cli.js`, the
+  keyring is re-wrapped at the current cost and the vault still opens under
+  the same passphrase.
+- The CLI never takes the current passphrase from the OS credential store: a
+  vault with a remembered passphrase, run with `VBRAIN_PASSPHRASE` unset and
+  stdin not a TTY, must not report success, and the vault must still open
+  under the original passphrase afterward.
+- With stdin closed and no `VBRAIN_PASSPHRASE` set, the command fails loudly
+  — a non-zero exit and an error naming `VBRAIN_PASSPHRASE` on stderr —
+  instead of exiting 0 having read nothing and changed nothing.
 
 No fixture is added or regenerated: this phase changes no on-disk format.
 

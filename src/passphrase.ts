@@ -17,12 +17,23 @@ export function readSecret(prompt = "Vault passphrase: "): Promise<string> {
   const input = process.stdin;
   if (!input.isTTY || typeof input.setRawMode !== "function") {
     const rl = readline.createInterface({ input, output: process.stderr });
-    return new Promise((resolve) =>
+    return new Promise((resolve, reject) => {
+      let answered = false;
       rl.question(prompt, (answer) => {
+        answered = true;
         rl.close();
         resolve(answer);
-      }),
-    );
+      });
+      rl.on("close", () => {
+        if (answered) return;
+        reject(
+          new Error(
+            "No passphrase could be read because standard input reached end of file. " +
+              "Set VBRAIN_PASSPHRASE to supply one non-interactively.",
+          ),
+        );
+      });
+    });
   }
 
   process.stderr.write(prompt);

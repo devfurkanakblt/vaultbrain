@@ -185,9 +185,11 @@ earlier formats so a future change has to prove it can still read them.
   created under an older, cheaper setting raises its work factor. Nothing is
   re-encrypted, and it takes the same time on a 100,000-note vault as on an
   empty one. Add `--allow-same-passphrase` to raise the cost without changing
-  the passphrase. Set `VBRAIN_NEW_PASSPHRASE` to run it unattended. If this
-  vault has a passphrase remembered in the OS credential store, it is updated
-  to the new one.
+  the passphrase. It never consults the OS credential store for the current
+  passphrase, so running it unattended requires both `VBRAIN_PASSPHRASE` (the
+  current passphrase) and `VBRAIN_NEW_PASSPHRASE` (the replacement) to be set.
+  If this vault has a passphrase remembered in the OS credential store, it is
+  updated to the new one.
 
 ## Encrypted Markdown documents
 

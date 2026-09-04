@@ -19,14 +19,34 @@ export function accountFor(vaultDir: string): string {
   return crypto.createHash("sha256").update(path.resolve(vaultDir)).digest("hex").slice(0, 32);
 }
 
-function run(command: string, args: string[], input?: string): string {
-  return execFileSync(command, args, {
-    input,
-    encoding: "utf8",
-    stdio: ["pipe", "pipe", "pipe"],
-    windowsHide: true,
-    timeout: 20_000,
-  });
+/**
+ * Every backend call goes through here, so this is the one place that has to
+ * keep a failing command from leaking its arguments. `execFileSync` builds
+ * its failure message as "Command failed: <file> <args joined>", and more
+ * than one backend passes a secret as an argv element (notably macOS'
+ * `security -w <secret>`) — so on failure the message is replaced with one
+ * that names only the command and its exit status, never the arguments.
+ *
+ * Exported only so tests can drive this sanitisation directly with a
+ * guaranteed-to-fail command; no backend call site needs the export.
+ */
+export function run(command: string, args: string[], input?: string): string {
+  try {
+    return execFileSync(command, args, {
+      input,
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+      timeout: 20_000,
+    });
+  } catch (error) {
+    const status =
+      error && typeof error === "object" && "status" in error
+        ? (error as { status?: number | null }).status
+        : undefined;
+    const statusText = status === undefined || status === null ? "unknown" : String(status);
+    throw new Error(`Command failed: ${command} (exit status ${statusText})`, { cause: error });
+  }
 }
 
 function canRun(command: string, args: string[]): boolean {
