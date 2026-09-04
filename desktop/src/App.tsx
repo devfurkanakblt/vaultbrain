@@ -33,10 +33,13 @@ import {
   Sun,
   TableProperties,
   Trash2,
+  TriangleAlert,
   X,
 } from "lucide-react";
 import { AttachmentLibrary } from "./AttachmentLibrary";
 import { vaultBridge } from "./bridge";
+import { CommandPalette, type PaletteCommand } from "./CommandPalette";
+import { useConfirm } from "./Confirm";
 import { CanvasBoard } from "./CanvasBoard";
 import { ContextPanel } from "./ContextPanel";
 import type { OutlineItem } from "./ContextPanel";
@@ -52,7 +55,7 @@ import { ThemeEditor } from "./ThemeEditor";
 import { WorkspacesDialog } from "./Workspaces";
 import { applyTheme, clearTheme, DEFAULT_THEME, loadTheme, saveTheme, type ThemeSettings } from "./theme";
 import { useVirtualWindow } from "./virtual";
-import type { AttachmentInfo, Backlink, Bookmark, CanvasSummary, DeletedNote, KnowledgeGraph as GraphData, NoteDocument, NoteSummary, PluginSecurityPolicy, PluginSummary, PropertyRow, SavedView, SaveState, SearchHit, UnlinkedMention, VaultInfo, WorkspaceLayout, WorkspaceState } from "./types";
+import type { AttachmentInfo, Backlink, Bookmark, CanvasSummary, DeletedNote, KnowledgeGraph as GraphData, NoteDocument, NoteSummary, PluginSecurityPolicy, PluginSummary, PropertyRow, SavedView, SaveState, SearchHit, UnlinkedMention, NoticeTone, Notify, VaultInfo, WorkspaceLayout, WorkspaceState } from "./types";
 
 const MarkdownEditor = lazy(() => import("./Editor").then((module) => ({ default: module.MarkdownEditor })));
 const MarkdownPreview = lazy(() => import("./Preview"));
@@ -60,6 +63,11 @@ const MarkdownPreview = lazy(() => import("./Preview"));
 type ViewMode = "write" | "read";
 type WorkspaceView = "notes" | "graph" | "properties" | "canvas" | "files" | "plugins";
 type LockReason = "manual" | "inactivity";
+/**
+ * A message and how it should read. Success and failure shared one green tick
+ * before this, so a save that failed announced itself as a save that worked.
+ */
+type Notice = { text: string; tone: NoticeTone };
 type TreeRow =
   | { kind: "folder"; key: string; folder: string; count: number; open: boolean }
   | { kind: "note"; key: string; note: NoteSummary };
@@ -296,7 +304,13 @@ export function App() {
   const [reveal, setReveal] = useState<{ line: number; token: number }>();
   const revealToken = useRef(0);
   const documentBody = useRef<HTMLDivElement>(null);
-  const [notice, setNotice] = useState("");
+  const [vaultMenuOpen, setVaultMenuOpen] = useState(false);
+  const [notice, setNotice] = useState<Notice>();
+  const report = useCallback<Notify>((text, tone = "info") => setNotice({ text, tone }), []);
+  const fail = useCallback((caught: unknown, fallback = "Something went wrong.") => {
+    setNotice({ text: caught instanceof Error ? caught.message : String(caught) || fallback, tone: "error" });
+  }, []);
+  const [confirm, confirmDialog] = useConfirm();
   const [lockNotice, setLockNotice] = useState("");
   const [idleMinutes, setIdleMinutes] = useState(readIdlePreference);
   const [theme, setTheme] = useState<ThemeSettings>(loadTheme);
@@ -309,6 +323,10 @@ export function App() {
     return open ? [head, ...items.map((note): TreeRow => ({ kind: "note", key: note.id, note }))] : [head];
   }), [expanded, notes]);
   const tree = useVirtualWindow<HTMLElement>(treeRows.length, TREE_ROW_HEIGHT);
+  const spread = useMemo(
+    () => folders(notes).map(([folder, items]) => [folder, items.length] as const).sort((left, right) => right[1] - left[1]),
+    [notes],
+  );
 
   useEffect(() => {
     applyTheme(theme);
@@ -371,7 +389,7 @@ export function App() {
   const host = useCallback(() => {
     pluginHost.current ??= new PluginHost({
       call: pluginBridge,
-      onNotice: (name, message) => setNotice(`${name}: ${message}`),
+      onNotice: (name, message, tone) => setNotice({ text: `${name}: ${message}`, tone: tone ?? "info" }),
       onCommandsChanged: setPluginCommands,
       onPanelsChanged: setPluginPanels,
       onStateChanged: setPluginStates,
@@ -491,20 +509,20 @@ export function App() {
       await refreshList();
       setWorkspaceView("notes");
       await openNote(daily.note.id);
-      setNotice(daily.created ? `Created today's note at ${daily.note.path}.` : `Opened today's note.`);
+      report(daily.created ? `Created today's note at ${daily.note.path}.` : `Opened today's note.`);
     } catch (caught) {
-      setNotice(caught instanceof Error ? caught.message : String(caught));
+      fail(caught);
     }
   }, [openNote, refreshList]);
 
   const copyGuarded = useCallback(async (label: string, value: string) => {
     try {
       await copyWithExpiry(value, CLIPBOARD_TTL_MS);
-      setNotice(`${label} copied — the clipboard clears itself in ${CLIPBOARD_TTL_MS / 1000}s`);
+      report(`${label} copied — the clipboard clears itself in ${CLIPBOARD_TTL_MS / 1000}s`);
     } catch (caught) {
-      setNotice(caught instanceof Error ? caught.message : "Clipboard is unavailable.");
+      fail(caught, "Clipboard is unavailable.");
     }
-  }, []);
+  }, [fail, report]);
 
   const lock = useCallback(async (reason: LockReason = "manual") => {
     if (active && (saveState === "dirty" || saveState === "error")) {
@@ -520,7 +538,7 @@ export function App() {
     await vaultBridge.lock();
     setVault(undefined); setNotes([]); setActive(undefined); setSecondary(undefined); setOpenTabs([]);
     setBacklinks([]); setMentions([]); setBookmarks([]); setLayouts([]); setWorkspacesOpen(false);
-    setQuery(""); setResults([]); setNotice("");
+    setQuery(""); setResults([]); setNotice(undefined);
     setSearchOpen(false); setPaletteOpen(false); setQuickOpen(false); setNewOpen(false); setThemeOpen(false);
     setRenameOpen(false); setHistoryOpen(false); setTrashOpen(false); setTemplateOpen(false); setTemplates([]);
     pluginHost.current?.stopAll();
@@ -556,7 +574,8 @@ export function App() {
 
   useEffect(() => {
     if (!notice) return;
-    const timer = window.setTimeout(() => setNotice(""), 4200);
+    // A failure is worth reading twice; a confirmation is not.
+    const timer = window.setTimeout(() => setNotice(undefined), notice.tone === "error" ? 7000 : 4200);
     return () => window.clearTimeout(timer);
   }, [notice]);
 
@@ -593,6 +612,7 @@ export function App() {
       if (event.key === "Escape") {
         setPaletteOpen(false); setSearchOpen(false); setNewOpen(false); setQuickOpen(false); setThemeOpen(false);
         setRenameOpen(false); setHistoryOpen(false); setTrashOpen(false); setTemplateOpen(false);
+        setVaultMenuOpen(false);
       }
     };
     window.addEventListener("keydown", handler);
@@ -649,11 +669,16 @@ export function App() {
     setSaveState("saved");
     await refreshList();
     setRenameOpen(false);
-    setNotice(`Moved to ${moved.path}.`);
+    report(`Moved to ${moved.path}.`);
   }
 
   async function deleteActive() {
-    if (!active || !window.confirm(`Delete “${active.title}”? Its encrypted history is kept, so it can be restored.`)) return;
+    if (!active) return;
+    if (!await confirm({
+      title: `Delete “${active.title}”?`,
+      body: "The note leaves the workspace, but its encrypted history stays in the vault — you can restore it from the deleted-notes list.",
+      action: "Delete note",
+    })) return;
     const removed = await vaultBridge.deleteNote(active.id);
     const remaining = openTabs.filter((tab) => tab.id !== removed.id);
     setOpenTabs(remaining);
@@ -664,7 +689,7 @@ export function App() {
     setSaveState("saved");
     await refreshList();
     if (remaining[0]) await openNote(remaining[0].id);
-    setNotice(`Deleted ${removed.title}. Restore it from the deleted-notes list.`);
+    report(`Deleted ${removed.title}. Restore it from the deleted-notes list.`);
   }
 
   async function restoreRevision(revision: number) {
@@ -675,7 +700,7 @@ export function App() {
     setSaveState("saved");
     await refreshList();
     setHistoryOpen(false);
-    setNotice(`Restored revision ${revision} as revision ${restored.revision}.`);
+    report(`Restored revision ${revision} as revision ${restored.revision}.`);
   }
 
   async function restoreDeleted(note: DeletedNote) {
@@ -684,7 +709,7 @@ export function App() {
     setTrashOpen(false);
     setWorkspaceView("notes");
     await openNote(restored.id);
-    setNotice(`Restored ${restored.title}.`);
+    report(`Restored ${restored.title}.`);
   }
 
   async function createFromTemplate(template: string, path: string, title: string, variables: Record<string, string>) {
@@ -693,7 +718,7 @@ export function App() {
     setTemplateOpen(false);
     setWorkspaceView("notes");
     await openNote(note.id);
-    setNotice(`Created ${note.path} from the template.`);
+    report(`Created ${note.path} from the template.`);
   }
 
   async function showTemplates() {
@@ -701,7 +726,7 @@ export function App() {
       setTemplates(await vaultBridge.templates());
       setTemplateOpen(true);
     } catch (caught) {
-      setNotice(caught instanceof Error ? caught.message : String(caught));
+      fail(caught);
     }
   }
 
@@ -723,39 +748,47 @@ export function App() {
       source
     );
     await refreshPlugins();
-    setNotice(`Installed ${installed.name}. It stays off until you turn it on.`);
+    report(`Installed ${installed.name}. It stays off until you turn it on.`);
   }
 
   async function togglePlugin(id: string, enabled: boolean) {
     const changed = await vaultBridge.setPluginEnabled(id, enabled);
     await refreshPlugins();
-    setNotice(`${changed.name} is now ${enabled ? "running" : "stopped"}.`);
+    report(`${changed.name} is now ${enabled ? "running" : "stopped"}.`);
   }
 
   async function removePlugin(plugin: PluginSummary) {
-    if (!window.confirm(`Remove ${plugin.name}? Its settings are deleted with it.`)) return;
+    if (!await confirm({
+      title: `Remove ${plugin.name}?`,
+      body: "The plugin stops immediately and the settings it stored in this vault are deleted with it.",
+      action: "Remove plugin",
+    })) return;
     await vaultBridge.deletePlugin(plugin.id);
     await refreshPlugins();
-    setNotice(`Removed ${plugin.name}.`);
+    report(`Removed ${plugin.name}.`);
   }
 
   async function setRestrictedPlugins(enabled: boolean) {
     await vaultBridge.setPluginRestrictedMode(enabled);
     await refreshPlugins();
-    setNotice(`Restricted plugin mode is ${enabled ? "on" : "off"}.`);
+    report(`Restricted plugin mode is ${enabled ? "on" : "off"}.`);
   }
 
   async function revokePluginSigner(plugin: PluginSummary) {
-    if (!window.confirm(`Revoke the signer of ${plugin.name}? Every plugin from this key stops immediately.`)) return;
+    if (!await confirm({
+      title: `Revoke the signer of ${plugin.name}?`,
+      body: "Every plugin signed with this key stops immediately, in this vault, until you restore the signer.",
+      action: "Revoke signer",
+    })) return;
     await vaultBridge.revokePluginSigner(plugin.id);
     await refreshPlugins();
-    setNotice(`${plugin.name}'s signer is revoked in this vault.`);
+    report(`${plugin.name}'s signer is revoked in this vault.`);
   }
 
   async function restorePluginSigner(keyId: string) {
     await vaultBridge.restorePluginSigner(keyId);
     await refreshPlugins();
-    setNotice("Plugin signer restored. Plugins remain off until you enable them.");
+    report("Plugin signer restored. Plugins remain off until you enable them.");
   }
 
   // A cell edit writes a whole note revision, so the open editor and the file
@@ -787,7 +820,7 @@ export function App() {
         ? bookmarks.filter((bookmark) => bookmark.id !== active.id)
         : [...bookmarks, { id: active.id, label: active.title, createdAt: "" }],
     });
-    setNotice(pinned ? `Removed ${active.title} from bookmarks.` : `Bookmarked ${active.title}.`);
+    report(pinned ? `Removed ${active.title} from bookmarks.` : `Bookmarked ${active.title}.`);
   }
 
   async function saveLayout(name: string) {
@@ -807,7 +840,7 @@ export function App() {
       bookmarks,
       layouts: existing ? layouts.map((item) => (item.id === existing.id ? layout : item)) : [...layouts, layout],
     });
-    setNotice(`Saved the "${name}" workspace.`);
+    report(`Saved the "${name}" workspace.`);
   }
 
   async function openLayout(layout: WorkspaceLayout) {
@@ -821,7 +854,7 @@ export function App() {
     // Only the views this build knows about; a stored view name is not a cast.
     if (layout.view === "graph" || layout.view === "properties" || layout.view === "canvas" || layout.view === "files") await showWorkspace(layout.view);
     setWorkspacesOpen(false);
-    setNotice(`Opened the "${layout.name}" workspace.`);
+    report(`Opened the "${layout.name}" workspace.`);
   }
 
   async function deleteLayout(id: string) {
@@ -844,8 +877,37 @@ export function App() {
     const next = IDLE_CHOICES[(IDLE_CHOICES.indexOf(idleMinutes) + 1) % IDLE_CHOICES.length];
     setIdleMinutes(next);
     localStorage.setItem("vbrain:idle-lock", String(next));
-    setNotice(next ? `Auto-lock set to ${next} minute${next === 1 ? "" : "s"} of inactivity.` : "Auto-lock disabled for this device.");
+    report(next ? `Auto-lock set to ${next} minute${next === 1 ? "" : "s"} of inactivity.` : "Auto-lock disabled for this device.");
   }
+
+  const commands = useMemo<PaletteCommand[]>(() => [
+    { icon: FilePlus2, label: "Create new note", keys: "⌘ N", action: () => setNewOpen(true) },
+    { icon: FileText, label: "Quick switch to a note", keys: "⌘ O", action: () => setQuickOpen(true) },
+    { icon: Sun, label: "Open today's daily note", keys: "⌘ D", action: () => void openDaily() },
+    { icon: Sparkles, label: "New note from a template", action: () => void showTemplates() },
+    { icon: PencilLine, label: "Rename or move this note", disabled: !active, action: () => setRenameOpen(true) },
+    { icon: History, label: "Browse this note's history", disabled: !active, action: () => setHistoryOpen(true) },
+    { icon: Star, label: "Bookmark this note", disabled: !active, action: () => void toggleBookmark() },
+    { icon: Trash2, label: "Restore a deleted note", action: () => setTrashOpen(true) },
+    { icon: Puzzle, label: "Manage plugins", action: () => void showWorkspace("plugins") },
+    ...pluginCommands.map((command) => ({
+      icon: Puzzle,
+      label: `${command.pluginName}: ${command.label}`,
+      action: () => host().invoke(command),
+    })),
+    { icon: Search, label: "Search encrypted vault", keys: "⇧⌘ F", action: () => setSearchOpen(true) },
+    { icon: Columns2, label: "Open current note in split pane", keys: "⌘ \\", disabled: !active, action: () => void openInSplit(active!.id) },
+    { icon: Network, label: "Open local graph", action: () => void showWorkspace("graph") },
+    { icon: TableProperties, label: "Open property view", action: () => void showWorkspace("properties") },
+    { icon: FolderKanban, label: "Open canvas workspace", action: () => void showWorkspace("canvas") },
+    { icon: Paperclip, label: "Open attachment library", action: () => void showWorkspace("files") },
+    { icon: BookOpen, label: mode === "write" ? "Switch to reading view" : "Switch to writing view", keys: "⌘ E", action: () => setMode(mode === "write" ? "read" : "write") },
+    { icon: rightOpen ? PanelRightClose : PanelRightOpen, label: rightOpen ? "Hide the context panel" : "Show the context panel", action: () => setRightOpen((value) => !value) },
+    { icon: LayoutGrid, label: "Workspaces and saved layouts", action: () => setWorkspacesOpen(true) },
+    { icon: Palette, label: "Customize theme", action: () => setThemeOpen(true) },
+    { icon: Clock, label: "Change auto-lock delay", action: () => cycleIdleLock() },
+    { icon: LockKeyhole, label: "Lock workspace", keys: "⌘ L", action: () => void lock() },
+  ], [active, host, lock, mode, openDaily, openInSplit, pluginCommands, rightOpen, showTemplates, showWorkspace, toggleBookmark]);
 
   async function promoteSplit() {
     if (!secondary) return;
@@ -860,9 +922,28 @@ export function App() {
     <main className={`workspace-shell ${workspaceView !== "notes" || !rightOpen ? "without-context" : ""}`}>
       <header className="topbar" data-tauri-drag-region>
         <div className="brand-mark"><span>VB</span></div>
-        <button className="vault-switch" title="Current encrypted vault">
-          <Archive size={15} /><span>{vault.name}</span><ChevronDown size={13} />
-        </button>
+        <div className="vault-switch-wrap">
+          <button
+            className={`vault-switch ${vaultMenuOpen ? "is-open" : ""}`}
+            onClick={() => setVaultMenuOpen((value) => !value)}
+            aria-expanded={vaultMenuOpen}
+            aria-haspopup="menu"
+            title="Current encrypted vault"
+          ><Archive size={15} /><span>{vault.name}</span><ChevronDown size={13} /></button>
+          {vaultMenuOpen && <>
+            <div className="menu-scrim" onPointerDown={() => setVaultMenuOpen(false)} />
+            <div className="vault-menu" role="menu" aria-label="Vault">
+              <p className="vault-menu-head"><b>{vault.name}</b><code>{vault.path}</code></p>
+              <p className="vault-menu-stat">{vault.noteCount} encrypted {vault.noteCount === 1 ? "note" : "notes"} · unlocked on this device</p>
+              <button role="menuitem" onClick={() => { setVaultMenuOpen(false); void copyGuarded("Vault path", vault.path); }}>
+                <Copy size={14} />Copy vault path
+              </button>
+              <button role="menuitem" onClick={() => { setVaultMenuOpen(false); void lock(); }}>
+                <LockKeyhole size={14} />Lock and switch vault
+              </button>
+            </div>
+          </>}
+        </div>
         <div className="topbar-center"><ShieldCheck size={14} /><span>Unlocked locally</span><i /></div>
         <div className="top-actions">
           <button onClick={() => setQuickOpen(true)} title="Quick switcher (Ctrl+O)"><FileText size={17} /></button>
@@ -915,8 +996,16 @@ export function App() {
             </button>
             <button className="theme-open" onClick={() => setThemeOpen(true)} title="Customize theme"><Palette size={12} /></button>
           </div>
-          <div className="capacity"><span style={{ width: "18%" }} /></div>
-          <p><b>{notes.length}</b> encrypted notes <span>·</span> local</p>
+          <div className="vault-spread" role="img" aria-label={spread.length
+            ? `${notes.length} notes across ${spread.length} ${spread.length === 1 ? "folder" : "folders"}`
+            : "An empty vault"}>
+            {spread.map(([folder, count], index) => <span
+              key={folder}
+              style={{ flexGrow: count, opacity: 1 - Math.min(index, 5) * 0.13 }}
+              title={`${folder} · ${count} ${count === 1 ? "note" : "notes"}`}
+            />)}
+          </div>
+          <p><b>{notes.length}</b> encrypted {notes.length === 1 ? "note" : "notes"} <span>·</span> <b>{spread.length}</b> {spread.length === 1 ? "folder" : "folders"} <span>·</span> local</p>
         </div>
       </aside>
 
@@ -994,12 +1083,12 @@ export function App() {
         attachments={attachments}
         onRefresh={refreshAssets}
         onOpenNote={openFromKnowledge}
-        onNotice={setNotice}
+        onNotice={report}
       />
       : workspaceView === "files" ? <AttachmentLibrary
         attachments={attachments}
         onRefresh={refreshAssets}
-        onNotice={setNotice}
+        onNotice={report}
       />
       : workspaceView === "plugins" ? <PluginManager
         plugins={plugins}
@@ -1011,7 +1100,7 @@ export function App() {
         onRestricted={setRestrictedPlugins}
         onRevoke={revokePluginSigner}
         onRestore={restorePluginSigner}
-        onNotice={setNotice}
+        onNotice={report}
       />
       : <PropertyTable
         rows={propertyRows}
@@ -1044,7 +1133,9 @@ export function App() {
 
       {workspaceView === "notes" && !active && <div className="context-reserve" aria-hidden="true" />}
 
-      {notice && <div className="toast" role="status"><Check size={14} />{notice}</div>}
+      {notice && <div className={`toast ${notice.tone}`} role={notice.tone === "error" ? "alert" : "status"}>
+        {notice.tone === "error" ? <TriangleAlert size={14} /> : <Check size={14} />}{notice.text}
+      </div>}
 
       {quickOpen && <QuickSwitcher notes={notes} onClose={() => setQuickOpen(false)}
         onOpen={(id) => { setWorkspaceView("notes"); void openNote(id); }}
@@ -1058,38 +1149,7 @@ export function App() {
         </section>
       </div>}
 
-      {paletteOpen && <div className="overlay palette-overlay" onMouseDown={(event) => event.target === event.currentTarget && setPaletteOpen(false)}>
-        <section className="palette" role="dialog" aria-modal="true" aria-label="Command palette"><div><Command size={18} /><input autoFocus placeholder="Type a command…" /><kbd>ESC</kbd></div>
-          {[
-            { icon: FilePlus2, label: "Create new note", keys: "⌘ N", action: () => setNewOpen(true) },
-            { icon: FileText, label: "Quick switch to a note", keys: "⌘ O", action: () => setQuickOpen(true) },
-            { icon: Sun, label: "Open today's daily note", keys: "⌘ D", action: () => void openDaily() },
-            { icon: Sparkles, label: "New note from a template", keys: "", action: () => void showTemplates() },
-            { icon: PencilLine, label: "Rename or move this note", keys: "", action: () => { if (active) setRenameOpen(true); } },
-            { icon: History, label: "Browse this note's history", keys: "", action: () => { if (active) setHistoryOpen(true); } },
-            { icon: Trash2, label: "Restore a deleted note", keys: "", action: () => setTrashOpen(true) },
-            { icon: Puzzle, label: "Manage plugins", keys: "", action: () => void showWorkspace("plugins") },
-            ...pluginCommands.map((command) => ({
-              icon: Puzzle,
-              label: `${command.pluginName}: ${command.label}`,
-              keys: "",
-              action: () => host().invoke(command),
-            })),
-            { icon: Search, label: "Search encrypted vault", keys: "⇧⌘ F", action: () => setSearchOpen(true) },
-            { icon: Columns2, label: "Open current note in split pane", keys: "⌘ \\", action: () => { if (active) void openInSplit(active.id); } },
-            { icon: Network, label: "Open local graph", keys: "", action: () => void showWorkspace("graph") },
-            { icon: TableProperties, label: "Open property view", keys: "", action: () => void showWorkspace("properties") },
-            { icon: FolderKanban, label: "Open canvas workspace", keys: "", action: () => void showWorkspace("canvas") },
-            { icon: Paperclip, label: "Open attachment library", keys: "", action: () => void showWorkspace("files") },
-            { icon: BookOpen, label: mode === "write" ? "Switch to reading view" : "Switch to writing view", keys: "⌘ E", action: () => setMode(mode === "write" ? "read" : "write") },
-            { icon: rightOpen ? PanelRightClose : PanelRightOpen, label: rightOpen ? "Hide the context panel" : "Show the context panel", action: () => setRightOpen((value) => !value) },
-            { icon: LayoutGrid, label: "Workspaces and saved layouts", keys: "", action: () => setWorkspacesOpen(true) },
-            { icon: Palette, label: "Customize theme", keys: "", action: () => setThemeOpen(true) },
-            { icon: Clock, label: "Change auto-lock delay", keys: "", action: () => cycleIdleLock() },
-            { icon: LockKeyhole, label: "Lock workspace", keys: "⌘ L", action: () => void lock() },
-          ].map((item, index) => <button key={item.label} className={index === 0 ? "selected" : ""} onClick={() => { item.action(); setPaletteOpen(false); }}><item.icon size={16} /><span>{item.label}</span>{item.keys && <kbd>{item.keys}</kbd>}</button>)}
-        </section>
-      </div>}
+      {paletteOpen && <CommandPalette commands={commands} onClose={() => setPaletteOpen(false)} />}
 
       {themeOpen && <ThemeEditor settings={theme} onChange={setTheme} onClose={() => setThemeOpen(false)} />}
 
@@ -1098,6 +1158,8 @@ export function App() {
       {historyOpen && active && <HistoryDialog note={active} onClose={() => setHistoryOpen(false)} onRestore={restoreRevision} />}
       {trashOpen && <TrashDialog onClose={() => setTrashOpen(false)} onRestore={restoreDeleted} />}
       {templateOpen && <TemplateDialog templates={templates} onClose={() => setTemplateOpen(false)} onCreate={createFromTemplate} />}
+      {confirmDialog}
+
       {workspacesOpen && <WorkspacesDialog
         layouts={layouts}
         tabCount={openTabs.length}

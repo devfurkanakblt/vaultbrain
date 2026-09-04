@@ -37,13 +37,13 @@ const theme = EditorView.theme({
   ".cm-gutters": { background: "transparent", color: "var(--muted-2)", border: "0", paddingLeft: "10px" },
   ".cm-activeLineGutter": { background: "transparent", color: "var(--ink-soft)" },
   ".cm-activeLine": { background: "color-mix(in srgb, var(--acid) 6%, transparent)" },
-  ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": { background: "rgba(151, 181, 63, .22)" },
+  ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": { background: "color-mix(in oklab, var(--acid-deep) 24%, transparent)" },
   ".cm-cursor": { borderLeftColor: "var(--acid-deep)", borderLeftWidth: "2px" },
   ".ͼb": { color: "#8b3e2f" },
   ".ͼc": { color: "#46633d" },
   ".ͼd": { color: "#765d23" },
   ".ͼe": { color: "#315d69" },
-  ".ͼi": { color: "#707165", fontStyle: "italic" },
+  ".ͼi": { color: "var(--on-paper-4)", fontStyle: "italic" },
 });
 
 export function MarkdownEditor({ value, onChange, reveal }: EditorProps) {

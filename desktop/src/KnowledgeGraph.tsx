@@ -8,7 +8,12 @@ const MAX_DRAWN = 1200;
 const MAX_LABELS = 90;
 const MIN_SPAN = 220;
 const MAX_SPAN = 24_000;
-const CLUSTER_PALETTE = ["#c7ef55", "#88b8b0", "#d69a68", "#a795cc", "#e4d688", "#7fa9d8", "#d98fa8", "#9fd6a0"];
+/**
+ * Community colours. These identify groups rather than carry the theme, so they
+ * stay fixed and stay distinguishable from each other — but the first one is
+ * the one the eye reads as "primary", so it tracks the workspace accent.
+ */
+const CLUSTER_PALETTE = ["#c9794a", "#88b8b0", "#c9a227", "#a795cc", "#6f8f4f", "#7fa9d8", "#d98fa8", "#9fd6a0"];
 
 function colorFor(cluster: number) {
   return CLUSTER_PALETTE[cluster % CLUSTER_PALETTE.length];
