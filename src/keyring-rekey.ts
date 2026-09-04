@@ -22,7 +22,24 @@ import {
   type DocumentPayload,
 } from "./document-crypto.js";
 import { writeFileAtomic } from "./fs-safe.js";
-import { readKeyring, writeKeyring, type KeyringFile, type KeySet } from "./keyring.js";
+import {
+  DEFAULT_SCRYPT_N,
+  KEYRING_VERSION,
+  detectVaultFormat,
+  forgetVaultKeys,
+  openVaultKeys,
+  randomKeySet,
+  readKeyring,
+  unwrapSlot,
+  wrapKeySet,
+  writeKeyring,
+  zeroKeySet,
+  type KeyName,
+  type KeyringFile,
+  type KeyringSlot,
+  type KeySet,
+} from "./keyring.js";
+import { MIN_PASSPHRASE_LENGTH } from "./keyring-passphrase.js";
 import { resolveInside } from "./safety.js";
 import {
   APPLIED_AAD,
@@ -31,6 +48,7 @@ import {
   validateEncryptedSyncChange,
 } from "./sync/protocol.js";
 import { APPLY_RECEIPT_AAD, LOCAL_TRANSACTION_AAD } from "./sync/transaction.js";
+import { withVaultLock } from "./vault-lock.js";
 
 export const STAGING_DIRNAME = ".rekey";
 
@@ -462,4 +480,165 @@ export function recoverRekey(vaultDir: string): "none" | "rolled-back" | "finish
   installStaged(vaultDir, journal);
   fs.rmSync(stagingRoot(vaultDir), { recursive: true, force: true });
   return "finished";
+}
+
+/** The three keys that protect content, and therefore rotate. */
+export const ROTATED_KEYS: KeyName[] = ["documents", "kv", "syncEnvelope"];
+
+/**
+ * The three keys carried across unchanged, with the reason each one is not a
+ * rotation but a migration. `vbrain rekey` prints these, because a user whose
+ * passphrase leaked deserves to know exactly what a re-key did not do.
+ */
+export const PINNED_KEYS: { name: KeyName; reason: string }[] = [
+  {
+    name: "attachmentId",
+    reason: "attachment content addresses name directories, AADs, canvas nodes and sync objects",
+  },
+  { name: "syncChange", reason: "change IDs are referenced as parents by every descendant change" },
+  { name: "audit", reason: "the audit chain carries no key epoch, so rotating it invalidates it" },
+];
+
+export interface DroppedSlot {
+  id: string;
+  label: string;
+  createdAt: string;
+}
+
+export interface RekeyReport {
+  rotated: KeyName[];
+  pinned: { name: KeyName; reason: string }[];
+  reencrypted: { documents: number; kv: number; syncChanges: number; total: number };
+  droppedSlots: DroppedSlot[];
+  passphraseChanged: boolean;
+  resumed: boolean;
+}
+
+function emptyReport(overrides: Partial<RekeyReport>): RekeyReport {
+  return {
+    rotated: [...ROTATED_KEYS],
+    pinned: PINNED_KEYS.map((entry) => ({ ...entry })),
+    reencrypted: { documents: 0, kv: 0, syncChanges: 0, total: 0 },
+    droppedSlots: [],
+    passphraseChanged: false,
+    resumed: false,
+    ...overrides,
+  };
+}
+
+/**
+ * A new keyset and every object re-encrypted under it. Unlike
+ * `changeVaultPassphrase`, which re-wraps the same keyset and touches no
+ * content, this is the answer to a leaked passphrase: afterwards no byte on
+ * disk opens under the old passphrase or the old keys.
+ *
+ * `attachmentId`, `syncChange` and `audit` are pinned. They derive identities
+ * and signatures rather than protecting content, and rotating any of them is
+ * an identity migration that cascades into canvas objects, index references,
+ * the causal DAG and every peer device.
+ */
+export function rekeyVault(
+  vaultDir: string,
+  currentPassphrase: string,
+  newPassphrase: string,
+  options: { keepPassphrase?: boolean } = {},
+): RekeyReport {
+  if (!currentPassphrase) throw new Error("A non-empty vault passphrase is required.");
+  const keepPassphrase = Boolean(options.keepPassphrase);
+  if (!keepPassphrase && newPassphrase.length < MIN_PASSPHRASE_LENGTH) {
+    throw new Error(`The new passphrase must be at least ${MIN_PASSPHRASE_LENGTH} characters.`);
+  }
+  const wrapPassphrase = keepPassphrase ? currentPassphrase : newPassphrase;
+
+  return withVaultLock(vaultDir, () => {
+    // An interrupted earlier run is finished or discarded before anything
+    // else looks at the vault, so the rest of this function only ever sees a
+    // consistent one.
+    if (recoverRekey(vaultDir) === "finished") {
+      return emptyReport({ resumed: true, passphraseChanged: false });
+    }
+
+    if (detectVaultFormat(vaultDir) !== "keyring") {
+      throw new Error("This vault is not in the keyring format yet. Run 'vbrain migrate' first.");
+    }
+    const file = readKeyring(vaultDir);
+    if (!file) throw new Error("This vault has no keyring to re-key.");
+
+    let oldKeys: KeySet | undefined;
+    let newKeys: KeySet | undefined;
+    const droppedSlots: DroppedSlot[] = [];
+
+    try {
+      for (const slot of file.slots) {
+        let opened: KeySet;
+        try {
+          opened = unwrapSlot(slot, currentPassphrase);
+        } catch {
+          // Wrapped around the keyset this run supersedes, so it is dropped
+          // rather than preserved — the deliberate opposite of a passphrase
+          // change, which keeps a recovery slot alive.
+          droppedSlots.push({ id: slot.id, label: slot.label, createdAt: slot.createdAt });
+          continue;
+        }
+        if (oldKeys) zeroKeySet(opened);
+        else oldKeys = opened;
+      }
+      if (!oldKeys) {
+        throw new Error("Unable to unlock this vault: wrong passphrase, or the keyring is damaged.");
+      }
+
+      newKeys = randomKeySet();
+      for (const { name } of PINNED_KEYS) {
+        newKeys[name].fill(0);
+        newKeys[name] = Buffer.from(oldKeys[name]);
+      }
+
+      const items = planRekey(vaultDir);
+      stageRekey(vaultDir, oldKeys, newKeys, items);
+
+      const slot: KeyringSlot = wrapKeySet(newKeys, wrapPassphrase, DEFAULT_SCRYPT_N);
+      commitRekey(
+        vaultDir,
+        { version: 1, slotId: slot.id, files: items.map((item) => item.path) },
+        { version: KEYRING_VERSION, slots: [slot] },
+      );
+      forgetVaultKeys(vaultDir);
+
+      // Prove the vault on disk opens under the passphrase the user was just
+      // given before reporting success.
+      const written = openVaultKeys(vaultDir, wrapPassphrase);
+      if (!written) throw new Error("The re-keyed vault could not be reopened.");
+      zeroKeySet(written);
+
+      return {
+        rotated: [...ROTATED_KEYS],
+        pinned: PINNED_KEYS.map((entry) => ({ ...entry })),
+        reencrypted: {
+          documents: items.filter((item) => item.kind === "document").length,
+          kv: items.filter((item) => item.kind === "kv").length,
+          syncChanges: items.filter((item) => item.kind === "sync-change").length,
+          total: items.length,
+        },
+        droppedSlots,
+        passphraseChanged: !keepPassphrase,
+        resumed: false,
+      };
+    } catch (error) {
+      // Fail closed, but only on this side of the commit point. A journal
+      // under the staging root means `commitRekey` already replaced
+      // `keyring.json`, and the staged remainder beside it is the only copy
+      // of files the vault now depends on: clearing it here would destroy
+      // exactly what `recoverRekey` needs to finish the job, and would defeat
+      // the refusal `stageRekey` raises for that same reason. Before the
+      // commit point there is no journal, nothing live has been touched, and
+      // the half-built shadow tree goes.
+      if (!fs.existsSync(journalPath(vaultDir))) {
+        fs.rmSync(stagingRoot(vaultDir), { recursive: true, force: true });
+      }
+      throw error;
+    } finally {
+      if (oldKeys) zeroKeySet(oldKeys);
+      if (newKeys) zeroKeySet(newKeys);
+    }
+  });
 }

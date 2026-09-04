@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { appendAudit } from "../dist/audit.js";
+import { appendAudit, verifyAudit } from "../dist/audit.js";
 import { DocumentVault } from "../dist/documents.js";
 import {
   commitRekey,
@@ -15,12 +15,14 @@ import {
   journalPath,
   planRekey,
   recoverRekey,
+  rekeyVault,
   STAGING_DIRNAME,
   stageRekey,
   stagedTree,
   stagingRoot,
 } from "../dist/keyring-rekey.js";
 import {
+  DEFAULT_SCRYPT_N,
   KEYRING_VERSION,
   forgetVaultKeys,
   openVaultKeys,
@@ -29,7 +31,7 @@ import {
   wrapKeySet,
   writeKeyring,
 } from "../dist/keyring.js";
-import { upsertEntry } from "../dist/store.js";
+import { loadVaultFile, upsertEntry } from "../dist/store.js";
 import { saveGrants, emptyGrantFile } from "../dist/grants.js";
 import { SyncChangeLog } from "../dist/sync.js";
 
@@ -1006,6 +1008,257 @@ test("a truncated journal refuses recovery with the same message a malformed one
 
   assert.equal(fs.existsSync(stagedTree(dir)), true, "a refused recovery must not destroy the staged tree");
   assert.deepEqual(liveHashes(dir), before, "a refused recovery must not touch a single live file");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// --- Task 5: the orchestration ------------------------------------------
+
+test("a re-key rewrites every ciphertext and keeps every plaintext", () => {
+  const { dir, noteId, attachmentId } = seedVault();
+  const before = hashVault(dir);
+
+  const report = rekeyVault(dir, PASSPHRASE, NEW_PASSPHRASE);
+
+  assert.deepEqual(report.rotated, ["documents", "kv", "syncEnvelope"]);
+  assert.deepEqual(
+    report.pinned.map((entry) => entry.name),
+    ["attachmentId", "syncChange", "audit"],
+  );
+  assert.equal(report.passphraseChanged, true);
+  assert.equal(report.resumed, false);
+
+  const after = hashVault(dir);
+  for (const item of planRekey(dir)) {
+    assert.notEqual(after[item.path], before[item.path], `${item.path} must have been re-encrypted`);
+  }
+  // Nothing moved: the same set of paths, before and after.
+  assert.deepEqual(Object.keys(after).sort(), Object.keys(before).sort());
+
+  forgetVaultKeys();
+  const vault = new DocumentVault(dir, NEW_PASSPHRASE);
+  assert.match(vault.get(noteId).body, /second revision/u);
+  assert.equal(vault.getAttachment(attachmentId).data.toString("utf8"), "phase 7.4 attachment");
+  vault.lock();
+
+  assert.equal(loadVaultFile(dir, "health", NEW_PASSPHRASE)[0].value, "0 Rh+");
+  assert.equal(verifyAudit(dir, NEW_PASSPHRASE).valid, true);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("the old passphrase no longer opens a re-keyed vault", () => {
+  const { dir } = seedVault();
+  rekeyVault(dir, PASSPHRASE, NEW_PASSPHRASE);
+
+  forgetVaultKeys();
+  assert.ok(openVaultKeys(dir, NEW_PASSPHRASE));
+  assert.throws(() => openVaultKeys(dir, PASSPHRASE), /wrong passphrase/iu);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("attachment identities, sync change IDs and the audit chain survive a re-key", () => {
+  const { dir, attachmentId } = seedVault();
+  const changesDir = path.join(dir, "documents", "sync", "changes");
+  const changesBefore = fs.existsSync(changesDir) ? fs.readdirSync(changesDir).sort() : [];
+
+  rekeyVault(dir, PASSPHRASE, NEW_PASSPHRASE);
+
+  forgetVaultKeys();
+  const vault = new DocumentVault(dir, NEW_PASSPHRASE);
+  // getAttachment recomputes the content address; an unchanged ID proves the
+  // attachmentId key was pinned.
+  assert.equal(vault.getAttachment(attachmentId).info.id, attachmentId);
+  vault.lock();
+
+  const changesAfter = fs.existsSync(changesDir) ? fs.readdirSync(changesDir).sort() : [];
+  assert.deepEqual(changesAfter, changesBefore);
+  assert.equal(verifyAudit(dir, NEW_PASSPHRASE).valid, true);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a re-key writes one fresh slot at the current cost and drops slots it cannot open", () => {
+  const { dir } = seedVault();
+  const stranger = wrapKeySet(randomKeySet(), "an-unrelated-recovery-passphrase");
+  const existing = readKeyring(dir);
+  writeKeyring(dir, { version: KEYRING_VERSION, slots: [...existing.slots, stranger] });
+  forgetVaultKeys();
+
+  const report = rekeyVault(dir, PASSPHRASE, NEW_PASSPHRASE);
+
+  assert.deepEqual(
+    report.droppedSlots.map((slot) => slot.id),
+    [stranger.id],
+  );
+  const slots = readKeyring(dir).slots;
+  assert.equal(slots.length, 1);
+  assert.equal(slots[0].kdf.N, DEFAULT_SCRYPT_N);
+  assert.equal(slots[0].label, "primary");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("--keep-passphrase rotates the keyset under the same passphrase", () => {
+  const { dir } = seedVault();
+  const before = hashVault(dir);
+
+  const report = rekeyVault(dir, PASSPHRASE, "", { keepPassphrase: true });
+
+  assert.equal(report.passphraseChanged, false);
+  forgetVaultKeys();
+  assert.ok(openVaultKeys(dir, PASSPHRASE));
+  for (const item of planRekey(dir)) {
+    assert.notEqual(hashVault(dir)[item.path], before[item.path]);
+  }
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("every refusal leaves the vault byte-identical and no staging behind", () => {
+  const { dir } = seedVault();
+  const before = hashVault(dir);
+
+  assert.throws(() => rekeyVault(dir, "the-wrong-passphrase", NEW_PASSPHRASE), /wrong passphrase|damaged/iu);
+  assert.throws(() => rekeyVault(dir, PASSPHRASE, "short"), /at least 12 characters/u);
+
+  assert.equal(fs.existsSync(stagingRoot(dir)), false);
+  assert.deepEqual(hashVault(dir), before);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a legacy vault is refused and told to migrate", () => {
+  const dir = tempDir("legacy");
+  fs.writeFileSync(path.join(dir, "schema.json"), '{"version":1,"files":{}}\n');
+
+  assert.throws(() => rekeyVault(dir, PASSPHRASE, NEW_PASSPHRASE), /vbrain migrate/u);
+  assert.equal(fs.existsSync(path.join(dir, "keyring.json")), false);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// The report names the split, but only the bytes on disk prove it. Reading
+// both keysets and comparing them key by key is what goes red if the pinning
+// loop is deleted (the three identity keys would rotate) or if it is widened
+// to every key (the three content keys would not). Neither mutation is
+// visible to a ciphertext-changed assertion, because a fresh IV changes every
+// ciphertext even when the key behind it does not change at all.
+test("a re-key rotates exactly the three content keys and pins exactly the three identity keys", () => {
+  const { dir } = seedVault();
+  const oldKeys = openVaultKeys(dir, PASSPHRASE);
+
+  rekeyVault(dir, PASSPHRASE, NEW_PASSPHRASE);
+
+  forgetVaultKeys();
+  const newKeys = openVaultKeys(dir, NEW_PASSPHRASE);
+  for (const name of ["documents", "kv", "syncEnvelope"]) {
+    assert.equal(newKeys[name].equals(oldKeys[name]), false, `${name} must have been rotated`);
+  }
+  for (const name of ["attachmentId", "syncChange", "audit"]) {
+    assert.equal(newKeys[name].equals(oldKeys[name]), true, `${name} must have been pinned`);
+  }
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// seedVault() produces no sync change, so the orchestration's sync-change
+// branch — and the syncEnvelope rotation that only shows up there — is
+// otherwise never driven end to end.
+test("a re-key re-seals a sync change under the new envelope key without moving it", () => {
+  const dir = tempDir();
+  const log = new SyncChangeLog(dir, PASSPHRASE);
+  const change = log.append("33333333-3333-4333-8333-333333333333", {
+    objectType: "note",
+    objectId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+    operation: "put",
+    baseRevision: null,
+    revision: 1,
+    value: { title: "Plan", body: "private body" },
+  });
+  log.close();
+  const before = hashVault(dir);
+  const changeFile = `documents/sync/changes/${change.id}.change.enc`;
+
+  const report = rekeyVault(dir, PASSPHRASE, NEW_PASSPHRASE);
+
+  assert.equal(report.reencrypted.syncChanges, 1);
+  assert.notEqual(hashVault(dir)[changeFile], before[changeFile]);
+
+  forgetVaultKeys();
+  const reopened = new SyncChangeLog(dir, NEW_PASSPHRASE);
+  assert.equal(reopened.change(change.id).mutation.value.body, "private body");
+  assert.deepEqual(reopened.verify().heads, [change.id]);
+  reopened.close();
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// Kills the mutation "skip recovery and go straight to staging": an
+// interrupted re-key whose keyring was already replaced must be finished, not
+// restaged, and the run that finishes it must say so rather than claim a
+// fresh rotation it did not perform.
+test("a re-key finishes an interrupted one instead of starting over", () => {
+  const { dir } = seedVault();
+  const { journal, keyring } = preparedRekey(dir);
+  // Simulate a crash after the commit point: the journal and the new keyring
+  // are both on disk, but nothing has been installed yet.
+  fs.writeFileSync(journalPath(dir), `${JSON.stringify(journal)}\n`);
+  writeKeyring(dir, keyring);
+  const staged = journal.files.map((relative) => path.join(stagedTree(dir), ...relative.split("/")));
+  assert.ok(staged.every((file) => fs.existsSync(file)));
+
+  const report = rekeyVault(dir, NEW_PASSPHRASE, "another-replacement-passphrase");
+
+  assert.equal(report.resumed, true);
+  assert.equal(report.passphraseChanged, false);
+  assert.equal(fs.existsSync(stagingRoot(dir)), false);
+  forgetVaultKeys();
+  assert.ok(openVaultKeys(dir, NEW_PASSPHRASE), "the interrupted re-key's passphrase must open the vault");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// A failure past the commit point is the one case where the fail-closed
+// cleanup must not run: `keyring.json` already names the new keyset, so the
+// staged remainder is the only copy of the files the vault now depends on.
+// Kills the mutation "clear the staging tree on any error": with the journal
+// check removed, this run leaves a vault whose keyring and whose objects
+// disagree, with nothing left on disk to reconcile them.
+test("a failure partway through the installs leaves the journal for recovery", () => {
+  const { dir, noteId } = seedVault();
+  const tree = stagedTree(dir);
+  const realRenameSync = fs.renameSync;
+  let installs = 0;
+  try {
+    // An install is the only rename that moves a file out of the staged tree;
+    // staging's own atomic writes rename within it, and the keyring's rename
+    // does not start there at all.
+    fs.renameSync = (from, to, ...rest) => {
+      if (String(from).startsWith(tree) && !String(to).startsWith(tree)) {
+        installs += 1;
+        if (installs > 2) {
+          const failure = new Error("EIO: simulated crash during the installs");
+          failure.code = "EIO";
+          throw failure;
+        }
+      }
+      return realRenameSync(from, to, ...rest);
+    };
+
+    assert.throws(() => rekeyVault(dir, PASSPHRASE, NEW_PASSPHRASE), /simulated crash/u);
+  } finally {
+    fs.renameSync = realRenameSync;
+  }
+
+  assert.equal(fs.existsSync(journalPath(dir)), true, "the journal must survive a failure past the commit point");
+  assert.equal(recoverRekey(dir), "finished");
+
+  forgetVaultKeys();
+  const vault = new DocumentVault(dir, NEW_PASSPHRASE);
+  assert.match(vault.get(noteId).body, /second revision/u);
+  vault.lock();
 
   fs.rmSync(dir, { recursive: true, force: true });
 });
