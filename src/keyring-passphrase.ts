@@ -78,49 +78,74 @@ export function changeVaultPassphrase(
     let previousN = 0;
     let slotsPreserved = 0;
     const slots: KeyringSlot[] = [];
+    const newlyWrapped: KeyringSlot[] = [];
 
-    for (const slot of file.slots) {
-      let keys: KeySet;
-      try {
-        keys = unwrapSlot(slot, currentPassphrase);
-      } catch {
-        // Not this passphrase's slot. Preserving it is what keeps a recovery
-        // slot alive across a passphrase change.
-        slots.push(slot);
-        slotsPreserved += 1;
-        continue;
-      }
-      if (opened) zeroKeySet(keys);
-      else {
-        opened = keys;
-        previousN = slot.kdf.N;
-      }
-      slots.push(wrapKeySet(opened, newPassphrase));
-    }
-
-    if (!opened) {
-      throw new Error("Unable to unlock this vault: wrong passphrase, or the keyring is damaged.");
-    }
-
-    writeKeyring(vaultDir, { version: KEYRING_VERSION, slots });
-    forgetVaultKeys(vaultDir);
-
-    // Prove the file on disk opens under the passphrase the user was just
-    // given, and carries the same keyset, before reporting success. A keyring
-    // that does not open is an unrecoverable vault.
-    const written = readKeyring(vaultDir);
-    if (!written) throw new Error("The new keyring could not be read back.");
-    const verified = unwrapKeyring(written, newPassphrase);
     try {
-      if (!sameKeySet(verified, opened)) {
-        throw new Error("The new keyring does not carry the vault's keyset; the vault was not changed correctly.");
+      for (const slot of file.slots) {
+        let keys: KeySet;
+        try {
+          keys = unwrapSlot(slot, currentPassphrase);
+        } catch {
+          // Not this passphrase's slot. Preserving it is what keeps a recovery
+          // slot alive across a passphrase change.
+          slots.push(slot);
+          slotsPreserved += 1;
+          continue;
+        }
+        if (opened) zeroKeySet(keys);
+        else {
+          opened = keys;
+          previousN = slot.kdf.N;
+        }
+        const wrapped = wrapKeySet(opened, newPassphrase);
+        slots.push(wrapped);
+        newlyWrapped.push(wrapped);
       }
-    } finally {
-      zeroKeySet(verified);
-    }
 
-    const rewritten = slots.length - slotsPreserved;
-    zeroKeySet(opened);
-    return { slotsRewritten: rewritten, slotsPreserved, previousN, newN: DEFAULT_SCRYPT_N };
+      if (!opened) {
+        throw new Error("Unable to unlock this vault: wrong passphrase, or the keyring is damaged.");
+      }
+
+      // Prove every freshly wrapped slot unwraps back to the same keyset
+      // under the new passphrase before anything touches disk. A refusal
+      // here must leave keyring.json byte-identical to before the call.
+      for (const wrapped of newlyWrapped) {
+        const check = unwrapSlot(wrapped, newPassphrase);
+        try {
+          if (!sameKeySet(check, opened)) {
+            throw new Error(
+              "The re-wrapped slot does not carry the vault's keyset; refusing to write the keyring.",
+            );
+          }
+        } finally {
+          zeroKeySet(check);
+        }
+      }
+
+      writeKeyring(vaultDir, { version: KEYRING_VERSION, slots });
+      forgetVaultKeys(vaultDir);
+
+      // Prove the file actually on disk opens under the passphrase the user
+      // was just given, and carries the same keyset, before reporting
+      // success. This catches a bad write (truncation, corruption) that the
+      // pre-write check above cannot, since that check never touches disk.
+      const written = readKeyring(vaultDir);
+      if (!written) throw new Error("The new keyring could not be read back.");
+      const verified = unwrapKeyring(written, newPassphrase);
+      try {
+        if (!sameKeySet(verified, opened)) {
+          throw new Error(
+            "The keyring written to disk does not carry the vault's keyset; the vault may be corrupted.",
+          );
+        }
+      } finally {
+        zeroKeySet(verified);
+      }
+
+      const rewritten = slots.length - slotsPreserved;
+      return { slotsRewritten: rewritten, slotsPreserved, previousN, newN: DEFAULT_SCRYPT_N };
+    } finally {
+      if (opened) zeroKeySet(opened);
+    }
   });
 }

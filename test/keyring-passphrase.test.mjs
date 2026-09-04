@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -40,6 +41,31 @@ function readSlots(dir) {
   return JSON.parse(fs.readFileSync(path.join(dir, "keyring.json"), "utf8")).slots;
 }
 
+/**
+ * SHA-256 of every file under `<dir>/documents/`, keyed by its path relative
+ * to that directory (POSIX-style separators, so the map compares equal
+ * regardless of platform). Used to prove no object's ciphertext moved.
+ */
+function hashDocuments(dir) {
+  const root = path.join(dir, "documents");
+  const hashes = {};
+  if (!fs.existsSync(root)) return hashes;
+
+  const walk = (current) => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+      } else if (entry.isFile()) {
+        const relative = path.relative(root, full).split(path.sep).join("/");
+        hashes[relative] = crypto.createHash("sha256").update(fs.readFileSync(full)).digest("hex");
+      }
+    }
+  };
+  walk(root);
+  return hashes;
+}
+
 test("the new passphrase opens the vault and the old one no longer does", () => {
   const { dir } = seedVault();
 
@@ -64,9 +90,17 @@ test("the new passphrase opens the vault and the old one no longer does", () => 
 
 test("no object is re-encrypted: notes, attachments and key-value entries survive unchanged", () => {
   const { dir, attachmentId } = seedVault();
+  const before = hashDocuments(dir);
+  assert.notEqual(Object.keys(before).length, 0, "the seeded vault must have documents to compare");
 
   changeVaultPassphrase(dir, PASSPHRASE, NEW_PASSPHRASE);
   forgetVaultKeys();
+
+  assert.deepEqual(
+    hashDocuments(dir),
+    before,
+    "every object under documents/ must be byte-identical: nothing was re-encrypted",
+  );
 
   const vault = new DocumentVault(dir, NEW_PASSPHRASE);
   assert.deepEqual(
