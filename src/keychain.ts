@@ -40,12 +40,26 @@ export function run(command: string, args: string[], input?: string): string {
       timeout: 20_000,
     });
   } catch (error) {
-    const status =
-      error && typeof error === "object" && "status" in error
-        ? (error as { status?: number | null }).status
-        : undefined;
+    const record = error && typeof error === "object" ? (error as Record<string, unknown>) : undefined;
+    const status = record && "status" in record ? (record.status as number | null | undefined) : undefined;
+    const code = record && "code" in record ? (record.code as string | number | null | undefined) : undefined;
+    const signal = record && "signal" in record ? (record.signal as string | null | undefined) : undefined;
     const statusText = status === undefined || status === null ? "unknown" : String(status);
-    throw new Error(`Command failed: ${command} (exit status ${statusText})`, { cause: error });
+    const codeText = code === undefined || code === null ? "" : ` [${code}]`;
+    // `execFileSync`'s own error carries `spawnargs`, which on some backends
+    // (macOS' `security -w <secret>`) is the secret itself. Node's default
+    // inspection of a thrown error prints `.cause` too, so attaching the raw
+    // error as `cause` would leak the secret the moment anyone lets this
+    // propagate to a default handler or logs `util.inspect(error)` — the
+    // sanitised `.message` alone is not enough of a guarantee. Attach only a
+    // scrubbed cause carrying the diagnostic fields that cannot themselves
+    // contain arguments, so `preserve-caught-error` stays satisfied without
+    // re-attaching argv.
+    const scrubbedCause = { code, status, signal };
+    const symptom = new Error(`Command failed: ${command}${codeText} (exit status ${statusText})`, {
+      cause: scrubbedCause,
+    });
+    throw symptom;
   }
 }
 

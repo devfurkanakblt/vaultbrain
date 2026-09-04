@@ -169,18 +169,23 @@ Refusals that happen before step 7 leave `keyring.json` untouched: a legacy
 vault, a wrong current passphrase, a mismatched confirmation, a short new
 passphrase, an unchanged passphrase without the flag.
 
-If step 10 fails — no credential store, or a store that rejects the write — the
-command still succeeds, because the vault genuinely did change, and says so in
-plain terms. It does not leave the stale credential in place: a credential
-that still verifies under the *old* passphrase would make every later command
-that consults it fail against a passphrase that is no longer current, with no
+If step 10 fails — a store that rejects the write — the command still
+succeeds, because the vault genuinely did change, and says so in plain terms.
+It does not leave the stale credential in place: a credential that still
+verifies under the *old* passphrase would make every later command that
+consults it fail against a passphrase that is no longer current, with no
 indication why. Instead it attempts to remove the stale credential and reports
 which of the two outcomes happened — if the removal succeeds, it tells the
 user to run `vbrain unlock --remember` to store the new passphrase; if the
 removal also fails, nothing is left that can be trusted, and it tells the user
-to run `vbrain lock` to clear it. Failing the command itself here would be
-worse than either outcome, because it would report failure for an operation
-that completed.
+to run `vbrain lock` to clear it, because that failure is usually a transient
+store lock and is worth retrying even though it calls the same `forget` that
+just failed. Failing the command itself here would be worse than either
+outcome, because it would report failure for an operation that completed.
+(No credential store at all is not one of these cases: with no backend
+available, `lookup` returns undefined, step 10 sees nothing remembered for
+this vault, and the command prints nothing about the credential store at
+all.)
 
 The closing output of the command states that changing the passphrase does not
 re-encrypt anything, and that a leaked passphrase needs `vbrain rekey`.
@@ -234,6 +239,14 @@ script:
 - With stdin closed and no `VBRAIN_PASSPHRASE` set, the command fails loudly
   — a non-zero exit and an error naming `VBRAIN_PASSPHRASE` on stderr —
   instead of exiting 0 having read nothing and changed nothing.
+- A failed credential update forgets the stale credential instead of leaving
+  it behind, rather than merely reporting the failure.
+- `run()` never reproduces its arguments anywhere in the thrown error, even a
+  secret-looking one — checked against the fully inspected object, not just
+  `.message`.
+- A second sequential `readSecret` call, separated from the first by an
+  `await` on a timer over a single-line piped stdin, rejects rather than
+  leaving the process to exit 0 having read nothing for the second prompt.
 
 No fixture is added or regenerated: this phase changes no on-disk format.
 

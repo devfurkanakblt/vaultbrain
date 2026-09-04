@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { inspect } from "node:util";
 
 import { appendAudit, verifyAudit } from "../dist/audit.js";
 import { DocumentVault } from "../dist/documents.js";
@@ -340,14 +341,20 @@ test("a store that refuses the write is reported rather than thrown, and never l
   }
 });
 
-test("run() never reproduces its arguments in the thrown error, even a secret-looking one", () => {
+test("run() never reproduces its arguments anywhere in the thrown error, even a secret-looking one", () => {
   const secretLikeArgument = "super-secret-passphrase-should-not-leak";
 
   assert.throws(
     () => run("vault-brain-nonexistent-command-xyz", ["-w", secretLikeArgument]),
     (error) => {
       assert.ok(error instanceof Error);
-      assert.ok(!error.message.includes(secretLikeArgument), `error must not contain the secret: ${error.message}`);
+      // Assert against the full inspected object, not just `.message`: a
+      // sanitiser that only cleans `.message` still leaks through `.cause`
+      // (Node's default error inspection prints `[cause]`), so this is the
+      // check that actually pins "nothing on the object carries the secret,"
+      // not merely "the message doesn't."
+      const dump = inspect(error, { depth: null });
+      assert.ok(!dump.includes(secretLikeArgument), `error must not contain the secret anywhere: ${dump}`);
       return true;
     },
   );
@@ -368,6 +375,52 @@ test("a failed credential update forgets the stale credential instead of leaving
   } finally {
     setKeychainBackend(undefined);
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a second sequential readSecret rejects rather than exiting 0 when stdin ended before it was constructed", () => {
+  const passphraseUrl = new URL("../dist/passphrase.js", import.meta.url);
+  const probeDir = tempDir("readsecret-probe");
+  const probePath = path.join(probeDir, "probe.mjs");
+  // Two prompts with an `await` between them, over a *single-line* piped
+  // stdin: the second `readSecret` builds a fresh `readline.Interface` after
+  // stdin has already ended, so before the fix it would neither resolve nor
+  // reject and the process would exit 0 having read nothing for the second
+  // prompt.
+  fs.writeFileSync(
+    probePath,
+    [
+      `import { readSecret } from ${JSON.stringify(passphraseUrl.href)};`,
+      "",
+      'const one = await readSecret("one: ");',
+      'console.log("one:", JSON.stringify(one));',
+      "",
+      "await new Promise((resolve) => setTimeout(resolve, 300));",
+      "",
+      "try {",
+      '  const two = await readSecret("two: ");',
+      '  console.log("two:", JSON.stringify(two));',
+      "} catch (error) {",
+      '  console.error("two-rejected:", error.message);',
+      "  process.exit(3);",
+      "}",
+      "",
+    ].join("\n"),
+  );
+
+  try {
+    const result = spawnSync(process.execPath, [probePath], {
+      encoding: "utf8",
+      timeout: 10_000,
+      input: "aaa\n",
+    });
+
+    assert.equal(result.status, 3, `expected the second prompt to reject; got: ${JSON.stringify(result)}`);
+    assert.match(result.stdout, /one: "aaa"/u);
+    assert.match(result.stderr, /two-rejected:/u);
+    assert.match(result.stderr, /end of file/iu);
+  } finally {
+    fs.rmSync(probeDir, { recursive: true, force: true });
   }
 });
 
