@@ -940,3 +940,72 @@ test("a malformed journal refuses recovery instead of touching the vault", () =>
 
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+// Kills the mutation "delete the staged-completeness loop from commitRekey":
+// `installStaged` skips a staged file it cannot find, so without the loop a
+// short staged tree commits in total silence — the new keyring lands, the
+// un-staged object stays sealed under the old keyset, the staging tree is
+// swept, and `recoverRekey` afterwards reports "none". The vault ends readable
+// by neither keyset with no signal at all. The guard turns that into a refusal
+// taken BEFORE the keyring write, which is the only point at which the vault
+// is still recoverable.
+test("a staged tree missing a file refuses to commit instead of crossing the commit point", () => {
+  const { dir } = seedVault();
+  const { journal, keyring } = preparedRekey(dir);
+  const keyringBefore = readKeyring(dir);
+  const missing = journal.files[journal.files.length - 1];
+  fs.rmSync(path.join(stagedTree(dir), ...missing.split("/")));
+  const before = liveHashes(dir);
+
+  assert.throws(() => commitRekey(dir, journal, keyring), /missing from the staged tree/u);
+
+  assert.deepEqual(readKeyring(dir), keyringBefore, "the old keyring must still be the one on disk");
+  assert.deepEqual(liveHashes(dir), before, "a refused commit must not touch a single live file");
+
+  forgetVaultKeys();
+  assert.ok(openVaultKeys(dir, PASSPHRASE), "the old passphrase must still open the vault");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// Kills the mutation "delete the journal check from stageRekey": the opening
+// rmSync clears the whole staging root, journal included. An operator who
+// retries the re-key after a crash mid-install instead of recovering would
+// take the journal and the un-installed remainder with it, and the
+// half-committed vault becomes unrecoverable — `recoverRekey` would find no
+// journal and report "none" over files that never got installed.
+test("staging refuses while an interrupted re-key is still journaled", () => {
+  const { dir } = seedVault();
+  const oldKeys = openVaultKeys(dir, PASSPHRASE);
+  const newKeys = pinnedKeySet(oldKeys);
+  const items = planRekey(dir);
+  const journal = { version: 1, slotId: crypto.randomUUID(), files: items.map((item) => item.path) };
+  fs.mkdirSync(stagingRoot(dir), { recursive: true });
+  fs.writeFileSync(journalPath(dir), `${JSON.stringify(journal)}\n`);
+  const journalBefore = fs.readFileSync(journalPath(dir));
+
+  assert.throws(() => stageRekey(dir, oldKeys, newKeys, items), /run recovery/u);
+
+  assert.ok(fs.existsSync(journalPath(dir)), "the journal must survive a refused stage");
+  assert.deepEqual(fs.readFileSync(journalPath(dir)), journalBefore, "the journal must be byte-identical");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// Kills the mutation "unwrap the JSON.parse guard in readJournal": a truncated
+// journal is an ordinary crash artifact, and the operator must see the same
+// "refusing to touch the vault" refusal a structurally invalid journal
+// produces, not a raw SyntaxError from the parser.
+test("a truncated journal refuses recovery with the same message a malformed one gives", () => {
+  const { dir } = seedVault();
+  const { journal } = preparedRekey(dir);
+  fs.writeFileSync(journalPath(dir), `${JSON.stringify(journal)}\n`.slice(0, 40));
+  const before = liveHashes(dir);
+
+  assert.throws(() => recoverRekey(dir), /malformed; refusing to touch the vault/u);
+
+  assert.equal(fs.existsSync(stagedTree(dir)), true, "a refused recovery must not destroy the staged tree");
+  assert.deepEqual(liveHashes(dir), before, "a refused recovery must not touch a single live file");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});

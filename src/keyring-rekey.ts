@@ -295,15 +295,25 @@ export function stagedTree(vaultDir: string): string {
  * passphrase, a damaged object, a full disk — leaves the vault byte-identical.
  *
  * Any prior staging attempt is discarded before this one starts, and that
- * unconditional removal is the entire basis for the anti-resume property:
- * nothing on disk distinguishes a complete, verified `.rekey/new` from one a
- * process left behind when it was killed mid-loop, so a leftover tree is
- * never resumed or trusted — it is destroyed and rebuilt from scratch. (Task
- * 4's journal is where a completeness marker lands; until then, do not add a
- * code path that reuses an existing staging tree.)
+ * removal is the entire basis for the anti-resume property: nothing on disk
+ * distinguishes a complete, verified `.rekey/new` from one a process left
+ * behind when it was killed mid-loop, so a leftover tree is never resumed or
+ * trusted — it is destroyed and rebuilt from scratch. Do not add a code path
+ * that reuses an existing staging tree.
+ *
+ * The one thing that removal must not destroy is a live journal. A journal
+ * under the staging root means a commit passed — or is passing — the point of
+ * no return, and the staged remainder beside it is the only copy of files the
+ * vault now depends on. Staging refuses outright in that case: recovery runs
+ * first, and only once it has cleared the journal can a fresh re-key start.
  */
 export function stageRekey(vaultDir: string, oldKeys: KeySet, newKeys: KeySet, items: RekeyItem[]): void {
   const tree = stagedTree(vaultDir);
+  if (fs.existsSync(journalPath(vaultDir))) {
+    throw new Error(
+      "An interrupted re-key is still journaled; run recovery before staging a new one.",
+    );
+  }
   fs.rmSync(stagingRoot(vaultDir), { recursive: true, force: true });
   fs.mkdirSync(tree, { recursive: true, mode: 0o700 });
 
@@ -362,7 +372,15 @@ export function journalPath(vaultDir: string): string {
 function readJournal(vaultDir: string): RekeyJournal | null {
   const filePath = journalPath(vaultDir);
   if (!fs.existsSync(filePath)) return null;
-  const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as RekeyJournal;
+  let parsed: RekeyJournal;
+  try {
+    parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as RekeyJournal;
+  } catch {
+    // A truncated journal is an ordinary crash artifact. It must take the same
+    // path as a structurally invalid one, so the operator sees the refusal
+    // rather than a raw SyntaxError from the parser.
+    throw new Error("The re-key journal is malformed; refusing to touch the vault.");
+  }
   if (
     parsed?.version !== 1 ||
     typeof parsed.slotId !== "string" ||
@@ -398,8 +416,22 @@ export function installStaged(vaultDir: string, journal: RekeyJournal): void {
  * single-file replace and therefore the point of no return; the journal
  * written before it is what lets a later run tell which side of that point a
  * crash landed on.
+ *
+ * Every file the journal names must be present in the staged tree before that
+ * point is crossed. `installStaged` skips a file it cannot find — which is
+ * what makes a replay after a partial install a no-op — so an incomplete
+ * staged tree would otherwise commit silently and leave the vault holding the
+ * new keyring over an object still sealed under the old keyset: readable by
+ * neither, and invisible to recovery.
  */
 export function commitRekey(vaultDir: string, journal: RekeyJournal, keyring: KeyringFile): void {
+  const tree = stagedTree(vaultDir);
+  for (const relative of journal.files) {
+    if (!fs.existsSync(resolveInside(tree, relative))) {
+      throw new Error(`Refusing to commit the re-key: ${relative} is missing from the staged tree.`);
+    }
+  }
+
   fs.mkdirSync(stagingRoot(vaultDir), { recursive: true, mode: 0o700 });
   writeFileAtomic(journalPath(vaultDir), `${JSON.stringify(journal)}\n`, { mode: 0o600 });
   writeKeyring(vaultDir, keyring);
