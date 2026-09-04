@@ -14,9 +14,16 @@ import {
 import { buildSchema, readSchema, searchSchema, filterNotesByDate } from "./schema.js";
 import { appendAudit, readAudit, verifyAudit } from "./audit.js";
 import { getPassphrase, readSecret } from "./passphrase.js";
-import { forgetPassphrase, keychain, recallPassphrase, rememberPassphrase } from "./keychain.js";
+import {
+  forgetPassphrase,
+  keychain,
+  recallPassphrase,
+  rememberPassphrase,
+  updateRememberedPassphrase,
+} from "./keychain.js";
 import { startMcpServer } from "./mcp-server.js";
 import { migrateToKeyring } from "./keyring-migrate.js";
+import { changeVaultPassphrase, MIN_PASSPHRASE_LENGTH } from "./keyring-passphrase.js";
 import { detectVaultFormat } from "./keyring.js";
 import {
   addGrant,
@@ -1221,6 +1228,55 @@ program
     }
     console.log("Desktop builds older than this release cannot open a migrated vault.");
   });
+
+const passphraseCommand = program.command("passphrase").description("manage the passphrase that wraps this vault's keys");
+
+passphraseCommand
+  .command("change")
+  .description("change the vault passphrase and re-wrap the keyring at the current KDF cost")
+  .option("--allow-same-passphrase", "re-wrap the keyring at the current cost without changing the passphrase")
+  .action(async (opts) => {
+    const dir = program.opts().vault;
+    const current = await getPassphrase({ vaultDir: dir, prompt: "Current vault passphrase: " });
+    const next = process.env.VBRAIN_NEW_PASSPHRASE ?? (await readNewPassphrase());
+
+    const report = changeVaultPassphrase(dir, current, next, {
+      allowSamePassphrase: Boolean(opts.allowSamePassphrase),
+    });
+
+    console.log(`Passphrase changed for ${dir}.`);
+    console.log(`Re-wrapped ${report.slotsRewritten} keyring slot(s) at scrypt N=${report.newN}.`);
+    if (report.previousN !== report.newN) {
+      console.log(`Key-derivation cost raised from N=${report.previousN}.`);
+    }
+    if (report.slotsPreserved > 0) {
+      console.log(`Left ${report.slotsPreserved} slot(s) this passphrase does not open untouched.`);
+    }
+
+    const keychainResult = updateRememberedPassphrase(dir, next);
+    if (keychainResult.updated) {
+      console.log(`Updated the remembered passphrase in the OS credential store (${keychainResult.backend}).`);
+    } else if (keychainResult.error) {
+      console.error(
+        `Warning: this vault has a remembered passphrase but it could not be updated (${keychainResult.backend}: ${keychainResult.error}). ` +
+          "It is now stale — run 'vbrain unlock --remember' to store the new one.",
+      );
+    }
+
+    console.log("This does not re-encrypt anything: every note, attachment and sync change keeps its key.");
+    console.log("If the old passphrase leaked, run 'vbrain rekey' once it ships.");
+  });
+
+/** Two masked entries that have to agree, so a typo cannot become the new passphrase. */
+async function readNewPassphrase(): Promise<string> {
+  const first = await readSecret("New vault passphrase: ");
+  if (first.length < MIN_PASSPHRASE_LENGTH) {
+    throw new Error(`The new passphrase must be at least ${MIN_PASSPHRASE_LENGTH} characters.`);
+  }
+  const second = await readSecret("Repeat new vault passphrase: ");
+  if (first !== second) throw new Error("The two entries did not match; nothing was changed.");
+  return first;
+}
 
 program
   .command("unlock")

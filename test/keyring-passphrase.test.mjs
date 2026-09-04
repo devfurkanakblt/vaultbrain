@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { appendAudit, verifyAudit } from "../dist/audit.js";
 import { DocumentVault } from "../dist/documents.js";
@@ -227,7 +229,6 @@ function fakeKeychain({ failOnStore = false } = {}) {
       lookup: (account) => entries.get(account),
       forget: (account) => entries.delete(account),
     },
-
   };
 }
 
@@ -281,4 +282,68 @@ test("a store that refuses the write is reported rather than thrown", () => {
     setKeychainBackend(undefined);
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+const cliPath = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
+
+function runCli(args, env) {
+  return spawnSync(process.execPath, [cliPath, ...args], {
+    encoding: "utf8",
+    env: { ...process.env, ...env },
+  });
+}
+
+test("the CLI changes the passphrase end to end", () => {
+  const { dir } = seedVault();
+
+  const result = runCli(["--vault", dir, "passphrase", "change"], {
+    VBRAIN_PASSPHRASE: PASSPHRASE,
+    VBRAIN_NEW_PASSPHRASE: NEW_PASSPHRASE,
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Passphrase changed/u);
+  assert.match(result.stdout, /does not re-encrypt/u);
+  assert.match(result.stdout, /vbrain rekey/u);
+
+  forgetVaultKeys();
+  assert.ok(openVaultKeys(dir, NEW_PASSPHRASE));
+  assert.throws(() => openVaultKeys(dir, PASSPHRASE), /wrong passphrase/iu);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("the CLI refuses a short new passphrase and leaves the vault alone", () => {
+  const { dir } = seedVault();
+  const before = fs.readFileSync(path.join(dir, "keyring.json"));
+
+  const result = runCli(["--vault", dir, "passphrase", "change"], {
+    VBRAIN_PASSPHRASE: PASSPHRASE,
+    VBRAIN_NEW_PASSPHRASE: "short",
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /at least 12 characters/u);
+  assert.deepEqual(fs.readFileSync(path.join(dir, "keyring.json")), before);
+
+  forgetVaultKeys();
+  assert.ok(openVaultKeys(dir, PASSPHRASE), "the old passphrase must still work");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("the CLI refuses a legacy vault and names vbrain migrate", () => {
+  const dir = tempDir("cli-legacy");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "schema.json"), '{"version":1,"files":{}}\n');
+
+  const result = runCli(["--vault", dir, "passphrase", "change"], {
+    VBRAIN_PASSPHRASE: PASSPHRASE,
+    VBRAIN_NEW_PASSPHRASE: NEW_PASSPHRASE,
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /vbrain migrate/u);
+
+  fs.rmSync(dir, { recursive: true, force: true });
 });
