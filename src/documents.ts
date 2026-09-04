@@ -342,16 +342,16 @@ export interface AttachmentInfo {
   createdAt: string;
 }
 
-const INDEX_AAD = "secondbrain-vault:document-index:v1";
-const PLUGIN_POLICY_AAD = "secondbrain-vault:plugin-policy:v1";
+export const INDEX_AAD = "secondbrain-vault:document-index:v1";
+export const PLUGIN_POLICY_AAD = "secondbrain-vault:plugin-policy:v1";
 const ATTACHMENT_CHUNK_SIZE = 1024 * 1024;
 const MAX_ATTACHMENT_SIZE = 250 * 1024 * 1024;
 
-function noteAad(id: string): string {
+export function noteAad(id: string): string {
   return `secondbrain-vault:note:v1:${id}`;
 }
 
-function historyAad(id: string, revision: number): string {
+export function historyAad(id: string, revision: number): string {
   return `secondbrain-vault:note-history:v1:${id}:${revision}`;
 }
 
@@ -361,12 +361,12 @@ function historyAad(id: string, revision: number): string {
  * types is therefore caught cryptographically: no separate check is needed, and
  * none can be bypassed.
  */
-function canvasAad(id: string): string {
+export function canvasAad(id: string): string {
   return `secondbrain-vault:canvas:v1:${id}`;
 }
 
 /** Same type-confusion argument as `canvasAad`, for the third object type. */
-function pluginAad(id: string): string {
+export function pluginAad(id: string): string {
   return `secondbrain-vault:plugin:v1:${id}`;
 }
 
@@ -375,19 +375,19 @@ function pluginAad(id: string): string {
  * setting never rewrites the code — and a reader that only wants the settings
  * never decrypts the code at all.
  */
-function pluginStoreAad(id: string): string {
+export function pluginStoreAad(id: string): string {
   return `secondbrain-vault:plugin-store:v1:${id}`;
 }
 
-function canvasHistoryAad(id: string, revision: number): string {
+export function canvasHistoryAad(id: string, revision: number): string {
   return `secondbrain-vault:canvas-history:v1:${id}:${revision}`;
 }
 
-function attachmentManifestAad(id: string): string {
+export function attachmentManifestAad(id: string): string {
   return `secondbrain-vault:attachment-manifest:v1:${id}`;
 }
 
-function attachmentChunkAad(id: string, index: number): string {
+export function attachmentChunkAad(id: string, index: number): string {
   return `secondbrain-vault:attachment-chunk:v1:${id}:${index}`;
 }
 
