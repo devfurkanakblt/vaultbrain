@@ -170,6 +170,15 @@ node dist/cli.js --vault ./vault/personal migrate
 
 # Re-wrap the keyring under a new passphrase, at the current KDF cost
 node dist/cli.js --vault ./vault/personal passphrase change
+
+# Inspect public slot metadata; no passphrase is needed
+node dist/cli.js --vault ./vault/personal keyring status
+
+# Create an offline recovery kit outside the vault
+node dist/cli.js --vault ./vault/personal keyring recovery create --out ../personal-recovery.json
+
+# Restore a missing or damaged keyring and choose a new primary passphrase
+node dist/cli.js --vault ./vault/personal keyring recovery restore --from ../personal-recovery.json
 ```
 
 Encrypted files carry an explicit envelope version, cipher name and the exact
@@ -190,6 +199,23 @@ earlier formats so a future change has to prove it can still read them.
   current passphrase) and `VBRAIN_NEW_PASSPHRASE` (the replacement) to be set.
   If this vault has a passphrase remembered in the OS credential store, it is
   updated to the new one.
+- `vbrain keyring status [--json]` lists slot IDs, labels, creation times and
+  scrypt costs without unlocking the vault. It never prints salts or wrapped
+  ciphertext.
+- `vbrain keyring recovery create --out <file>` adds one recovery-labelled
+  slot and writes its independently usable recovery kit outside the vault. The
+  generated 256-bit code is shown once and must be stored separately from the
+  kit. Neither the kit nor the keyring stores the code.
+- `vbrain keyring recovery restore --from <file>` opens the kit with its code,
+  verifies the recovered keys against the selected vault, preserves the old
+  keyring as a ciphertext backup and installs a freshly wrapped primary slot.
+  `vbrain keyring recovery remove --slot <id>` detaches a live slot; it cannot
+  invalidate offline copies of a kit. Rotate content keys before creating a
+  replacement kit when a kit and its code may have leaked.
+
+Key-material commands add paired `pending` and `allowed`/`denied` entries to
+the same authenticated audit chain as content access. Recovery codes, kit
+paths and key material are never included in those entries.
 
 ## Encrypted Markdown documents
 

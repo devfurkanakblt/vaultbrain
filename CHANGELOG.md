@@ -5,6 +5,12 @@ Versioning once the encrypted storage format reaches 1.0.
 
 ## Unreleased
 
+- Added `vbrain keyring status` plus offline recovery-kit create, restore and
+  remove commands. Recovery uses a checksummed 256-bit code stored separately
+  from the wrapped keyset and verifies available vault ciphertext before a
+  damaged keyring is replaced.
+- Keyring migration, passphrase changes and recovery mutations now add paired,
+  value-free operation records to the permanent authenticated audit chain.
 - `vbrain passphrase change`: re-wraps the vault keyring under a new passphrase
   at the current key-derivation cost, without re-encrypting any object.
 - Taught the Rust desktop core to open passphrase-wrapped keyring vaults, and
