@@ -589,10 +589,18 @@ sbrain --experimental-trusted-sync sync append <device-id> note <note-id> put \
 sbrain --experimental-trusted-sync sync export > changes.json
 sbrain --experimental-trusted-sync sync import changes.json
 
-# Validate the complete DAG, inspect concurrent heads, then apply a clean one.
+# Validate the complete DAG, list/inspect concurrent heads, then apply a clean one.
 sbrain --experimental-trusted-sync sync verify
+sbrain --experimental-trusted-sync sync conflicts
 sbrain --experimental-trusted-sync sync resolve note <note-id>
 sbrain --experimental-trusted-sync sync apply note <note-id>
+
+# Resolve manually by naming one preserved head. Plugin-policy conflicts can
+# instead use --safe, which only unions revocations and enables restricted mode.
+sbrain --experimental-trusted-sync --sync-device <device-id> \
+  sync resolve note <note-id> --head <change-id>
+sbrain --experimental-trusted-sync --sync-device <device-id> \
+  sync resolve vault plugin-policy --safe
 
 # Example automatically captured edit.
 sbrain --experimental-trusted-sync --sync-device <device-id> \
@@ -610,11 +618,14 @@ sbrain --experimental-trusted-sync --vault ./restored-vault \
   --checkpoint <owner-checkpoint-sha256>
 ```
 
-Unresolved heads fail before live storage is touched. Synchronized attachment
-snapshots currently share the 8 MiB change limit (about 6 MiB of raw bytes);
-larger blob transport, independently witnessed freshness and mobile clients
-remain Phase 6 work. The relay is not key escrow: first-device recovery needs
-an encrypted vault backup containing the original key-derivation metadata. A
+Unresolved heads fail before live storage is touched. Plugin package bytes and
+the fail-closed plugin policy are portable, while plugin storage and the local
+enabled/disabled execution choice never enter the sync log; a received plugin
+is always installed disabled. Synchronized attachment snapshots currently
+share the 8 MiB change limit (about 6 MiB of raw bytes); resumable chunked
+transport for larger blobs and independently witnessed freshness remain
+Phase 6 work. The relay is not key escrow: first-device recovery needs an
+encrypted vault backup containing the original key-derivation metadata. A
 normal device clone must never carry another device's `documents/sync/identity`
 directory; private identity keys are local-only and absent from sync exports.
 
@@ -673,10 +684,17 @@ cost scales with the number of _keys_, not the size of your notes.
 
 Phases 0–5 are implemented. Phase 6 now has the encrypted immutable change log,
 live note/canvas/attachment/plugin capture and application, owner-signed device
-enrollment and removal with epoch content-key rotation, owner-signed freshness
-checkpoints, an authenticated opaque self-hosted relay and an automated recovery
-drill. Multi-device desktop/mobile releases, independent review and a stable
-1.0 format remain. The maintained checklist is in
+enrollment and removal with automatic epoch content-key rotation on revocation,
+owner-signed freshness checkpoints, an authenticated opaque self-hosted relay,
+an automated recovery drill, a frozen 1.0 on-disk format with committed
+conformance fixtures, and read-only desktop sync status. Desktop-driven sync
+mutation (enrollment, revocation, relay push/pull from the app), resumable
+chunked transport for attachments larger than the change limit, and the
+independent security audit remain open — see
+[`docs/AUDIT-SCOPE.md`](docs/AUDIT-SCOPE.md) for the audit readiness package.
+iOS/Android clients are out of scope: Vault Brain stays local-first with
+optional self-hosted sync rather than putting the passphrase, and a hosted
+relay dependency, on a phone. The maintained checklist is in
 [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## License

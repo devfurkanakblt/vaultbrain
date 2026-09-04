@@ -349,8 +349,10 @@ and deletion remain outside the confidentiality/integrity boundary, while signed
 registries, per-device changes and pinned checkpoints provide client-side trust.
 Operational details and recovery limits are in `docs/SYNC-RELAY.md`.
 
-Independently witnessed freshness, desktop/mobile product integration and
-external cryptographic review remain later Phase 6 work.
+Independently witnessed freshness, desktop-driven sync mutation, resumable
+chunked transport for attachments larger than the change limit and external
+cryptographic review remain later Phase 6 work. Mobile clients are out of
+scope; sync is desktop-to-desktop.
 The original format contract and threat analysis are recorded in
 `docs/superpowers/specs/2026-08-31-encrypted-sync-change-protocol-design.md`.
 

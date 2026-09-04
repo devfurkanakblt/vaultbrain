@@ -68,7 +68,12 @@ Each phase must ship a usable vertical slice and keep older vaults readable.
 - [x] Local-model adapter
 - [x] Importer for Obsidian vaults with integrity report
 
-## Phase 6 — Encrypted sync and mobile
+## Phase 6 — Encrypted sync (desktop multi-device)
+
+iOS/Android clients are out of scope. A phone client would make a hosted relay
+and a third-party app store part of the product, and would put the passphrase —
+the vault's only real security boundary — on a device this project cannot reason
+about. Vault Brain stays local-first with optional self-hosted sync.
 
 - [x] Immutable encrypted change protocol and conflict resolution
   - [x] Content-addressed encrypted envelopes, device chains, causal DAG validation and deterministic conflict inspection
@@ -78,8 +83,18 @@ Each phase must ship a usable vertical slice and keep older vaults readable.
   - [x] Ed25519 proof-of-possession requests, signed certificates and encrypted registry exchange
   - [x] Per-change device signatures, authority pinning, rollback rejection and revocation cutoffs
 - [x] Epoch-based content-key rotation
+  - [x] Random per-epoch content keys wrapped to each active device's X25519 key
+  - [x] Automatic rotation on owner-signed device revocation
+  - [x] Forward-only: a revoked device retains pre-rotation read access
 - [x] Owner-signed freshness checkpoints with explicit first-pin verification
 - [x] Authenticated opaque relay server and self-hosted option
-- [ ] Desktop multi-device release, then iOS/Android clients
+- [ ] Desktop multi-device release
+  - [x] Read-only desktop sync status; mutation remains CLI-only
+  - [ ] Desktop-driven enrollment, revocation and relay exchange
+- [ ] Resumable chunked transport for large attachment blobs
+  - Attachment snapshots share the 8 MiB change limit (about 6 MiB of raw
+    bytes); larger files live in the vault but cannot sync today
 - [x] Automated encrypted-backup plus relay catch-up recovery drill
 - [ ] External security audit and stable 1.0 format
+  - [x] Stable 1.0 on-disk format with committed conformance fixtures
+  - [ ] External security audit (readiness package in `docs/AUDIT-SCOPE.md`)
