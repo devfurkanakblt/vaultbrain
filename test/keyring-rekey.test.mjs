@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -6,7 +7,7 @@ import test from "node:test";
 
 import { appendAudit } from "../dist/audit.js";
 import { DocumentVault } from "../dist/documents.js";
-import { decryptItem, encryptItem, planRekey } from "../dist/keyring-rekey.js";
+import { decryptItem, encryptItem, planRekey, stageRekey, stagedTree, stagingRoot } from "../dist/keyring-rekey.js";
 import { openVaultKeys, randomKeySet } from "../dist/keyring.js";
 import { upsertEntry } from "../dist/store.js";
 import { saveGrants, emptyGrantFile } from "../dist/grants.js";
@@ -466,6 +467,104 @@ test("a sync change keeps its ID and its envelope shape across a re-encryption",
   // bytes rather than just the parsed shape.
   assert.deepEqual(Object.keys(after), ["version", "id", "payload"]);
   assert.match(rewritten.toString("utf8"), /^\{"version":1,"id":"[0-9a-f]{64}","payload":/u);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+/** SHA-256 of every file in the vault, keyed by POSIX-relative path. */
+function hashVault(dir) {
+  const hashes = {};
+  const walk = (current, prefix) => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) walk(full, relative);
+      else if (entry.isFile()) hashes[relative] = crypto.createHash("sha256").update(fs.readFileSync(full)).digest("hex");
+    }
+  };
+  walk(dir, "");
+  return hashes;
+}
+
+function pinnedKeySet(oldKeys) {
+  const keys = randomKeySet();
+  keys.attachmentId = Buffer.from(oldKeys.attachmentId);
+  keys.syncChange = Buffer.from(oldKeys.syncChange);
+  keys.audit = Buffer.from(oldKeys.audit);
+  return keys;
+}
+
+test("staging writes a full shadow tree and touches nothing live", () => {
+  const { dir } = seedVault();
+  const oldKeys = openVaultKeys(dir, PASSPHRASE);
+  const newKeys = pinnedKeySet(oldKeys);
+  const items = planRekey(dir);
+  const before = hashVault(dir);
+
+  stageRekey(dir, oldKeys, newKeys, items);
+
+  for (const item of items) {
+    const staged = path.join(stagedTree(dir), ...item.path.split("/"));
+    assert.ok(fs.existsSync(staged), `${item.path} must be staged`);
+    assert.deepEqual(
+      decryptItem(item, newKeys, fs.readFileSync(staged)),
+      decryptItem(item, oldKeys, fs.readFileSync(path.join(dir, ...item.path.split("/")))),
+      `${item.path} must stage the same plaintext`,
+    );
+  }
+
+  const after = hashVault(dir);
+  for (const [relative, hash] of Object.entries(before)) {
+    assert.equal(after[relative], hash, `${relative} must not have changed`);
+  }
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("staging refuses when an artifact does not open under the current keyset", () => {
+  const { dir } = seedVault();
+  const oldKeys = openVaultKeys(dir, PASSPHRASE);
+  const newKeys = pinnedKeySet(oldKeys);
+  const items = planRekey(dir);
+  const wrongKeys = randomKeySet();
+  const before = hashVault(dir);
+
+  assert.throws(() => stageRekey(dir, wrongKeys, newKeys, items), /.*/u);
+
+  const after = hashVault(dir);
+  for (const [relative, hash] of Object.entries(before)) {
+    assert.equal(after[relative], hash, `${relative} must not have changed`);
+  }
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// A staging tree left in the vault root (e.g. from a previous stageRekey call
+// that stageRekey itself has not yet cleaned up, or one this run is about to
+// overwrite) must not be enumerated as vault content: planRekey's vault-root
+// scan only classifies *files*, and .rekey is a directory, so it is skipped
+// exactly like any other subdirectory. This test pins that behavior so a
+// future change to the root scan cannot regress it into walking into .rekey.
+test("a staging directory at the vault root does not break planRekey and is never enumerated as vault content", () => {
+  const { dir } = seedVault();
+  const before = planRekey(dir);
+
+  const oldKeys = openVaultKeys(dir, PASSPHRASE);
+  const newKeys = pinnedKeySet(oldKeys);
+  stageRekey(dir, oldKeys, newKeys, before);
+  assert.ok(fs.existsSync(stagingRoot(dir)), "staging root should exist after stageRekey");
+
+  const after = planRekey(dir);
+  assert.deepEqual(
+    after.map((item) => item.path).sort(),
+    before.map((item) => item.path).sort(),
+    "planRekey must schedule the same live artifacts whether or not a .rekey staging tree is present",
+  );
+  assert.equal(
+    after.some((item) => item.path.startsWith(".rekey")),
+    false,
+    "no item under .rekey should ever be scheduled as vault content",
+  );
 
   fs.rmSync(dir, { recursive: true, force: true });
 });

@@ -21,6 +21,7 @@ import {
   encryptDocumentBytes,
   type DocumentPayload,
 } from "./document-crypto.js";
+import { writeFileAtomic } from "./fs-safe.js";
 import type { KeySet } from "./keyring.js";
 import { resolveInside } from "./safety.js";
 import {
@@ -268,5 +269,68 @@ export function encryptItem(item: RekeyItem, keys: KeySet, plaintext: Buffer): B
     return Buffer.from(JSON.stringify({ version: 1, id: item.identity, payload }), "utf8");
   } finally {
     envelopeKey.fill(0);
+  }
+}
+
+/**
+ * `<vault>/.rekey`, holding the shadow tree (and, from Task 4 on, the journal
+ * that commits it). A directory here is invisible to `planRekey`: its
+ * vault-root scan only classifies files, so `.rekey` is skipped exactly like
+ * any other subdirectory, and the staged tree is never itself walked as
+ * `documents/` only resolves under the vault root, not under `.rekey`.
+ */
+export function stagingRoot(vaultDir: string): string {
+  return resolveInside(vaultDir, STAGING_DIRNAME);
+}
+
+/** `<vault>/.rekey/new`, mirroring the vault's own layout. */
+export function stagedTree(vaultDir: string): string {
+  return resolveInside(stagingRoot(vaultDir), "new");
+}
+
+/**
+ * Re-encrypts every item into the shadow tree and proves each staged file
+ * opens under the new keyset to the same plaintext the live file holds under
+ * the old one. Nothing live is touched, so any failure here — a wrong
+ * passphrase, a damaged object, a full disk — leaves the vault byte-identical.
+ *
+ * Any prior staging attempt is discarded before this one starts: a leftover
+ * `.rekey/new` from an interrupted run must not be mistaken for a complete,
+ * verified stage.
+ */
+export function stageRekey(vaultDir: string, oldKeys: KeySet, newKeys: KeySet, items: RekeyItem[]): void {
+  const tree = stagedTree(vaultDir);
+  fs.rmSync(stagingRoot(vaultDir), { recursive: true, force: true });
+  fs.mkdirSync(tree, { recursive: true, mode: 0o700 });
+
+  for (const item of items) {
+    const live = resolveInside(vaultDir, item.path);
+    const staged = resolveInside(tree, item.path);
+    let plaintext: Buffer | undefined;
+    let verified: Buffer | undefined;
+    try {
+      plaintext = decryptItem(item, oldKeys, fs.readFileSync(live));
+      const rewritten = encryptItem(item, newKeys, plaintext);
+      fs.mkdirSync(path.dirname(staged), { recursive: true, mode: 0o700 });
+      writeFileAtomic(staged, rewritten, { mode: 0o600 });
+
+      // Read back from disk rather than trusting the buffer in hand: this is
+      // what catches a truncated or partially flushed write before the
+      // commit, and it is what proves the staged file — not just the
+      // in-memory value that produced it — opens under the new keyset.
+      verified = decryptItem(item, newKeys, fs.readFileSync(staged));
+      if (!verified.equals(plaintext)) {
+        throw new Error(`The re-keyed copy of ${item.path} does not carry its plaintext.`);
+      }
+    } catch (error) {
+      // Fail closed: any failure anywhere in the loop discards the whole
+      // shadow tree rather than leaving a partially staged (and therefore
+      // partially unverified) directory behind.
+      fs.rmSync(stagingRoot(vaultDir), { recursive: true, force: true });
+      throw error;
+    } finally {
+      plaintext?.fill(0);
+      verified?.fill(0);
+    }
   }
 }
