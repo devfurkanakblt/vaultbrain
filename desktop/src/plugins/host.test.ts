@@ -251,11 +251,11 @@ describe("plugin host", () => {
 
 describe("sandbox source", () => {
   it("wraps the plugin so the bootstrap's internals are out of reach", () => {
-    const script = sandboxSource("sbrain.ui.notice('hello');");
+    const script = sandboxSource("vbrain.ui.notice('hello');");
 
-    expect(script).toContain("(function (sbrain) {");
-    expect(script).toContain("sbrain.ui.notice('hello');");
-    expect(script).toContain("self.__sbrainBridge");
+    expect(script).toContain("(function (vbrain) {");
+    expect(script).toContain("vbrain.ui.notice('hello');");
+    expect(script).toContain("self.__vbrainBridge");
   });
 
   it("removes the globals a plugin could otherwise reach the network with", () => {

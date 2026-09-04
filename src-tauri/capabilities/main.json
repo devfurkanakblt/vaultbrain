@@ -6,6 +6,7 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
+    "allow-pick-vault-directory",
     "allow-unlock-vault",
     "allow-lock-vault",
     "allow-list-notes",

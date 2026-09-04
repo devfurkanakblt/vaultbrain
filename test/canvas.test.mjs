@@ -11,7 +11,7 @@ import { DocumentVault } from "../dist/documents.js";
 const PASSPHRASE = "canvas-vault-test-passphrase";
 
 function tempVault(label = "canvas") {
-  return fs.mkdtempSync(path.join(os.tmpdir(), `secondbrain-${label}-`));
+  return fs.mkdtempSync(path.join(os.tmpdir(), `vault-brain-${label}-`));
 }
 
 function board(overrides = {}) {
@@ -57,7 +57,10 @@ test("a canvas round-trips with its own identity, revisions and optimistic concu
   assert.equal(created.path, "Boards/Roadmap.canvas");
   assert.equal(created.title, "Roadmap");
   assert.equal(created.revision, 1);
-  assert.deepEqual(created.nodes.map((node) => node.id), ["n1", "n2"]);
+  assert.deepEqual(
+    created.nodes.map((node) => node.id),
+    ["n1", "n2"],
+  );
   assert.equal(created.nodes[0].text, "Start here");
   assert.equal(created.nodes[1].url, "https://example.com/spec");
   assert.equal(created.edges[0].toEnd, "arrow");
@@ -87,10 +90,11 @@ test("a canvas round-trips with its own identity, revisions and optimistic concu
     },
   ]);
 
-  const diskText = fs
-    .readdirSync(path.join(dir, "documents", "objects"))
-    .map((name) => fs.readFileSync(path.join(dir, "documents", "objects", name), "utf8"))
-    .join("\n") + fs.readFileSync(path.join(dir, "documents", "index.enc"), "utf8");
+  const diskText =
+    fs
+      .readdirSync(path.join(dir, "documents", "objects"))
+      .map((name) => fs.readFileSync(path.join(dir, "documents", "objects", name), "utf8"))
+      .join("\n") + fs.readFileSync(path.join(dir, "documents", "index.enc"), "utf8");
   assert.equal(diskText.includes("Start here"), false);
   assert.equal(diskText.includes("Product roadmap"), false);
 });
@@ -104,20 +108,20 @@ test("opening a canvas object as a note fails cryptographically, and the reverse
   const session = openDocumentKey(dir, PASSPHRASE);
   const canvasPayload = JSON.parse(fs.readFileSync(canvasObjectPath(dir, canvas.id), "utf8"));
   const notePayload = JSON.parse(
-    fs.readFileSync(path.join(dir, "documents", "objects", `${note.id}.note.enc`), "utf8")
+    fs.readFileSync(path.join(dir, "documents", "objects", `${note.id}.note.enc`), "utf8"),
   );
 
   assert.equal(
     JSON.parse(decryptDocument(canvasPayload, session.key, `secondbrain-vault:canvas:v1:${canvas.id}`)).id,
-    canvas.id
+    canvas.id,
   );
   assert.throws(
     () => decryptDocument(canvasPayload, session.key, `secondbrain-vault:note:v1:${canvas.id}`),
-    /unable to authenticate|bad decrypt/iu
+    /unable to authenticate|bad decrypt/iu,
   );
   assert.throws(
     () => decryptDocument(notePayload, session.key, `secondbrain-vault:canvas:v1:${note.id}`),
-    /unable to authenticate|bad decrypt/iu
+    /unable to authenticate|bad decrypt/iu,
   );
 
   // The two ID spaces never collide through the public API either.
@@ -130,21 +134,34 @@ test("canvas history archives one revision per write and restores like a note", 
   const vault = new DocumentVault(dir, PASSPHRASE);
   const first = vault.putCanvas(board());
   const second = vault.putCanvas(
-    board({ id: first.id, nodes: [{ id: "only", type: "text", text: "second", x: 0, y: 0, width: 10, height: 10 }], edges: [] })
+    board({
+      id: first.id,
+      nodes: [{ id: "only", type: "text", text: "second", x: 0, y: 0, width: 10, height: 10 }],
+      edges: [],
+    }),
   );
   assert.equal(second.revision, 2);
-  assert.deepEqual(vault.canvasRevisions(first.id).map((item) => item.revision), [2, 1]);
+  assert.deepEqual(
+    vault.canvasRevisions(first.id).map((item) => item.revision),
+    [2, 1],
+  );
   assert.equal(vault.getCanvasRevision(first.id, 1).nodes.length, 2);
 
   const restored = vault.restoreCanvas(first.id, 1);
   assert.equal(restored.revision, 3);
-  assert.deepEqual(restored.nodes.map((node) => node.id), ["n1", "n2"]);
+  assert.deepEqual(
+    restored.nodes.map((node) => node.id),
+    ["n1", "n2"],
+  );
 
   const removed = vault.removeCanvas(first.id);
   assert.equal(removed.id, first.id);
   assert.equal(vault.listCanvases().length, 0);
   assert.equal(fs.existsSync(canvasObjectPath(dir, first.id)), false);
-  assert.deepEqual(vault.canvasRevisions(first.id).map((item) => item.revision), [3, 2, 1]);
+  assert.deepEqual(
+    vault.canvasRevisions(first.id).map((item) => item.revision),
+    [3, 2, 1],
+  );
 
   const recovered = vault.restoreCanvas(first.id, 2);
   assert.equal(recovered.id, first.id);
@@ -171,12 +188,13 @@ test("a file node keeps its note identity while its path label follows the note"
   const note = vault.put({ path: "People/Ada.md", title: "Ada Lovelace", body: "# Ada" });
   const canvas = vault.putCanvas({
     path: "Boards/People",
-    nodes: [
-      { id: "ada", type: "file", noteId: note.id, file: "People/Ada.md", x: 0, y: 0, width: 400, height: 300 },
-    ],
+    nodes: [{ id: "ada", type: "file", noteId: note.id, file: "People/Ada.md", x: 0, y: 0, width: 400, height: 300 }],
     edges: [],
   });
-  assert.deepEqual(vault.canvasesReferencing(note.id).map((item) => item.id), [canvas.id]);
+  assert.deepEqual(
+    vault.canvasesReferencing(note.id).map((item) => item.id),
+    [canvas.id],
+  );
 
   vault.rename(note.id, "Archive/Ada.md");
   const afterRename = vault.getCanvas(canvas.id);
@@ -189,7 +207,10 @@ test("a file node keeps its note identity while its path label follows the note"
   assert.equal(afterDelete.nodes.length, 1, "a deleted note leaves a broken reference, not a lost node");
   assert.equal(afterDelete.nodes[0].noteId, note.id);
   assert.equal(afterDelete.nodes[0].file, "Archive/Ada.md");
-  assert.deepEqual(vault.canvasesReferencing(note.id).map((item) => item.id), [canvas.id]);
+  assert.deepEqual(
+    vault.canvasesReferencing(note.id).map((item) => item.id),
+    [canvas.id],
+  );
 });
 
 test("canvas validation enforces every format limit at the storage boundary", () => {
@@ -210,8 +231,12 @@ test("canvas validation enforces every format limit at the storage boundary", ()
   assert.throws(() => putNodes([textNode(), textNode()]), /Duplicate canvas node ID/u);
   assert.throws(() => putNodes(Array.from({ length: 5_001 }, (_, i) => textNode({ id: `n${i}` }))), /5000/u);
   assert.throws(
-    () => putNodes([textNode()], Array.from({ length: 10_001 }, (_, i) => ({ id: `e${i}`, fromNode: "node", toNode: "node" }))),
-    /10000/u
+    () =>
+      putNodes(
+        [textNode()],
+        Array.from({ length: 10_001 }, (_, i) => ({ id: `e${i}`, fromNode: "node", toNode: "node" })),
+      ),
+    /10000/u,
   );
   assert.throws(() => putNodes([textNode({ x: 0.5 })]), /finite integer/u);
   assert.throws(() => putNodes([textNode({ width: 0 })]), /at least 1/u);
@@ -220,35 +245,69 @@ test("canvas validation enforces every format limit at the storage boundary", ()
   assert.throws(() => putNodes([textNode({ text: "x".repeat(256 * 1024 + 1) })]), /256 KiB/u);
   assert.throws(
     () => putNodes([{ id: "g", type: "group", label: "two\nlines", x: 0, y: 0, width: 10, height: 10 }]),
-    /single line/iu
+    /single line/iu,
   );
   assert.throws(
     () => putNodes([{ id: "l", type: "link", url: "javascript:alert(1)", x: 0, y: 0, width: 10, height: 10 }]),
-    /only http/iu
+    /only http/iu,
   );
   assert.throws(
-    () => putNodes([{ id: "f", type: "file", noteId: "not-a-uuid", file: "Note.md", x: 0, y: 0, width: 10, height: 10 }]),
-    /invalid noteId/u
+    () =>
+      putNodes([{ id: "f", type: "file", noteId: "not-a-uuid", file: "Note.md", x: 0, y: 0, width: 10, height: 10 }]),
+    /invalid noteId/u,
   );
   assert.throws(
-    () => putNodes([{ id: "f", type: "file", noteId: "a".repeat(36), attachmentId: "b".repeat(64), file: "x", x: 0, y: 0, width: 10, height: 10 }]),
-    /cannot set both/u
+    () =>
+      putNodes([
+        {
+          id: "f",
+          type: "file",
+          noteId: "a".repeat(36),
+          attachmentId: "b".repeat(64),
+          file: "x",
+          x: 0,
+          y: 0,
+          width: 10,
+          height: 10,
+        },
+      ]),
+    /cannot set both/u,
   );
   assert.throws(
-    () => putNodes([{ id: "f", type: "file", attachmentId: "b".repeat(64), file: "x", subpath: "heading", x: 0, y: 0, width: 10, height: 10 }]),
-    /subpath/u
+    () =>
+      putNodes([
+        {
+          id: "f",
+          type: "file",
+          attachmentId: "b".repeat(64),
+          file: "x",
+          subpath: "heading",
+          x: 0,
+          y: 0,
+          width: 10,
+          height: 10,
+        },
+      ]),
+    /subpath/u,
   );
   assert.throws(
     () => putNodes([textNode()], [{ id: "edge", fromNode: "node", toNode: "missing" }]),
-    /does not name a node/u
+    /does not name a node/u,
   );
   assert.throws(
-    () => putNodes([textNode()], [{ id: "edge", fromNode: "node", toNode: "node" }, { id: "edge", fromNode: "node", toNode: "node" }]),
-    /Duplicate canvas edge ID/u
+    () =>
+      putNodes(
+        [textNode()],
+        [
+          { id: "edge", fromNode: "node", toNode: "node" },
+          { id: "edge", fromNode: "node", toNode: "node" },
+        ],
+      ),
+    /Duplicate canvas edge ID/u,
   );
   assert.throws(
     () => putNodes(Array.from({ length: 32 }, (_, i) => textNode({ id: `large${i}`, text: "x".repeat(256 * 1024) }))),
-    /8 MiB/u
+    /8 MiB/u,
   );
 });
 
@@ -267,7 +326,16 @@ test("JSON Canvas import/export preserves standard fields, binds identities and 
     title: imported.title,
     nodes: [
       ...imported.nodes,
-      { id: "asset", type: "file", attachmentId: attachment.id, file: "old.png", x: 600, y: 0, width: 200, height: 200 },
+      {
+        id: "asset",
+        type: "file",
+        attachmentId: attachment.id,
+        file: "old.png",
+        x: 600,
+        y: 0,
+        width: 200,
+        height: 200,
+      },
     ],
     edges: imported.edges,
     baseRevision: imported.revision,
@@ -284,15 +352,22 @@ test("JSON Canvas import/export preserves standard fields, binds identities and 
   assert.equal(roundTrip.nodes.find((node) => node.id === "note").noteId, note.id);
   assert.equal(roundTrip.nodes.find((node) => node.id === "asset").attachmentId, attachment.id);
 
-  const broken = vault.importCanvas("Boards/Broken", JSON.stringify({
-    nodes: [{ id: "missing", type: "file", file: "Missing.md", x: 0, y: 0, width: 10, height: 10 }],
-    edges: [],
-  }));
+  const broken = vault.importCanvas(
+    "Boards/Broken",
+    JSON.stringify({
+      nodes: [{ id: "missing", type: "file", file: "Missing.md", x: 0, y: 0, width: 10, height: 10 }],
+      edges: [],
+    }),
+  );
   assert.equal(broken.nodes[0].file, "Missing.md");
   assert.equal(broken.nodes[0].noteId, undefined);
   assert.throws(
-    () => vault.importCanvas("Boards/Future", JSON.stringify({ nodes: [{ id: "x", type: "video", x: 0, y: 0, width: 10, height: 10 }], edges: [] })),
-    /unsupported node type/iu
+    () =>
+      vault.importCanvas(
+        "Boards/Future",
+        JSON.stringify({ nodes: [{ id: "x", type: "video", x: 0, y: 0, width: 10, height: 10 }], edges: [] }),
+      ),
+    /unsupported node type/iu,
   );
 });
 
@@ -314,27 +389,48 @@ test("canvas references, rebuilds and unreferenced attachment reports stay deriv
     ],
     edges: [],
   });
-  assert.deepEqual(vault.canvasesReferencing(first.id).map((item) => item.id), [canvas.id]);
-  assert.deepEqual(vault.canvasesReferencing(second.id).map((item) => item.id), [canvas.id]);
-  assert.deepEqual(vault.unreferencedAttachments().map((item) => item.id), [unused.id]);
+  assert.deepEqual(
+    vault.canvasesReferencing(first.id).map((item) => item.id),
+    [canvas.id],
+  );
+  assert.deepEqual(
+    vault.canvasesReferencing(second.id).map((item) => item.id),
+    [canvas.id],
+  );
+  assert.deepEqual(
+    vault.unreferencedAttachments().map((item) => item.id),
+    [unused.id],
+  );
 
   const ambiguous = vault.put({ path: "Other/Second.md", title: "Second", body: "# Other" });
   assert.deepEqual(vault.canvasesReferencing(second.id), [], "an ambiguous text wikilink becomes unresolved");
   vault.remove(ambiguous.id);
-  assert.deepEqual(vault.canvasesReferencing(second.id).map((item) => item.id), [canvas.id]);
+  assert.deepEqual(
+    vault.canvasesReferencing(second.id).map((item) => item.id),
+    [canvas.id],
+  );
 
   fs.rmSync(indexPath(dir));
   const rebuilt = new DocumentVault(dir, PASSPHRASE);
   assert.equal(rebuilt.listCanvases()[0].nodeCount, 3);
-  assert.deepEqual(rebuilt.canvasesReferencing(second.id).map((item) => item.id), [canvas.id]);
+  assert.deepEqual(
+    rebuilt.canvasesReferencing(second.id).map((item) => item.id),
+    [canvas.id],
+  );
 
   rebuilt.removeCanvas(canvas.id);
   assert.deepEqual(
-    rebuilt.unreferencedAttachments().map((item) => item.id).sort(),
-    [unused.id, used.id].sort()
+    rebuilt
+      .unreferencedAttachments()
+      .map((item) => item.id)
+      .sort(),
+    [unused.id, used.id].sort(),
   );
   assert.equal(rebuilt.listAttachments().length, 3, "the report never deletes attachment bytes");
-  assert.equal(rebuilt.unreferencedAttachments().some((item) => item.id === embedded.id), false);
+  assert.equal(
+    rebuilt.unreferencedAttachments().some((item) => item.id === embedded.id),
+    false,
+  );
 });
 
 test("derived layout migration rebuilds once and canvas journal recovery heals a stale index", () => {
@@ -347,7 +443,7 @@ test("derived layout migration rebuilds once and canvas journal recovery heals a
   index.derived = 4;
   fs.writeFileSync(
     indexPath(dir),
-    JSON.stringify(encryptDocument(JSON.stringify(index), session.key, "secondbrain-vault:document-index:v1"))
+    JSON.stringify(encryptDocument(JSON.stringify(index), session.key, "secondbrain-vault:document-index:v1")),
   );
   const migrated = new DocumentVault(dir, PASSPHRASE);
   assert.equal(migrated.listCanvases().length, 1);
@@ -361,10 +457,18 @@ test("derived layout migration rebuilds once and canvas journal recovery heals a
   const stale = tempVault("journal-control");
   fs.rmSync(stale, { recursive: true, force: true });
   fs.cpSync(dir, stale, { recursive: true });
-  const updated = vault.putCanvas(board({ id: canvas.id, nodes: [...board().nodes, { id: "n3", type: "text", text: "new", x: 0, y: 200, width: 10, height: 10 }] }));
+  const updated = vault.putCanvas(
+    board({
+      id: canvas.id,
+      nodes: [...board().nodes, { id: "n3", type: "text", text: "new", x: 0, y: 200, width: 10, height: 10 }],
+    }),
+  );
   fs.copyFileSync(canvasObjectPath(dir, canvas.id), canvasObjectPath(crashed, canvas.id));
   fs.copyFileSync(canvasObjectPath(dir, canvas.id), canvasObjectPath(stale, canvas.id));
-  fs.writeFileSync(journalPath(crashed), JSON.stringify({ version: 1, startedAt: new Date().toISOString(), scope: "canvases", ids: [canvas.id] }));
+  fs.writeFileSync(
+    journalPath(crashed),
+    JSON.stringify({ version: 1, startedAt: new Date().toISOString(), scope: "canvases", ids: [canvas.id] }),
+  );
 
   assert.equal(new DocumentVault(stale, PASSPHRASE).listCanvases()[0].nodeCount, 2);
   const recovered = new DocumentVault(crashed, PASSPHRASE);
@@ -375,7 +479,10 @@ test("derived layout migration rebuilds once and canvas journal recovery heals a
   const unknownScope = tempVault("journal-unknown");
   fs.rmSync(unknownScope, { recursive: true, force: true });
   fs.cpSync(stale, unknownScope, { recursive: true });
-  fs.writeFileSync(journalPath(unknownScope), JSON.stringify({ version: 1, startedAt: new Date().toISOString(), scope: "future-scope", ids: [] }));
+  fs.writeFileSync(
+    journalPath(unknownScope),
+    JSON.stringify({ version: 1, startedAt: new Date().toISOString(), scope: "future-scope", ids: [] }),
+  );
   assert.equal(new DocumentVault(unknownScope, PASSPHRASE).listCanvases()[0].nodeCount, 3);
   assert.equal(fs.existsSync(journalPath(unknownScope)), false);
 });

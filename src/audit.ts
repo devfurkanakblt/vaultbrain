@@ -134,6 +134,17 @@ function saveHead(vaultDir: string, signedEntries: number, lastHash: string, key
 }
 
 /**
+ * A keyring vault keeps its chain key in the keyset, so changing the
+ * passphrase later cannot orphan the audit history. A legacy vault keeps
+ * deriving from `audit.meta.json` exactly as before.
+ */
+function chainKeyForAppend(vaultDir: string, passphrase: string): Buffer {
+  const key = openOrCreateVaultKey(vaultDir, passphrase, "audit");
+  if (key) return key;
+  return auditKey(vaultDir, passphrase, loadOrCreateMeta(vaultDir));
+}
+
+/**
  * The grant fields are folded in only when an entry carries them, so a log
  * written before this build hashes byte-for-byte as it did and keeps verifying,
  * while everything new — including who asked and how much they got — is signed.
@@ -209,12 +220,18 @@ export function verifyAudit(vaultDir: string, passphrase: string): AuditVerifica
     return { valid: true, signedEntries: 0, legacyEntries };
   }
 
-  const meta = loadMeta(vaultDir);
-  if (!meta) {
-    return { valid: false, signedEntries: signed.length, legacyEntries, error: "Missing audit metadata." };
+  const keyringKey = openVaultKey(vaultDir, passphrase, "audit");
+  let key: Buffer;
+  if (keyringKey) {
+    key = keyringKey;
+  } else {
+    const meta = loadMeta(vaultDir);
+    if (!meta) {
+      return { valid: false, signedEntries: signed.length, legacyEntries, error: "Missing audit metadata." };
+    }
+    key = auditKey(vaultDir, passphrase, meta);
   }
 
-  const key = auditKey(vaultDir, passphrase, meta);
   let expectedPrevious = GENESIS_HASH;
   for (let index = 0; index < signed.length; index += 1) {
     const entry = signed[index];

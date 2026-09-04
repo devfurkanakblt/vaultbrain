@@ -73,13 +73,7 @@ import {
 } from "./plugins.js";
 import { verifyPluginSignature } from "./plugin-signatures.js";
 
-export type {
-  CanvasDocument,
-  CanvasEdge,
-  CanvasInput,
-  CanvasNode,
-  CanvasSummary,
-} from "./canvas.js";
+export type { CanvasDocument, CanvasEdge, CanvasInput, CanvasNode, CanvasSummary } from "./canvas.js";
 
 export type {
   PluginCapability,
@@ -89,9 +83,15 @@ export type {
   PluginSummary,
 } from "./plugins.js";
 
-export type PropertyValue = string | number | boolean | null | PropertyValue[] | {
-  [key: string]: PropertyValue;
-};
+export type PropertyValue =
+  | string
+  | number
+  | boolean
+  | null
+  | PropertyValue[]
+  | {
+      [key: string]: PropertyValue;
+    };
 
 export interface NoteDocument {
   version: 1;
@@ -238,6 +238,26 @@ export interface NoteInput {
 }
 
 /**
+ * A sync capture may persist its intent before calling the ordinary storage
+ * API. This protected dry-run result freezes generated identities, creation
+ * timestamps and revisions without exposing document keys or a second public
+ * write path.
+ */
+interface PreparedNotePut {
+  document: NoteDocument;
+}
+
+interface PreparedCanvasPut {
+  document: CanvasDocument;
+}
+
+interface PreparedAttachmentPut {
+  data: Buffer;
+  info: AttachmentInfo;
+  existed: boolean;
+}
+
+/**
  * Convert portable/Obsidian-style Markdown into the canonical note input used
  * by both one-file and whole-vault imports. Keeping this conversion outside
  * `DocumentVault` lets an importer validate every source file before it writes
@@ -251,14 +271,24 @@ export function parseMarkdownNote(notePath: string, markdown: string): NoteInput
       ? (metadata.properties as Record<string, PropertyValue>)
       : {};
   const portableId =
-    typeof metadata.sbrain_id === "string"
-      ? metadata.sbrain_id
-      : typeof metadata.id === "string" && /^[a-f0-9-]{36}$/u.test(metadata.id)
-        ? metadata.id
-        : undefined;
+    typeof metadata.vbrain_id === "string"
+      ? metadata.vbrain_id
+      : typeof metadata.sbrain_id === "string"
+        ? metadata.sbrain_id
+        : typeof metadata.id === "string" && /^[a-f0-9-]{36}$/u.test(metadata.id)
+          ? metadata.id
+          : undefined;
   const reserved = new Set([
-    "sbrain_id", "title", "aliases", "tags", "created", "createdAt",
-    "modified", "updatedAt", "properties",
+    "sbrain_id",
+    "vbrain_id",
+    "title",
+    "aliases",
+    "tags",
+    "created",
+    "createdAt",
+    "modified",
+    "updatedAt",
+    "properties",
   ]);
   if (portableId) reserved.add("id");
   const properties: Record<string, PropertyValue> = { ...legacyProperties };
@@ -371,9 +401,7 @@ function validateProperty(value: PropertyValue, depth = 0): void {
   }
 }
 
-function normalizeProperties(
-  properties: Record<string, PropertyValue> | undefined
-): Record<string, PropertyValue> {
+function normalizeProperties(properties: Record<string, PropertyValue> | undefined): Record<string, PropertyValue> {
   const normalized = properties ?? {};
   validateProperty(normalized);
   return structuredClone(normalized);
@@ -443,21 +471,32 @@ export class DocumentVault {
   private sessionGeneration = 0;
   private locked = false;
 
-  constructor(private readonly vaultDir: string, passphrase: string) {
+  constructor(
+    private readonly vaultDir: string,
+    passphrase: string,
+  ) {
     this.session = openDocumentKey(vaultDir, passphrase);
   }
 
   /**
-   * Ends the session: the derived key is overwritten in place and the decrypted
-   * index is dropped, so nothing readable survives in this process. Every
-   * subsequent operation fails until a new DocumentVault is constructed with
-   * the passphrase again — locking is a state change, not a UI gesture.
+   * Ends the session: the session's own key copies are overwritten in place,
+   * the module-level keyring cache for this vault is dropped too (a keyring
+   * vault's master keyset would otherwise stay resident and re-serve the next
+   * caller in this process), and the decrypted index is dropped, so nothing
+   * readable survives in this process. Every subsequent operation fails until
+   * a new DocumentVault is constructed with the passphrase again — re-deriving
+   * on the next unlock is the correct cost of locking — locking is a state
+   * change, not a UI gesture.
    */
   lock(): void {
     this.sessionGeneration += 1;
     for (const index of this.semanticIndexes.values()) index.clear();
     this.semanticIndexes.clear();
     this.session.key.fill(0);
+    this.session.attachmentIdKey.fill(0);
+    this.session.syncChangeKey.fill(0);
+    this.session.syncEnvelopeKey.fill(0);
+    forgetVaultKeys(this.vaultDir);
     this.indexCache = undefined;
     this.notesCache = undefined;
     this.searchCache.clear();
@@ -780,7 +819,7 @@ export class DocumentVault {
     const payload = encryptDocument(
       JSON.stringify(canvas),
       this.session.key,
-      canvasHistoryAad(canvas.id, canvas.revision)
+      canvasHistoryAad(canvas.id, canvas.revision),
     );
     writeFileAtomic(historyPath, JSON.stringify(payload), { mode: 0o600 });
   }
@@ -811,7 +850,7 @@ export class DocumentVault {
       readTextFileLimited(historyPath, 12 * 1024 * 1024, "Canvas revision")
     ) as DocumentPayload;
     const canvas = JSON.parse(
-      decryptDocument(payload, this.session.key, canvasHistoryAad(id, revision))
+      decryptDocument(payload, this.session.key, canvasHistoryAad(id, revision)),
     ) as CanvasDocument;
     if (canvas.version !== 1 || canvas.id !== id || canvas.revision !== revision) {
       throw new Error("Invalid canvas revision object.");
@@ -860,21 +899,21 @@ export class DocumentVault {
       notePath = undefined;
     }
     const normalizedReference = normalizeText(reference.replace(/\.md$/iu, ""));
-    const matches = [...new Set([
-      ...(notePath ? index.pathOwners[normalizeLinkTarget(notePath)] ?? [] : []),
-      ...(index.nameOwners[normalizedReference] ?? []),
-    ])].filter((id) => index.notes[id]);
+    const matches = [
+      ...new Set([
+        ...(notePath ? (index.pathOwners[normalizeLinkTarget(notePath)] ?? []) : []),
+        ...(index.nameOwners[normalizedReference] ?? []),
+      ]),
+    ].filter((id) => index.notes[id]);
     if (matches.length === 0) throw new Error(`Note not found: ${reference}`);
     if (matches.length > 1) throw new Error(`Ambiguous note reference: ${reference}`);
     return matches[0];
   }
 
   private canvasLabels(canvas: Pick<IndexedCanvas, "path" | "title">): string[] {
-    return [...new Set([
-      normalizeText(canvas.path),
-      normalizeText(canvasBasename(canvas.path)),
-      normalizeText(canvas.title),
-    ])];
+    return [
+      ...new Set([normalizeText(canvas.path), normalizeText(canvasBasename(canvas.path)), normalizeText(canvas.title)]),
+    ];
   }
 
   private resolveCanvasId(reference: string): string {
@@ -890,9 +929,9 @@ export class DocumentVault {
       normalizeText(reference.replace(/\.canvas$/iu, "")),
       ...(canvasPath ? [normalizeText(canvasPath)] : []),
     ]);
-    const matches = [...new Set(
-      [...labels].flatMap((label) => index.canvasPathOwners[label] ?? [])
-    )].filter((id) => index.canvases[id]);
+    const matches = [...new Set([...labels].flatMap((label) => index.canvasPathOwners[label] ?? []))].filter(
+      (id) => index.canvases[id],
+    );
     if (matches.length === 0) throw new Error(`Canvas not found: ${reference}`);
     if (matches.length > 1) throw new Error(`Ambiguous canvas reference: ${reference}`);
     return matches[0];
@@ -981,11 +1020,7 @@ export class DocumentVault {
     return { ...structuredClone(canvas), nodes };
   }
 
-  private refreshCanvasesForNoteChange(
-    index: DocumentIndex,
-    noteId: string,
-    identityLabels: string[]
-  ): void {
+  private refreshCanvasesForNoteChange(index: DocumentIndex, noteId: string, identityLabels: string[]): void {
     const candidates = new Set(index.canvasRefs[noteId] ?? []);
     const labels = new Set(identityLabels.map(normalizeLinkTarget));
     for (const label of labels) {
@@ -1016,20 +1051,21 @@ export class DocumentVault {
     const target = normalizeLinkTarget(link.target);
     const exactPath = (index.pathOwners[target] ?? [])[0];
     if (exactPath && index.notes[exactPath]) return index.notes[exactPath];
-    const candidates = [...new Set([
-      ...(index.nameOwners[target] ?? []),
-      ...(index.basenameOwners[target] ?? []),
-    ])].filter((id) => index.notes[id]);
+    const candidates = [
+      ...new Set([...(index.nameOwners[target] ?? []), ...(index.basenameOwners[target] ?? [])]),
+    ].filter((id) => index.notes[id]);
     return candidates.length === 1 ? index.notes[candidates[0]] : undefined;
   }
 
   private identityLabels(note: IndexedNote): string[] {
-    return [...new Set([
-      normalizeLinkTarget(note.path),
-      normalizeLinkTarget(path.posix.basename(note.path, ".md")),
-      normalizeText(note.title),
-      ...note.aliases.map(normalizeText),
-    ])];
+    return [
+      ...new Set([
+        normalizeLinkTarget(note.path),
+        normalizeLinkTarget(path.posix.basename(note.path, ".md")),
+        normalizeText(note.title),
+        ...note.aliases.map(normalizeText),
+      ]),
+    ];
   }
 
   /**
@@ -1144,13 +1180,15 @@ export class DocumentVault {
     return index;
   }
 
-  putCanvas(input: CanvasInput): CanvasDocument {
+  /** Validate and stabilize one canvas write without changing live storage. */
+  protected prepareCanvasPut(input: CanvasInput): PreparedCanvasPut {
     return withVaultLock(this.vaultDir, () => {
       const index = this.loadIndex();
       const canvasPath = normalizeCanvasPath(input.path);
       const pathKey = normalizeText(canvasPath);
-      const existingByPathId = (index.canvasPathOwners[pathKey] ?? [])
-        .find((id) => index.canvases[id] && normalizeText(index.canvases[id].path) === pathKey);
+      const existingByPathId = (index.canvasPathOwners[pathKey] ?? []).find(
+        (id) => index.canvases[id] && normalizeText(index.canvases[id].path) === pathKey,
+      );
       const existingByPath = existingByPathId ? index.canvases[existingByPathId] : undefined;
       const existingById = input.id ? index.canvases[input.id] : undefined;
       if (existingByPath && input.id && existingByPath.id !== input.id) {
@@ -1164,13 +1202,64 @@ export class DocumentVault {
       }
       if (existing && input.baseRevision !== undefined && input.baseRevision !== existing.revision) {
         throw new Error(
-          `Canvas revision conflict: expected revision ${input.baseRevision}, current revision ${existing.revision}.`
+          `Canvas revision conflict: expected revision ${input.baseRevision}, current revision ${existing.revision}.`,
         );
       }
       const archivedBase = existing ? 0 : Math.max(0, ...this.archivedCanvasRevisionNumbers(id));
       if (!existing && input.baseRevision !== undefined && input.baseRevision !== archivedBase) {
         throw new Error(
-          `Canvas revision conflict: expected revision ${input.baseRevision}, archived revision ${archivedBase}.`
+          `Canvas revision conflict: expected revision ${input.baseRevision}, archived revision ${archivedBase}.`,
+        );
+      }
+
+      const existingObject = existing ? this.loadCanvasById(existing.id) : undefined;
+      const nodes = normalizeCanvasNodes(input.nodes);
+      const edges = normalizeCanvasEdges(input.edges, nodes);
+      const now = new Date().toISOString();
+      const canvas: CanvasDocument = {
+        version: 1,
+        id,
+        path: canvasPath,
+        title: normalizeCanvasTitle(input.title ?? canvasBasename(canvasPath)),
+        nodes,
+        edges,
+        createdAt: existingObject?.createdAt ?? input.createdAt ?? now,
+        updatedAt: now,
+        revision: existing ? existing.revision + 1 : (input.baseRevision ?? archivedBase) + 1,
+      };
+      assertCanvasSize(canvas);
+      return { document: structuredClone(canvas) };
+    });
+  }
+
+  putCanvas(input: CanvasInput): CanvasDocument {
+    return withVaultLock(this.vaultDir, () => {
+      const index = this.loadIndex();
+      const canvasPath = normalizeCanvasPath(input.path);
+      const pathKey = normalizeText(canvasPath);
+      const existingByPathId = (index.canvasPathOwners[pathKey] ?? []).find(
+        (id) => index.canvases[id] && normalizeText(index.canvases[id].path) === pathKey,
+      );
+      const existingByPath = existingByPathId ? index.canvases[existingByPathId] : undefined;
+      const existingById = input.id ? index.canvases[input.id] : undefined;
+      if (existingByPath && input.id && existingByPath.id !== input.id) {
+        throw new Error(`Another canvas already uses path: ${canvasPath}`);
+      }
+      const existing = existingById ?? existingByPath;
+      const id = existing?.id ?? input.id ?? crypto.randomUUID();
+      if (!/^[a-f0-9-]{36}$/u.test(id)) throw new Error("Invalid canvas ID.");
+      if (!existing && (index.canvases[id] || index.notes[id])) {
+        throw new Error(`Document ID already exists: ${id}`);
+      }
+      if (existing && input.baseRevision !== undefined && input.baseRevision !== existing.revision) {
+        throw new Error(
+          `Canvas revision conflict: expected revision ${input.baseRevision}, current revision ${existing.revision}.`,
+        );
+      }
+      const archivedBase = existing ? 0 : Math.max(0, ...this.archivedCanvasRevisionNumbers(id));
+      if (!existing && input.baseRevision !== undefined && input.baseRevision !== archivedBase) {
+        throw new Error(
+          `Canvas revision conflict: expected revision ${input.baseRevision}, archived revision ${archivedBase}.`,
         );
       }
 
@@ -1257,9 +1346,7 @@ export class DocumentVault {
   }
 
   getCanvasRevision(reference: string, revision: number): CanvasDocument {
-    return this.materializeCanvas(
-      this.loadCanvasRevisionById(this.resolveCanvasHistoryId(reference), revision)
-    );
+    return this.materializeCanvas(this.loadCanvasRevisionById(this.resolveCanvasHistoryId(reference), revision));
   }
 
   restoreCanvas(reference: string, revision: number): CanvasDocument {
@@ -1280,9 +1367,10 @@ export class DocumentVault {
 
   canvasesReferencing(noteReference: string): CanvasSummary[] {
     const index = this.loadIndex();
-    const noteId = /^[a-f0-9-]{36}$/u.test(noteReference) && index.canvasRefs[noteReference]
-      ? noteReference
-      : this.resolveId(noteReference);
+    const noteId =
+      /^[a-f0-9-]{36}$/u.test(noteReference) && index.canvasRefs[noteReference]
+        ? noteReference
+        : this.resolveId(noteReference);
     return (index.canvasRefs[noteId] ?? [])
       .filter((id) => index.canvases[id])
       .map((id) => canvasSummary(index.canvases[id]))
@@ -1391,7 +1479,7 @@ export class DocumentVault {
     if (plugins[reference]) return reference;
     const wanted = reference.trim().toLowerCase();
     const matches = Object.values(plugins).filter(
-      (plugin) => plugin.manifestId === wanted || plugin.name.toLowerCase() === wanted
+      (plugin) => plugin.manifestId === wanted || plugin.name.toLowerCase() === wanted,
     );
     if (matches.length === 1) return matches[0].id;
     if (matches.length > 1) throw new Error(`Ambiguous plugin reference: ${reference}`);
@@ -1403,12 +1491,7 @@ export class DocumentVault {
    * source: a plugin whose declared reach and whose code arrived separately
    * could be approved as one thing and run as another.
    */
-  installPlugin(input: {
-    manifest: unknown;
-    source: string;
-    enabled?: boolean;
-    baseRevision?: number;
-  }): PluginPackage {
+  installPlugin(input: { manifest: unknown; source: string; enabled?: boolean; baseRevision?: number }): PluginPackage {
     return withVaultLock(this.vaultDir, () => {
       const manifest = parsePluginManifest(input.manifest);
       const source = validatePluginSource(input.source);
@@ -1428,7 +1511,7 @@ export class DocumentVault {
       }
       if (existing && input.baseRevision !== undefined && input.baseRevision !== existing.revision) {
         throw new Error(
-          `Plugin revision conflict: expected revision ${input.baseRevision}, current revision ${existing.revision}.`
+          `Plugin revision conflict: expected revision ${input.baseRevision}, current revision ${existing.revision}.`,
         );
       }
       const id = existing?.id ?? crypto.randomUUID();
@@ -1584,9 +1667,7 @@ export class DocumentVault {
       readTextFileLimited(filePath, 1024 * 1024, "Plugin storage")
     ) as DocumentPayload;
     const parsed = JSON.parse(decryptDocument(payload, this.session.key, pluginStoreAad(id))) as unknown;
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as Record<string, string>)
-      : {};
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, string>) : {};
   }
 
   setPluginStorage(reference: string, data: Record<string, string>): Record<string, string> {
@@ -1625,10 +1706,18 @@ export class DocumentVault {
     });
   }
 
-  private putIntoIndex(input: NoteInput, index: DocumentIndex, persistIndex: boolean): NoteDocument {
+  /** Validate an evolving note batch without touching objects, history or the index on disk. */
+  protected prepareNotePuts(inputs: readonly NoteInput[]): PreparedNotePut[] {
+    if (inputs.length > 100_000) throw new Error("A single bulk operation cannot exceed 100,000 notes.");
+    return withVaultLock(this.vaultDir, () => {
+      const index = structuredClone(this.loadIndex());
+      return inputs.map((input) => this.prepareNotePutIntoIndex(input, index));
+    });
+  }
+
+  private prepareNotePutIntoIndex(input: NoteInput, index: DocumentIndex): PreparedNotePut {
     const notePath = normalizeNotePath(input.path);
-    const existingByPathId = (index.pathOwners[normalizeLinkTarget(notePath)] ?? [])
-      .find((id) => index.notes[id]);
+    const existingByPathId = (index.pathOwners[normalizeLinkTarget(notePath)] ?? []).find((id) => index.notes[id]);
     const existingByPath = existingByPathId ? index.notes[existingByPathId] : undefined;
     const existingById = input.id ? index.notes[input.id] : undefined;
     if (existingByPath && input.id && existingByPath.id !== input.id) {
@@ -1640,13 +1729,77 @@ export class DocumentVault {
     if (!existing && (index.notes[id] || index.canvases[id])) throw new Error(`Document ID already exists: ${id}`);
     if (existing && input.baseRevision !== undefined && input.baseRevision !== existing.revision) {
       throw new Error(
-        `Note revision conflict: expected revision ${input.baseRevision}, current revision ${existing.revision}.`
+        `Note revision conflict: expected revision ${input.baseRevision}, current revision ${existing.revision}.`,
       );
     }
     const archivedBase = existing ? 0 : Math.max(0, ...this.archivedRevisionNumbers(id));
     if (!existing && input.baseRevision !== undefined && input.baseRevision !== archivedBase) {
       throw new Error(
-        `Note revision conflict: expected revision ${input.baseRevision}, archived revision ${archivedBase}.`
+        `Note revision conflict: expected revision ${input.baseRevision}, archived revision ${archivedBase}.`,
+      );
+    }
+
+    const now = new Date().toISOString();
+    const title = (input.title ?? path.posix.basename(notePath, ".md")).trim();
+    if (!title || title.length > 300 || /[\r\n\u0000]/u.test(title)) throw new Error("Invalid note title.");
+    if (Buffer.byteLength(input.body, "utf8") > 25 * 1024 * 1024) {
+      throw new Error("A note body cannot exceed 25 MiB.");
+    }
+    const analysis = analyzeMarkdown(input.body);
+    const note: NoteDocument = {
+      version: 1,
+      id,
+      path: notePath,
+      title,
+      body: input.body,
+      aliases: normalizeStringList(input.aliases),
+      tags: normalizeStringList([...(input.tags ?? []), ...analysis.tags]),
+      properties: normalizeProperties(input.properties),
+      createdAt: existing?.createdAt ?? input.createdAt ?? now,
+      updatedAt: now,
+      revision: existing ? existing.revision + 1 : (input.baseRevision ?? archivedBase) + 1,
+    };
+    const frontmatterSource = input.frontmatterSource ?? existing?.frontmatterSource;
+    if (frontmatterSource) note.frontmatterSource = frontmatterSource;
+
+    const oldLabels = existing ? this.identityLabels(existing) : [];
+    const indexed: IndexedNote = { ...note, links: analysis.links, headings: analysis.headings };
+    if (existing) this.removeOwnerLabels(index, existing);
+    index.notes[id] = indexed;
+    this.addOwnerLabels(index, indexed);
+    this.removeSourceFromLinkMap(index, id, existing);
+    this.addSourceToLinkMap(index, indexed);
+    const affected = new Set<string>([id]);
+    for (const label of [...oldLabels, ...this.identityLabels(indexed)]) {
+      for (const sourceId of index.linkSources[label] ?? []) affected.add(sourceId);
+    }
+    for (const sourceId of affected) this.refreshResolvedSource(index, sourceId);
+    this.refreshCanvasesForNoteChange(index, id, [...oldLabels, ...this.identityLabels(indexed)]);
+
+    return { document: structuredClone(note) };
+  }
+
+  private putIntoIndex(input: NoteInput, index: DocumentIndex, persistIndex: boolean): NoteDocument {
+    const notePath = normalizeNotePath(input.path);
+    const existingByPathId = (index.pathOwners[normalizeLinkTarget(notePath)] ?? []).find((id) => index.notes[id]);
+    const existingByPath = existingByPathId ? index.notes[existingByPathId] : undefined;
+    const existingById = input.id ? index.notes[input.id] : undefined;
+    if (existingByPath && input.id && existingByPath.id !== input.id) {
+      throw new Error(`Another note already uses path: ${notePath}`);
+    }
+    const existing = existingById ?? existingByPath;
+    const id = existing?.id ?? input.id ?? crypto.randomUUID();
+    if (!/^[a-f0-9-]{36}$/u.test(id)) throw new Error("Invalid note ID.");
+    if (!existing && (index.notes[id] || index.canvases[id])) throw new Error(`Document ID already exists: ${id}`);
+    if (existing && input.baseRevision !== undefined && input.baseRevision !== existing.revision) {
+      throw new Error(
+        `Note revision conflict: expected revision ${input.baseRevision}, current revision ${existing.revision}.`,
+      );
+    }
+    const archivedBase = existing ? 0 : Math.max(0, ...this.archivedRevisionNumbers(id));
+    if (!existing && input.baseRevision !== undefined && input.baseRevision !== archivedBase) {
+      throw new Error(
+        `Note revision conflict: expected revision ${input.baseRevision}, archived revision ${archivedBase}.`,
       );
     }
 
@@ -1783,8 +1936,7 @@ export class DocumentVault {
     // The filter loop runs once per note in the vault, so it allocates
     // nothing: no per-note closures, and the clauses a query does not use are
     // skipped outright rather than iterated over an empty list.
-    candidates:
-    for (const note of this.indexedNotes()) {
+    candidates: for (const note of this.indexedNotes()) {
       const fields = this.searchFieldsFor(note);
       const head = fields.head;
       const body = fields.body;
@@ -1824,12 +1976,11 @@ export class DocumentVault {
     }
 
     const terms = required.join(" ");
-    return matches
-      .map(({ note, score }) => ({
-        ...summary(note),
-        score,
-        excerpt: makeExcerpt(note.body, terms),
-      }));
+    return matches.map(({ note, score }) => ({
+      ...summary(note),
+      score,
+      excerpt: makeExcerpt(note.body, terms),
+    }));
   }
 
   /**
@@ -1840,7 +1991,7 @@ export class DocumentVault {
   async semanticSearch(
     query: string,
     adapter: EmbeddingAdapter,
-    options: SemanticSearchOptions = {}
+    options: SemanticSearchOptions = {},
   ): Promise<SemanticSearchHit[]> {
     this.assertUnlocked();
     const generation = this.sessionGeneration;
@@ -1968,6 +2119,43 @@ export class DocumentVault {
     });
   }
 
+  /** Validate attachment metadata and freeze its keyed content ID without writing chunks. */
+  protected prepareAttachmentPut(
+    data: Buffer,
+    filename: string,
+    mime = "application/octet-stream",
+  ): PreparedAttachmentPut {
+    this.assertUnlocked();
+    if (data.length === 0 || data.length > MAX_ATTACHMENT_SIZE) {
+      throw new Error("Attachments must be between 1 byte and 250 MiB.");
+    }
+    const safeFilename = filename.trim();
+    if (!safeFilename || safeFilename.length > 255 || /[\r\n\u0000]/u.test(safeFilename)) {
+      throw new Error("Invalid attachment filename.");
+    }
+    const safeMime = mime.trim().toLowerCase();
+    if (!/^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/u.test(safeMime)) {
+      throw new Error("Invalid attachment MIME type.");
+    }
+    const id = crypto
+      .createHmac("sha256", this.session.attachmentIdKey)
+      .update("secondbrain-vault:attachment-id:v1\0", "utf8")
+      .update(data)
+      .digest("hex");
+    const existed = fs.existsSync(this.attachmentManifestPath(id));
+    const info = existed
+      ? this.readAttachmentManifest(id)
+      : {
+          id,
+          filename: safeFilename,
+          mime: safeMime,
+          size: data.length,
+          chunks: Math.ceil(data.length / ATTACHMENT_CHUNK_SIZE),
+          createdAt: new Date().toISOString(),
+        };
+    return { data: Buffer.from(data), info: structuredClone(info), existed };
+  }
+
   putAttachment(data: Buffer, filename: string, mime = "application/octet-stream"): AttachmentInfo {
     this.assertUnlocked();
     return withVaultLock(this.vaultDir, () => this.putAttachmentLocked(data, filename, mime));
@@ -1997,11 +2185,7 @@ export class DocumentVault {
     const chunks = Math.ceil(data.length / ATTACHMENT_CHUNK_SIZE);
     for (let index = 0; index < chunks; index += 1) {
       const chunk = data.subarray(index * ATTACHMENT_CHUNK_SIZE, (index + 1) * ATTACHMENT_CHUNK_SIZE);
-      const payload = encryptDocumentBytes(
-        chunk,
-        this.session.key,
-        attachmentChunkAad(id, index)
-      );
+      const payload = encryptDocumentBytes(chunk, this.session.key, attachmentChunkAad(id, index));
       writeFileAtomic(resolveInside(attachmentDir, `${index}.chunk.enc`), JSON.stringify(payload), {
         mode: 0o600,
       });
@@ -2014,11 +2198,7 @@ export class DocumentVault {
       chunks,
       createdAt: new Date().toISOString(),
     };
-    const manifest = encryptDocument(
-      JSON.stringify(info),
-      this.session.key,
-      attachmentManifestAad(id)
-    );
+    const manifest = encryptDocument(JSON.stringify(info), this.session.key, attachmentManifestAad(id));
     writeFileAtomic(this.attachmentManifestPath(id), JSON.stringify(manifest), { mode: 0o600 });
     return info;
   }
@@ -2084,7 +2264,7 @@ export class DocumentVault {
     const note = this.get(reference);
     const frontmatter: Record<string, PropertyValue> = {
       ...note.properties,
-      sbrain_id: note.id,
+      vbrain_id: note.id,
       title: note.title,
       aliases: note.aliases,
       tags: note.tags,

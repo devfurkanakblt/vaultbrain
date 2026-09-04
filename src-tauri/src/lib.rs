@@ -26,12 +26,14 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tauri::State;
+use tauri::{AppHandle, State};
+use tauri_plugin_dialog::DialogExt;
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
 type HmacSha256 = Hmac<Sha256>;
+mod keyring;
 const INDEX_AAD: &str = "secondbrain-vault:document-index:v1";
 const DERIVED_LAYOUT: u8 = 5;
 const KEY_CHECK_CONTEXT: &str = "secondbrain-vault:document-key:v1";
@@ -110,10 +112,19 @@ struct PluginInstanceAuthorization {
     instance_token: String,
 }
 
+/// The `documents` key and the `attachmentId` key, in that order: everything
+/// the Rust core takes from a vault's keyset, and everything a session holds.
+type SessionKeys = (Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>);
+
 struct VaultSession {
     vault_dir: PathBuf,
     root_dir: PathBuf,
+    /// The `documents` key: every object under `documents/` is encrypted with it.
     key: Zeroizing<[u8; 32]>,
+    /// The `attachmentId` key: permanent, because attachment content addresses
+    /// are HMACs under it and every reference already written uses them. Equal
+    /// to `key` on a legacy vault, which is what the legacy format means.
+    attachment_id_key: Zeroizing<[u8; 32]>,
     index: DocumentIndex,
 }
 
@@ -156,6 +167,18 @@ struct KdfManifest {
     n: u32,
     salt: String,
 }
+
+/// Just enough of a manifest to learn its version. A v2 manifest carries no
+/// `kdf` and no `verifier`, so deserializing into `Manifest` fails on a missing
+/// field and reports that instead of what actually happened to the vault.
+#[derive(Debug, Deserialize)]
+struct ManifestVersion {
+    version: u8,
+}
+
+/// Byte-identical to what `vbrain migrate` writes, so a created vault and a
+/// migrated vault are the same shape on disk.
+const MANIFEST_TOMBSTONE: &str = "{\n  \"version\": 2,\n  \"keyring\": true\n}\n";
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -853,7 +876,7 @@ fn decrypt(payload: &EncryptedPayload, key: &[u8], aad: &str) -> Result<Vec<u8>,
     Ok(ciphertext)
 }
 
-fn write_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
+pub(crate) fn write_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
     let parent = path.parent().ok_or("target has no parent directory")?;
     fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     reject_symlink(path)?;
@@ -1487,20 +1510,32 @@ fn store_note(
     Ok(note)
 }
 
-fn open_session(vault_path: &str, passphrase: &str) -> Result<VaultSession, String> {
-    if passphrase.is_empty() {
-        return Err("passphrase cannot be empty".into());
+/// The `documents` key and the `attachmentId` key for this vault.
+///
+/// Three branches, in this order. A keyring is authoritative when present. A
+/// legacy manifest keeps every check it has today, including the cost the
+/// legacy format fixed at 32768 — that constant is legacy-only now, and no
+/// keyring cost is ever compared against a compiled-in value. A directory with
+/// neither is a brand-new vault and is created keyring-native.
+///
+/// "No manifest" is not "empty vault": a vault used only through the key-value
+/// commands has no document manifest but does have `audit.meta.json` and
+/// `*.kv.enc`. Writing a keyring beside those would put a random audit key in
+/// front of a chain signed with the key derived from `audit.meta.json`, so a
+/// vault holding any legacy marker keeps the legacy path and waits for
+/// `vbrain migrate`.
+fn open_vault_keys(
+    vault_dir: &Path,
+    root_dir: &Path,
+    passphrase: &str,
+) -> Result<SessionKeys, String> {
+    if let Some(file) = keyring::read(vault_dir)? {
+        let keys = keyring::unwrap_keyring(&file, passphrase)?;
+        return Ok((keys.documents.clone(), keys.attachment_id.clone()));
     }
-    let vault_dir = PathBuf::from(vault_path);
-    fs::create_dir_all(&vault_dir).map_err(|error| error.to_string())?;
-    let vault_dir = fs::canonicalize(vault_dir).map_err(|error| error.to_string())?;
-    let _guard = VaultWriteGuard::acquire(&vault_dir)?;
-    let root_dir = vault_dir.join("documents");
-    reject_symlink(&root_dir)?;
-    fs::create_dir_all(&root_dir).map_err(|error| error.to_string())?;
-    let manifest_path = root_dir.join("manifest.json");
 
-    let (key, _manifest) = if manifest_path.exists() {
+    let manifest_path = root_dir.join("manifest.json");
+    if manifest_path.exists() {
         reject_symlink(&manifest_path)?;
         let manifest: Manifest =
             serde_json::from_slice(&read_limited(&manifest_path, 64 * 1024, "vault manifest")?)
@@ -1537,8 +1572,58 @@ fn open_session(vault_path: &str, passphrase: &str) -> Result<VaultSession, Stri
             &manifest_path,
             &serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?,
         )?;
-        (key, manifest)
-    };
+        let attachment_id_key = key.clone();
+        return Ok((key, attachment_id_key));
+    }
+
+    let keys = keyring::random_key_set();
+    let slot = keyring::wrap_key_set(&keys, passphrase, keyring::DEFAULT_SCRYPT_LOG_N)?;
+    keyring::write(
+        vault_dir,
+        &keyring::KeyringFile {
+            version: keyring::KEYRING_VERSION,
+            slots: vec![slot],
+        },
+    )?;
+    write_atomic(&manifest_path, MANIFEST_TOMBSTONE.as_bytes())?;
+    // Read back rather than trusting what we just generated: this proves the
+    // keyring on disk unwraps before one object is encrypted under it.
+    let written = keyring::read(vault_dir)?.ok_or("failed to create a vault keyring")?;
+    let opened = keyring::unwrap_keyring(&written, passphrase)?;
+    Ok((opened.documents.clone(), opened.attachment_id.clone()))
+}
+
+/// The legacy markers `detectVaultFormat` in `src/keyring.ts` looks for, minus
+/// the document manifest, which the caller has already ruled out.
+fn vault_holds_legacy_material(vault_dir: &Path) -> bool {
+    for marker in ["audit.meta.json", "grants.enc", "schema.json"] {
+        if vault_dir.join(marker).exists() {
+            return true;
+        }
+    }
+    fs::read_dir(vault_dir).is_ok_and(|entries| {
+        entries.flatten().any(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.ends_with(".kv.enc"))
+        })
+    })
+}
+
+fn open_session(vault_path: &str, passphrase: &str) -> Result<VaultSession, String> {
+    if passphrase.is_empty() {
+        return Err("passphrase cannot be empty".into());
+    }
+    let vault_dir = PathBuf::from(vault_path);
+    fs::create_dir_all(&vault_dir).map_err(|error| error.to_string())?;
+    let vault_dir = fs::canonicalize(vault_dir).map_err(|error| error.to_string())?;
+    let _guard = VaultWriteGuard::acquire(&vault_dir)?;
+    let root_dir = vault_dir.join("documents");
+    reject_symlink(&root_dir)?;
+    fs::create_dir_all(&root_dir).map_err(|error| error.to_string())?;
+
+    let (key, attachment_id_key) = open_vault_keys(&vault_dir, &root_dir, passphrase)?;
 
     let index_path = root_dir.join("index.enc");
     let index_existed = index_path.exists();
@@ -1546,6 +1631,7 @@ fn open_session(vault_path: &str, passphrase: &str) -> Result<VaultSession, Stri
         vault_dir,
         root_dir,
         key,
+        attachment_id_key,
         index: DocumentIndex::empty(),
     };
     refresh_session_index(&mut session)?;
@@ -3339,7 +3425,7 @@ fn list_note_revisions(
             current: true,
         });
     }
-    revisions.sort_by(|left, right| right.revision.cmp(&left.revision));
+    revisions.sort_by_key(|item| std::cmp::Reverse(item.revision));
     Ok(revisions)
 }
 
@@ -4761,7 +4847,7 @@ fn put_attachment(
     }
     let filename = validate_attachment_filename(filename)?;
     let mime = validate_attachment_mime(mime)?;
-    let id = attachment_id(session.key.as_ref(), data)?;
+    let id = attachment_id(session.attachment_id_key.as_ref(), data)?;
     let manifest_path = attachment_manifest_path(&session.root_dir, &id)?;
     if manifest_path.is_file() {
         return read_attachment_manifest(session, &id);
@@ -4823,7 +4909,9 @@ fn get_attachment(session: &VaultSession, id: &str) -> Result<(AttachmentInfo, V
             &attachment_chunk_aad(id, index),
         )?);
     }
-    if data.len() != info.size || attachment_id(session.key.as_ref(), &data)? != info.id {
+    if data.len() != info.size
+        || attachment_id(session.attachment_id_key.as_ref(), &data)? != info.id
+    {
         return Err("attachment integrity check failed".into());
     }
     Ok((info, data))
@@ -5307,8 +5395,10 @@ fn sync_verify_registry(state: State<'_, AppState>) -> Result<bool, String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
+            pick_vault_directory,
             unlock_vault,
             lock_vault,
             list_notes,
@@ -5361,7 +5451,7 @@ pub fn run() {
             sync_verify_registry,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running SecondBrain Vault");
+        .expect("error while running Vault Brain");
 }
 
 #[cfg(test)]
@@ -5369,7 +5459,7 @@ mod tests {
     use super::*;
 
     fn temporary_vault(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("secondbrain-{label}-{}", Uuid::new_v4()))
+        std::env::temp_dir().join(format!("vault-brain-{label}-{}", Uuid::new_v4()))
     }
 
     #[test]
@@ -5432,6 +5522,76 @@ mod tests {
         drop(first);
         assert!(open_session(&path_text, "wrong passphrase").is_err());
         assert!(open_session(&path_text, "correct horse battery staple").is_ok());
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn a_fresh_vault_is_created_keyring_native() {
+        let path = temporary_vault("keyring-native");
+        let path_text = path.to_string_lossy().into_owned();
+        let session = open_session(&path_text, "correct horse battery staple").unwrap();
+        let vault_dir = session.vault_dir.clone();
+        drop(session);
+
+        assert!(vault_dir.join("keyring.json").exists());
+        assert_eq!(
+            fs::read_to_string(vault_dir.join("documents").join("manifest.json")).unwrap(),
+            "{\n  \"version\": 2,\n  \"keyring\": true\n}\n"
+        );
+        // The keyring on disk is the one that opens: no cached key material here.
+        assert!(open_session(&path_text, "correct horse battery staple").is_ok());
+        assert!(open_session(&path_text, "wrong passphrase").is_err());
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn a_keyring_vault_missing_its_keyring_explains_itself() {
+        let path = temporary_vault("keyring-lost");
+        let path_text = path.to_string_lossy().into_owned();
+        let session = open_session(&path_text, "correct horse battery staple").unwrap();
+        let vault_dir = session.vault_dir.clone();
+        drop(session);
+        fs::remove_file(vault_dir.join("keyring.json")).unwrap();
+
+        // Not `unwrap_err()`: that would need `VaultSession: Debug`, and a
+        // session holds two live key buffers that must never be printable.
+        let error = match open_session(&path_text, "correct horse battery staple") {
+            Ok(_) => panic!("a vault whose keyring is gone must not open"),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains("upgraded to a keyring"),
+            "unhelpful refusal: {error}"
+        );
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn a_legacy_key_value_vault_does_not_gain_a_keyring() {
+        let path = temporary_vault("legacy-kv");
+        fs::create_dir_all(&path).unwrap();
+        // What a pre-keyring release leaves behind for a key-value-only vault.
+        fs::write(path.join("health.kv.enc"), "{}").unwrap();
+        fs::write(
+            path.join("audit.meta.json"),
+            "{\"version\":1,\"salt\":\"AAAAAAAAAAAAAAAAAAAAAA==\"}",
+        )
+        .unwrap();
+        let path_text = path.to_string_lossy().into_owned();
+
+        let session = open_session(&path_text, "correct horse battery staple").unwrap();
+        let vault_dir = session.vault_dir.clone();
+        drop(session);
+
+        assert!(
+            !vault_dir.join("keyring.json").exists(),
+            "a keyring beside a legacy audit chain would orphan it"
+        );
+        let manifest: Manifest = serde_json::from_slice(
+            &fs::read(vault_dir.join("documents").join("manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest.version, 1);
         fs::remove_dir_all(path).unwrap();
     }
 
@@ -6049,7 +6209,7 @@ mod tests {
         let path = temporary_vault("plugin");
         let path_text = path.to_string_lossy().into_owned();
         let mut session = open_session(&path_text, "plugin passphrase").unwrap();
-        let source = "sbrain.ui.panel('Words', '12');".to_string();
+        let source = "vbrain.ui.panel('Words', '12');".to_string();
 
         let installed = with_vault_write(&mut session, |session| {
             install_plugin_in(
@@ -6629,6 +6789,15 @@ mod tests {
         }
     }
 
+    fn fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("test")
+            .join("fixtures")
+            .join(name)
+    }
+
     #[test]
     fn attachments_deduplicate_by_content_and_chunk_at_one_mebibyte() {
         let (path, session) = attachment_session("attachment-round-trip");
@@ -6917,7 +7086,7 @@ mod tests {
         // Content addressing only works if both cores derive the same ID, so
         // recompute it here rather than trusting the directory name.
         assert_eq!(
-            attachment_id(session.key.as_ref(), &binary).unwrap(),
+            attachment_id(session.attachment_id_key.as_ref(), &binary).unwrap(),
             binary_info.id
         );
 

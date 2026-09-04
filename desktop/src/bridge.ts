@@ -138,6 +138,16 @@ function demoAttachmentId(data: string): string {
 }
 
 export const vaultBridge = {
+  /**
+   * The native folder chooser lives in the Rust core, so the webview never
+   * reads a directory itself — it receives one path the person picked. Demo
+   * mode has no operating system behind it and answers with a sample path.
+   */
+  async pickVaultDirectory(): Promise<string | null> {
+    if (isTauri) return call<string | null>("pick_vault_directory");
+    await new Promise((resolve) => setTimeout(resolve, 240));
+    return "C:/Users/you/Vaults/Demo";
+  },
   async unlock(path: string, passphrase: string): Promise<VaultInfo> {
     if (isTauri) return call<VaultInfo>("unlock_vault", { vaultPath: path, passphrase });
     await new Promise((resolve) => setTimeout(resolve, 520));

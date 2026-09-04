@@ -25,7 +25,7 @@ const FIXTURE_PASSPHRASE = "fixture-only-passphrase";
 const PASSPHRASE = "durability-test-passphrase";
 
 function tempDir(label = "durability") {
-  return fs.mkdtempSync(path.join(os.tmpdir(), `secondbrain-${label}-`));
+  return fs.mkdtempSync(path.join(os.tmpdir(), `vault-brain-${label}-`));
 }
 
 function copyFixture(name) {
@@ -55,7 +55,7 @@ test("the current envelope records its version and authenticates its own paramet
   assert.throws(() => decrypt({ ...payload, version: 9 }, PASSPHRASE), /envelope version 9/u);
   assert.throws(
     () => decrypt({ ...payload, kdf: { ...payload.kdf, N: 2 ** 24 } }, PASSPHRASE),
-    /unacceptable scrypt cost/u
+    /unacceptable scrypt cost/u,
   );
   assert.throws(() => decrypt(payload, "wrong passphrase"));
 });
@@ -77,7 +77,7 @@ test("a pre-versioning vault file still opens and migrates in place", () => {
   assert.equal(migrateVault(vaultDir, FIXTURE_PASSPHRASE)[0].migrated, false);
   assert.equal(
     envelopeVersion(JSON.parse(fs.readFileSync(path.join(vaultDir, "health.kv.enc"), "utf8"))),
-    ENVELOPE_VERSION
+    ENVELOPE_VERSION,
   );
 });
 
@@ -92,7 +92,10 @@ test("a checked-in document vault from the current format still opens and resolv
 
   const target = vault.get("Atlas/Second note");
   const backlinks = vault.backlinks(target.id);
-  assert.deepEqual(backlinks.map((note) => note.title), ["Format contract"]);
+  assert.deepEqual(
+    backlinks.map((note) => note.title),
+    ["Format contract"],
+  );
   assert.throws(() => new DocumentVault(vaultDir, "wrong passphrase"), /wrong passphrase/u);
 });
 
@@ -106,7 +109,32 @@ test("a checked-in canvas vault keeps encrypted boards and stable references rea
   const document = vault.getCanvas(canvas.id);
   const note = vault.get("Atlas/Canvas contract");
   assert.equal(document.nodes[0].noteId, note.id);
-  assert.deepEqual(vault.canvasesReferencing(note.id).map((item) => item.id), [canvas.id]);
+  assert.deepEqual(
+    vault.canvasesReferencing(note.id).map((item) => item.id),
+    [canvas.id],
+  );
+});
+
+test("a checked-in attachment vault keeps legacy content-addressed files readable", () => {
+  const vaultDir = copyFixture("documents-attachments-v1");
+  const vault = new DocumentVault(vaultDir, FIXTURE_PASSPHRASE);
+
+  const attachments = vault.listAttachments();
+  assert.deepEqual(
+    attachments.map((attachment) => [attachment.filename, attachment.mime]),
+    [
+      ["frozen-note.txt", "text/plain"],
+      ["frozen-payload.bin", "application/octet-stream"],
+    ],
+  );
+  assert.equal(
+    vault.getAttachment(attachments[0].id).data.toString("utf8"),
+    "This attachment was written by the TypeScript core and must stay readable.\n",
+  );
+  assert.deepEqual(
+    vault.getAttachment(attachments[1].id).data,
+    Buffer.from(Array.from({ length: 4096 }, (_, index) => index % 256)),
+  );
 });
 
 test("an interrupted write is replayed from its journal on the next unlock", () => {
@@ -130,7 +158,7 @@ test("an interrupted write is replayed from its journal on the next unlock", () 
   fs.copyFileSync(objectPath(live, alpha.id), objectPath(stale, alpha.id));
   fs.writeFileSync(
     journalPath(crashed),
-    JSON.stringify({ version: 1, startedAt: new Date().toISOString(), scope: "notes", ids: [alpha.id] })
+    JSON.stringify({ version: 1, startedAt: new Date().toISOString(), scope: "notes", ids: [alpha.id] }),
   );
 
   // Without the journal the index stays stale — which is what it is there for.
@@ -144,7 +172,7 @@ test("an interrupted write is replayed from its journal on the next unlock", () 
   assert.equal(recovered.list().length, 2);
   assert.deepEqual(
     recovered.backlinks(recovered.get("Notes/Beta").id).map((note) => note.title),
-    ["Alpha"]
+    ["Alpha"],
   );
 });
 
@@ -157,24 +185,33 @@ test("recovery drops a note whose object never landed, and rebuilds after a bulk
   fs.rmSync(objectPath(vaultDir, ghost.id));
   fs.writeFileSync(
     journalPath(vaultDir),
-    JSON.stringify({ version: 1, startedAt: new Date().toISOString(), scope: "notes", ids: [ghost.id] })
+    JSON.stringify({ version: 1, startedAt: new Date().toISOString(), scope: "notes", ids: [ghost.id] }),
   );
   const repaired = new DocumentVault(vaultDir, PASSPHRASE);
-  assert.deepEqual(repaired.list().map((note) => note.title), ["Real"]);
+  assert.deepEqual(
+    repaired.list().map((note) => note.title),
+    ["Real"],
+  );
   assert.equal(fs.existsSync(journalPath(vaultDir)), false);
 
   // A bulk transaction cannot name its notes up front, so it rebuilds instead.
   fs.writeFileSync(
     journalPath(vaultDir),
-    JSON.stringify({ version: 1, startedAt: new Date().toISOString(), scope: "bulk", ids: [] })
+    JSON.stringify({ version: 1, startedAt: new Date().toISOString(), scope: "bulk", ids: [] }),
   );
   const rebuilt = new DocumentVault(vaultDir, PASSPHRASE);
-  assert.deepEqual(rebuilt.list().map((note) => note.title), ["Real"]);
+  assert.deepEqual(
+    rebuilt.list().map((note) => note.title),
+    ["Real"],
+  );
   assert.equal(fs.existsSync(journalPath(vaultDir)), false);
 
   // A missing index is rebuilt from the objects alone.
   fs.rmSync(path.join(vaultDir, "documents", "index.enc"));
-  assert.deepEqual(new DocumentVault(vaultDir, PASSPHRASE).list().map((note) => note.title), ["Real"]);
+  assert.deepEqual(
+    new DocumentVault(vaultDir, PASSPHRASE).list().map((note) => note.title),
+    ["Real"],
+  );
 });
 
 test("a second writer is refused while a live lock is held, and reclaims a stale one", () => {
@@ -190,7 +227,7 @@ test("a second writer is refused while a live lock is held, and reclaims a stale
   assert.equal(lockHolder(vaultDir).pid, 999_999);
   assert.throws(
     () => vault.put({ path: "Notes/Second.md", body: "# Second" }),
-    (error) => error instanceof VaultBusyError && /being written by process 999999/u.test(error.message)
+    (error) => error instanceof VaultBusyError && /being written by process 999999/u.test(error.message),
   );
 
   fs.writeFileSync(
@@ -226,7 +263,7 @@ test("the vault lock is reentrant within one process and released afterwards", (
     withVaultLock(vaultDir, () => {
       assert.ok(lockHolder(vaultDir));
       return "inner";
-    })
+    }),
   );
   assert.equal(seen, "inner");
   assert.equal(lockHolder(vaultDir), undefined);
@@ -247,7 +284,10 @@ test("locking a session zeroizes the key and refuses further work", () => {
 
   // The data itself is untouched: a fresh session opens it normally.
   const reopened = new DocumentVault(vaultDir, PASSPHRASE);
-  assert.deepEqual(reopened.list().map((note) => note.title), ["Kept"]);
+  assert.deepEqual(
+    reopened.list().map((note) => note.title),
+    ["Kept"],
+  );
 });
 
 test("a remembered passphrase is scoped per vault and resolves ahead of the prompt", async () => {
@@ -269,19 +309,19 @@ test("a remembered passphrase is scoped per vault and resolves ahead of the prom
     assert.equal(recallPassphrase(first), "first-secret");
     assert.equal(recallPassphrase(second), undefined);
 
-    delete process.env.SBRAIN_PASSPHRASE;
+    delete process.env.VBRAIN_PASSPHRASE;
     assert.equal(await getPassphrase({ vaultDir: first }), "first-secret");
 
-    process.env.SBRAIN_PASSPHRASE = "environment-wins";
+    process.env.VBRAIN_PASSPHRASE = "environment-wins";
     assert.equal(await getPassphrase({ vaultDir: first }), "environment-wins");
-    delete process.env.SBRAIN_PASSPHRASE;
+    delete process.env.VBRAIN_PASSPHRASE;
 
     assert.equal(forgetPassphrase(first), true);
     assert.equal(forgetPassphrase(first), false);
     assert.equal(recallPassphrase(first), undefined);
   } finally {
     setKeychainBackend(undefined);
-    delete process.env.SBRAIN_PASSPHRASE;
+    delete process.env.VBRAIN_PASSPHRASE;
   }
 });
 
@@ -314,7 +354,7 @@ test("frontmatter keeps its comments, order and style through a round-trip", () 
   assert.ok(exported.indexOf("title:") < exported.indexOf("status:"), "original key order survives");
   assert.match(exported, /confidence: 0\.92/u);
   assert.ok(exported.endsWith("Body stays exactly as written."), "body is untouched");
-  assert.match(exported, /sbrain_id: /u);
+  assert.match(exported, /vbrain_id: /u);
 
   // Changing one property rewrites that entry and leaves the rest alone.
   const updated = vault.put({

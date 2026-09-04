@@ -1,8 +1,8 @@
-# SecondBrain Vault — Product Contract
+# Vault Brain — Product Contract
 
 ## Positioning
 
-SecondBrain Vault is a local-first knowledge workspace whose default promise is:
+Vault Brain is a local-first knowledge workspace whose default promise is:
 
 > Faster to recall. Safer to trust.
 
@@ -71,14 +71,14 @@ References:
 Performance budgets are measured after unlock on a reference 4-core laptop with
 100,000 medium notes:
 
-| Interaction | Target (p95) |
-|---|---:|
-| Open indexed note | < 50 ms |
-| Title/quick switch search | < 30 ms |
-| Full-text result first paint | < 100 ms |
-| Backlink query | < 50 ms |
-| Incremental save acknowledgement | < 20 ms |
-| Cold unlock to usable shell | < 2 s |
+| Interaction                      | Target (p95) |
+| -------------------------------- | -----------: |
+| Open indexed note                |      < 50 ms |
+| Title/quick switch search        |      < 30 ms |
+| Full-text result first paint     |     < 100 ms |
+| Backlink query                   |      < 50 ms |
+| Incremental save acknowledgement |      < 20 ms |
+| Cold unlock to usable shell      |        < 2 s |
 
 Security release gates:
 

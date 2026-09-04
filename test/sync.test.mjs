@@ -21,7 +21,7 @@ const DEVICE_B = "22222222-2222-4222-8222-222222222222";
 const DEVICE_C = "33333333-3333-4333-8333-333333333333";
 
 function tempVault(label) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), `secondbrain-sync-${label}-`));
+  return fs.mkdtempSync(path.join(os.tmpdir(), `vault-brain-sync-${label}-`));
 }
 
 function noteMutation(baseRevision, revision, body) {
@@ -42,6 +42,7 @@ test("canonical sync JSON and keyed change IDs are stable without leaking conten
   );
   const vaultDir = tempVault("canonical");
   const session = openDocumentKey(vaultDir, PASSPHRASE);
+  const keys = { syncChangeKey: session.syncChangeKey, syncEnvelopeKey: session.syncEnvelopeKey };
   const body = {
     version: 1,
     deviceId: DEVICE_A,
@@ -51,23 +52,26 @@ test("canonical sync JSON and keyed change IDs are stable without leaking conten
     createdAt: "2026-08-31T08:30:00.000Z",
     mutation: noteMutation(null, 1, "private body"),
   };
-  const first = sealSyncChange(body, session.key);
+  const first = sealSyncChange(body, keys);
   const second = sealSyncChange(
     { ...body, mutation: { ...body.mutation, value: { body: "private body", title: "Plan" } } },
-    session.key,
+    keys,
   );
   assert.equal(first.id, second.id, "object key order must not change identity");
   assert.notEqual(first.payload.iv, second.payload.iv, "every envelope gets a fresh nonce");
-  assert.deepEqual(openSyncChange(first, session.key).mutation.value, { body: "private body", title: "Plan" });
+  assert.deepEqual(openSyncChange(first, keys).mutation.value, { body: "private body", title: "Plan" });
   assert.doesNotMatch(JSON.stringify(first), /private body/u);
 
   const renamed = { ...first, id: `${first.id.slice(0, -1)}${first.id.endsWith("0") ? "1" : "0"}` };
-  assert.throws(() => openSyncChange(renamed, session.key));
+  assert.throws(() => openSyncChange(renamed, keys));
   assert.throws(
-    () => openSyncChange({ ...first, payload: { ...first.payload, iv: "not-base64" } }, session.key),
+    () => openSyncChange({ ...first, payload: { ...first.payload, iv: "not-base64" } }, keys),
     /malformed nonce/iu,
   );
   session.key.fill(0);
+  session.attachmentIdKey.fill(0);
+  session.syncChangeKey.fill(0);
+  session.syncEnvelopeKey.fill(0);
   fs.rmSync(vaultDir, { recursive: true, force: true });
 });
 
@@ -364,13 +368,16 @@ test("imports fail closed on device forks without writing a partial batch", () =
       createdAt: "2026-08-31T11:01:00.000Z",
       mutation: noteMutation(1, 2, "forked edit"),
     },
-    session.key,
+    { syncChangeKey: session.syncChangeKey, syncEnvelopeKey: session.syncEnvelopeKey },
   );
   log.append(DEVICE_A, noteMutation(1, 2, "real edit"), "2026-08-31T11:02:00.000Z");
   const before = log.envelopes().length;
   assert.throws(() => log.import([fork]), /fork/iu);
   assert.equal(log.envelopes().length, before);
   session.key.fill(0);
+  session.attachmentIdKey.fill(0);
+  session.syncChangeKey.fill(0);
+  session.syncEnvelopeKey.fill(0);
   log.close();
   fs.rmSync(vaultDir, { recursive: true, force: true });
 });
@@ -507,7 +514,10 @@ test("clean remote changes apply idempotently to the real vault storage", () => 
   assert.equal(target.applyResolved("attachment", attachment.id).applied, 1);
   assert.equal(target.get(note.id).body, "remote edit");
   assert.equal(target.getCanvas(canvas.id).nodes[0].text, "remote edit");
-  assert.equal(target.listAttachments().some((item) => item.id === attachment.id), false);
+  assert.equal(
+    target.listAttachments().some((item) => item.id === attachment.id),
+    false,
+  );
   assert.deepEqual(target.applyResolved("note", note.id), {
     objectType: "note",
     objectId: note.id,
@@ -539,7 +549,7 @@ test("unresolved remote conflicts never mutate live vault storage", () => {
   first.changeLog.import(second.changeLog.envelopes());
 
   assert.equal(first.changeLog.resolve("note", note.id).status, "conflict");
-  assert.throws(() => first.applyResolved("note", note.id), /unresolved sync heads/iu);
+  assert.equal(first.applyResolved("note", note.id).conflict, true);
   assert.equal(first.get(note.id).body, "from A");
 
   first.lock();

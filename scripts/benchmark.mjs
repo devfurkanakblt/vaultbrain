@@ -49,7 +49,7 @@ if (!Number.isSafeInteger(noteCount) || noteCount < 100 || noteCount > 100_000) 
 const budget = budgetFor(noteCount);
 const shouldAssert = process.argv.includes("--assert");
 const passphrase = "benchmark-only-passphrase";
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "secondbrain-benchmark-"));
+const root = fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-benchmark-"));
 const resolvedRoot = path.resolve(root);
 const resolvedTemp = path.resolve(os.tmpdir());
 if (!resolvedRoot.startsWith(`${resolvedTemp}${path.sep}`)) {
@@ -73,6 +73,12 @@ try {
   const created = writer.putMany(inputs);
   const bulkCreateMs = performance.now() - createStart;
 
+  // Lock before timing the unlock. Since new vaults are keyring-native, the
+  // writer's keyset stays in the process cache and would serve the next
+  // construction for free -- the unlock gate would then measure a cache hit
+  // rather than the KDF it exists to bound. lock() drops that cache.
+  writer.lock();
+
   const unlockStart = performance.now();
   const vault = new DocumentVault(root, passphrase);
   const unlockAndIndexMs = performance.now() - unlockStart;
@@ -93,10 +99,11 @@ try {
   const quickSwitch = measureMany(50, (index) => {
     const query = `note ${index % noteCount}`;
     const matches = summaries
-      .filter((note) =>
-        note.title.toLocaleLowerCase().includes(query) ||
-        note.path.toLocaleLowerCase().includes(query) ||
-        note.aliases.some((alias) => alias.toLocaleLowerCase().includes(query))
+      .filter(
+        (note) =>
+          note.title.toLocaleLowerCase().includes(query) ||
+          note.path.toLocaleLowerCase().includes(query) ||
+          note.aliases.some((alias) => alias.toLocaleLowerCase().includes(query)),
       )
       .slice(0, 50);
     assert.ok(matches.length > 0);

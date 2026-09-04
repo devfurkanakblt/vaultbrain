@@ -40,6 +40,7 @@ The target vault is versioned and self-describing:
 ```text
 vault/
   manifest.json              # format/KDF versions; no content
+  keyring.json               # wrapped keyset; every new and migrated vault; lost keyring loses vault
   objects/                   # encrypted notes and attachments
   index.db.enc               # encrypted derived search/link index
   views.enc                  # encrypted saved property queries
@@ -117,8 +118,17 @@ The link index is updated in the same logical transaction as a note revision:
 
 ## Cryptographic model
 
-- A memory-hard KDF derives a wrapping key from the passphrase.
-- Random data-encryption keys are wrapped by the wrapping key.
+- `keyring.json` holds the passphrase-wrapped keyset. A memory-hard KDF
+  (scrypt, N=2^17) derives a wrapping key from the passphrase; the wrapping key
+  unwraps six independent 32-byte data keys: `documents`, `kv`, `attachmentId`,
+  `syncChange`, `syncEnvelope` and `audit`. No data key is derived from the
+  passphrase, which is what makes changing the passphrase cheap and re-keying
+  possible. Both the TypeScript and Rust cores read this file; only the
+  TypeScript core migrates a legacy vault into it. See
+  `docs/superpowers/specs/2026-09-03-vault-keyring-design.md` for the full key
+  hierarchy and wire format. A passphrase change re-wraps the keyset in place:
+  the slot gets a fresh salt at the current cost, the keys inside it do not
+  move, and no object is rewritten.
 - Notes and attachment chunks use an authenticated encryption mode with unique nonces.
 - Key rotation re-wraps data keys instead of rewriting every object.
 - Session keys are kept only in the privileged core and zeroized on lock.
@@ -129,16 +139,21 @@ The existing AES-256-GCM/scrypt implementation remains supported while a version
 envelope and migration path are introduced. Cryptographic changes require test
 vectors and review; custom primitives are forbidden.
 
+The `secondbrain-vault:*` associated-data and signature namespaces are canonical
+storage/protocol identifiers. Changing one requires an intentional format reset
+or version bump because it invalidates encrypted records, sync changes and
+signed plugins created with that identifier.
+
 ## Trust boundaries
 
-| Principal | Default access |
-|---|---|
+| Principal       | Default access                                                  |
+| --------------- | --------------------------------------------------------------- |
 | Desktop webview | Rendered active-note data only; no raw filesystem or key access |
-| CLI direct mode | Explicit user-requested operation |
-| MCP agent | Catalog discovery only; content requires a scoped grant |
-| Plugin | No capabilities until declared and approved |
-| Sync server | Ciphertext, opaque object IDs and minimal routing metadata |
-| Exporter | Selected decrypted notes for a user-confirmed destination |
+| CLI direct mode | Explicit user-requested operation                               |
+| MCP agent       | Catalog discovery only; content requires a scoped grant         |
+| Plugin          | No capabilities until declared and approved                     |
+| Sync server     | Ciphertext, opaque object IDs and minimal routing metadata      |
+| Exporter        | Selected decrypted notes for a user-confirmed destination       |
 
 ## Performance strategy
 
@@ -225,14 +240,14 @@ layout on the next write.
 Development machine, one run, after the work above. Budgets are from
 `docs/PRODUCT.md`; every figure is p95 unless noted.
 
-| Interaction | Budget | 10,000 notes | 100,000 notes |
-|---|---:|---:|---:|
-| Cold unlock to usable index | < 2,000 ms | 77 ms | 97 ms |
-| Quick switch over titles/aliases | < 30 ms | 1.2 ms | 22.0 ms |
-| Full-text query (selective) | < 100 ms | 5.7 ms | 20.3 ms |
-| Full-text query matching every note | < 100 ms | 9.3 ms | 74.5 ms |
-| Open an indexed note | < 50 ms | 0.3 ms | 0.3 ms |
-| Backlink query | < 50 ms | 0.01 ms | 0.01 ms |
+| Interaction                         |     Budget | 10,000 notes | 100,000 notes |
+| ----------------------------------- | ---------: | -----------: | ------------: |
+| Cold unlock to usable index         | < 2,000 ms |        77 ms |         97 ms |
+| Quick switch over titles/aliases    |    < 30 ms |       1.2 ms |       22.0 ms |
+| Full-text query (selective)         |   < 100 ms |       5.7 ms |       20.3 ms |
+| Full-text query matching every note |   < 100 ms |       9.3 ms |       74.5 ms |
+| Open an indexed note                |    < 50 ms |       0.3 ms |        0.3 ms |
+| Backlink query                      |    < 50 ms |      0.01 ms |       0.01 ms |
 
 Two numbers are reported rather than gated, because hiding them would be
 misleading:
@@ -357,7 +372,7 @@ longer exists. Three mechanisms keep that from becoming data loss:
   recovery. A bulk import cannot name its notes up front, so it journals its
   scope instead and recovery does a full rebuild.
 - **An advisory vault lock.** `.sbrain.lock` serializes writers between
-  secondbrain-vault processes, is reentrant within one process, and is
+  Vault Brain processes, is reentrant within one process, and is
   reclaimed when the recorded holder has gone stale, so a crashed session
   cannot wedge a vault permanently. It does not defend against someone editing
   the files by hand — nothing advisory can.
@@ -397,7 +412,7 @@ Three layers, in increasing order of how much they are trusted:
    install a plugin whose reach cannot be described to the person approving it.
 2. **The worker sandbox.** The plugin runs in a Worker with `fetch`,
    `XMLHttpRequest`, `WebSocket`, `importScripts`, `indexedDB` and friends
-   removed before its first line. It is *loaded* as a worker script rather than
+   removed before its first line. It is _loaded_ as a worker script rather than
    evaluated from a string — which is why the app's CSP gains only
    `worker-src blob:` and never `'unsafe-eval'`. The host checks each call
    against the shared capability table and refuses an unlisted method, so a host
@@ -470,7 +485,7 @@ field; a value it cannot classify is masked anyway rather than passed through.
 `full` returns a description of the value's shape and none of its characters.
 
 What this is not: a boundary. A redacted value still crosses into the calling
-model's context as a redacted value, and `SBRAIN_AGENT` is a name the agent
+model's context as a redacted value, and `VBRAIN_AGENT` is a name the agent
 chooses, not a credential — anything that can start the server can pick any
 name. The security boundary remains the passphrase and the encrypted files, and
 Mode 1 remains the only path that involves no model at all.
@@ -483,8 +498,8 @@ byte-for-byte as it did and keeps verifying.
 Unlocking is an explicit lifecycle in the core, not only in the desktop shell.
 `DocumentVault.lock()` overwrites the derived key in place and drops the
 decrypted index; every later operation on that session fails until a new one is
-opened with the passphrase. The CLI mirrors it: `sbrain unlock --remember`
-places the passphrase in the OS credential store, `sbrain lock` removes it.
+opened with the passphrase. The CLI mirrors it: `vbrain unlock --remember`
+places the passphrase in the OS credential store, `vbrain lock` removes it.
 
 The credential backends are Windows DPAPI (through PowerShell, with the secret
 crossing on stdin rather than argv), macOS Keychain via `security`, and
@@ -558,7 +573,7 @@ same `lock_vault` command the button calls, but a webview whose clipboard read
 permission is denied cannot verify ownership, and in that case the copied value
 simply stays where the operating system put it.
 
-Windowing bounds what the *interface* costs, not what the core costs: the tree
+Windowing bounds what the _interface_ costs, not what the core costs: the tree
 and property view now render a viewport's worth of rows out of any number, but
 the unlock, search and index budgets are still only enforced against the 1,000-
 note benchmark corpus. The 10k/100k index gates and large-graph virtualization

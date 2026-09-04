@@ -13,7 +13,20 @@ import { loadVaultFile, saveVaultFile, upsertEntry, vaultFilePath } from "../dis
 const PASSPHRASE = "correct horse battery staple";
 
 function tempVault() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "secondbrain-vault-test-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-test-"));
+}
+
+/**
+ * What a pre-keyring release left in a vault directory. Writing it is what
+ * makes this a legacy vault: since phase 7.2 the ordinary write paths create a
+ * keyring on a directory holding no legacy material, so a test that needs the
+ * pre-keyring format has to say so. `schema.json` is the inert marker — no
+ * code path reads its contents, so seeding it changes the vault's format and
+ * nothing else.
+ */
+function seedLegacyVault(vaultDir) {
+  fs.mkdirSync(vaultDir, { recursive: true });
+  fs.writeFileSync(path.join(vaultDir, "schema.json"), '{"version":1,"files":{}}\n');
 }
 
 test("KV format round-trips quotes, backslashes and newlines", () => {
@@ -21,7 +34,7 @@ test("KV format round-trips quotes, backslashes and newlines", () => {
     {
       key: "MULTILINE_NOTE",
       desc: "safe tag",
-      value: "first line\nsecond = line with \\\"quotes\\\" and C:\\\\notes",
+      value: 'first line\nsecond = line with \\"quotes\\" and C:\\\\notes',
     },
   ];
   assert.deepEqual(parseKV(serializeKV(entries)), entries);
@@ -62,7 +75,10 @@ test("encrypted storage writes atomically and schema never contains values", () 
   assert.equal(onDisk.includes("BLOOD_TYPE"), false, "key names are encrypted at rest too");
   assert.equal(fs.existsSync(path.join(vault, "schema.json")), false);
   assert.equal(schema.files.health.length, 2);
-  assert.deepEqual(fs.readdirSync(vault).filter((name) => name.endsWith(".tmp")), []);
+  assert.deepEqual(
+    fs.readdirSync(vault).filter((name) => name.endsWith(".tmp")),
+    [],
+  );
 });
 
 test("date-only upper bounds include the complete UTC day", () => {
@@ -82,6 +98,7 @@ test("date-only upper bounds include the complete UTC day", () => {
 
 test("audit entries form a passphrase-authenticated chain", () => {
   const vault = tempVault();
+  seedLegacyVault(vault);
   saveVaultFile(vault, "health", [], PASSPHRASE);
   appendAudit(vault, { actor: "cli-direct-write", file: "health", key: "BLOOD_TYPE" }, PASSPHRASE);
   appendAudit(vault, { actor: "cli-direct", file: "health", key: "BLOOD_TYPE" }, PASSPHRASE);

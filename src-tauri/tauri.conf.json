@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "SecondBrain Vault",
+  "productName": "Vault Brain",
   "version": "0.2.0",
-  "identifier": "dev.secondbrain.vault",
+  "identifier": "dev.vaultbrain.desktop",
   "build": {
     "beforeDevCommand": "npm run desktop:dev",
     "devUrl": "http://127.0.0.1:1420",
@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "SecondBrain Vault",
+        "title": "Vault Brain",
         "width": 1380,
         "height": 880,
         "minWidth": 760,

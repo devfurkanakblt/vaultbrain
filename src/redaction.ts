@@ -4,7 +4,7 @@
  * It is a reduction in exposure, not a guarantee: under the current MCP spec a
  * tool result flows into the calling model's context, so the honest claim is
  * "the model saw a masked value", never "the model cannot know the value".
- * Anything that must never reach a model belongs behind `sbrain get` (Mode 1),
+ * Anything that must never reach a model belongs behind `vbrain get` (Mode 1),
  * which invokes no model at all.
  */
 
@@ -61,9 +61,7 @@ export function describeValue(value: string): string {
   const shape = detector ? detector.label : "a stored value";
   const lines = value.split(/\r?\n/u).length;
   const size = `${value.length} character${value.length === 1 ? "" : "s"}`;
-  return lines > 1
-    ? `[redacted: ${shape}, ${size} across ${lines} lines]`
-    : `[redacted: ${shape}, ${size}]`;
+  return lines > 1 ? `[redacted: ${shape}, ${size} across ${lines} lines]` : `[redacted: ${shape}, ${size}]`;
 }
 
 /**
@@ -76,9 +74,8 @@ export function redactValue(value: string, level: RedactionLevel): string {
   if (level === "full") return describeValue(value);
   let masked = value;
   for (const detector of DETECTORS) {
-    masked = masked.replace(
-      new RegExp(detector.pattern.source, detector.pattern.flags),
-      (surface) => maskRun(surface, detector.keep)
+    masked = masked.replace(new RegExp(detector.pattern.source, detector.pattern.flags), (surface) =>
+      maskRun(surface, detector.keep),
     );
   }
   return masked === value ? maskRun(value, Math.min(4, Math.max(0, value.length - 1))) : masked;

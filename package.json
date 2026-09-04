@@ -1,5 +1,5 @@
 {
-  "name": "secondbrain-vault",
+  "name": "vault-brain",
   "version": "0.2.0",
   "description": "A fast, local-first encrypted Markdown knowledge engine with controlled AI access, backlinks, history, attachments, templates, and portable YAML frontmatter.",
   "repository": {
@@ -20,7 +20,7 @@
     "node": ">=20"
   },
   "bin": {
-    "sbrain": "./dist/cli.js"
+    "vbrain": "./dist/cli.js"
   },
   "scripts": {
     "build": "tsc -p .",

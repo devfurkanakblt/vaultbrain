@@ -10,7 +10,7 @@ import { OllamaLocalModelAdapter } from "../dist/semantic.js";
 const PASSPHRASE = "semantic-search-test-passphrase";
 
 function tempVault() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "secondbrain-semantic-test-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-semantic-test-"));
 }
 
 class TopicEmbeddingAdapter {
@@ -44,10 +44,16 @@ test("semantic recall is opt-in, revision-aware, and keeps its index in the unlo
   const first = await vault.semanticSearch("automobile repair", adapter, { limit: 1, minScore: 0.5 });
   assert.equal(first[0].id, vehicle.id);
   assert.ok(first[0].score > 0.99);
-  assert.deepEqual(adapter.calls.map((call) => call.length), [2, 1]);
+  assert.deepEqual(
+    adapter.calls.map((call) => call.length),
+    [2, 1],
+  );
 
   await vault.semanticSearch("car mechanic", adapter, { limit: 1 });
-  assert.deepEqual(adapter.calls.map((call) => call.length), [2, 1, 1]);
+  assert.deepEqual(
+    adapter.calls.map((call) => call.length),
+    [2, 1, 1],
+  );
 
   vault.put({
     id: vehicle.id,
@@ -55,7 +61,10 @@ test("semantic recall is opt-in, revision-aware, and keeps its index in the unlo
     body: "Updated engine maintenance guidance from a trusted mechanic.",
   });
   await vault.semanticSearch("vehicle repair", adapter, { limit: 1 });
-  assert.deepEqual(adapter.calls.map((call) => call.length), [2, 1, 1, 1, 1]);
+  assert.deepEqual(
+    adapter.calls.map((call) => call.length),
+    [2, 1, 1, 1, 1],
+  );
 
   vault.lock();
   await assert.rejects(() => vault.semanticSearch("vehicle repair", adapter), /locked/iu);
@@ -66,8 +75,12 @@ test("locking during an embedding request suppresses results and clears the sess
   vault.put({ path: "Private", body: "A private engine maintenance record." });
   let release;
   let started;
-  const startedPromise = new Promise((resolve) => { started = resolve; });
-  const releasePromise = new Promise((resolve) => { release = resolve; });
+  const startedPromise = new Promise((resolve) => {
+    started = resolve;
+  });
+  const releasePromise = new Promise((resolve) => {
+    release = resolve;
+  });
   const adapter = {
     id: "test:delayed:v1",
     async embed(input) {
@@ -89,11 +102,11 @@ test("locking during an embedding request suppresses results and clears the sess
 test("Ollama adapter permits only loopback, refuses redirects, and validates both APIs", async () => {
   assert.throws(
     () => new OllamaLocalModelAdapter({ model: "embed", baseUrl: "https://models.example.com" }),
-    /literal loopback host/iu
+    /literal loopback host/iu,
   );
   assert.throws(
     () => new OllamaLocalModelAdapter({ model: "embed", baseUrl: "http://127.0.0.1.example.com" }),
-    /literal loopback host/iu
+    /literal loopback host/iu,
   );
 
   const calls = [];
@@ -133,7 +146,7 @@ test("semantic search rejects malformed model vectors instead of returning misle
   vault.put({ path: "Two", body: "More content" });
   const inconsistent = {
     id: "test:inconsistent",
-    embed: async (input) => input.map((_, index) => index === 0 ? [1, 0] : [1, 0, 0]),
+    embed: async (input) => input.map((_, index) => (index === 0 ? [1, 0] : [1, 0, 0])),
   };
   await assert.rejects(() => vault.semanticSearch("content", inconsistent), /embedding dimensions/iu);
 });

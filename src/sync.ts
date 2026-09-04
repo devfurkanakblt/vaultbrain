@@ -217,6 +217,9 @@ export interface SyncApplyResult {
   revision: number;
   applied: number;
   alreadyApplied: boolean;
+  /** Present only when unresolved remote heads left live storage untouched. */
+  conflict?: true;
+  heads?: string[];
 }
 
 interface NoteSyncSnapshot {
@@ -1659,11 +1662,10 @@ function noteSnapshot(note: NoteDocument): NoteSyncSnapshot {
   const snapshot: NoteSyncSnapshot = {
     path: note.path,
     title: note.title,
-    body: note.body,
     aliases: note.aliases,
     tags: note.tags,
-    properties: note.properties,
-    createdAt: note.createdAt,
+    updatedAt: note.updatedAt,
+    revision: note.revision,
   };
   if (note.frontmatterSource !== undefined) snapshot.frontmatterSource = note.frontmatterSource;
   return structuredClone(snapshot);
@@ -2160,23 +2162,46 @@ export class SyncChangeLog {
  */
 export class SyncedDocumentVault extends DocumentVault {
   readonly changeLog: SyncChangeLog;
+  private readonly localTransaction: SyncLocalTransaction;
+  private readonly applyEngine: SyncApplyEngine;
   private syncClosed = false;
 
   constructor(
     private readonly syncVaultDir: string,
     passphrase: string,
     private readonly deviceId?: string,
+    transactionOptions: SyncTransactionOptions = {},
   ) {
-    super(syncVaultDir, passphrase);
-    if (deviceId !== undefined && !DEVICE_ID.test(deviceId)) {
+    super(syncVaultDir, validateOptionalDeviceId(passphrase, deviceId));
+    const changeLog = new SyncChangeLog(syncVaultDir, passphrase);
+    let localTransaction: SyncLocalTransaction | undefined;
+    let applyEngine: SyncApplyEngine | undefined;
+    try {
+      localTransaction = new SyncLocalTransaction(syncVaultDir, passphrase, transactionOptions);
+      applyEngine = new SyncApplyEngine(new SyncApplyReceiptStore(syncVaultDir, passphrase, transactionOptions));
+      this.changeLog = changeLog;
+      this.localTransaction = localTransaction;
+      this.applyEngine = applyEngine;
+      withVaultLock(this.syncVaultDir, () => {
+        this.localTransaction.recover(this.transactionEffects());
+        this.applyEngine.recover(this.applyEffects());
+      });
+      // Unlock materializes/reconciles the ordinary document index once. A
+      // later rejected local preflight can then remain byte-for-byte read-only.
+      super.list();
+    } catch (error) {
+      applyEngine?.close();
+      localTransaction?.close();
+      changeLog.close();
       super.lock();
-      throw new Error("Sync device ID must be a lowercase UUID.");
+      throw error;
     }
-    this.changeLog = new SyncChangeLog(syncVaultDir, passphrase);
   }
 
   override lock(): void {
     if (!this.syncClosed) {
+      this.applyEngine.close();
+      this.localTransaction.close();
       this.changeLog.close();
       this.syncClosed = true;
     }
@@ -2222,29 +2247,113 @@ export class SyncedDocumentVault extends DocumentVault {
     objectId: string,
     operation: SyncOperation,
     value: SyncJson,
-  ): SyncChange {
-    const resolution = this.changeLog.resolve(objectType, objectId);
-    const baseRevision = resolution.winner?.mutation.revision ?? null;
-    const change = this.changeLog.append(this.localDeviceId(), {
-      objectType,
-      objectId,
-      operation,
-      baseRevision,
-      revision: (baseRevision ?? 0) + 1,
-      value,
-    });
-    this.changeLog.markApplied(change);
-    return change;
+  ): boolean {
+    return operations
+      .slice(index + 1)
+      .some(
+        (candidate) =>
+          candidate.objectType === operations[index].objectType &&
+          candidate.objectId === operations[index].objectId &&
+          candidate.operation === "put" &&
+          candidate.targetStorageRevision === revision &&
+          sameSyncValue(candidate.targetValue, value),
+      );
   }
 
-  private ensureNoteBaseline(note: NoteDocument): void {
-    if (this.changeLog.resolve("note", note.id).status !== "missing") return;
-    this.appendLocal("note", note.id, "put", asSyncJson(noteSnapshot(note)));
+  private assertExpectedDocumentState(
+    operation: SyncLocalStorageOperation,
+    currentRevision: number | null,
+    currentValue: SyncJson,
+  ): void {
+    if (currentRevision !== operation.beforeStorageRevision || !sameSyncValue(currentValue, operation.beforeValue)) {
+      throw new Error(`Live ${operation.objectType} state does not match its pending sync transaction.`);
+    }
   }
 
-  private ensureCanvasBaseline(canvas: CanvasDocument): void {
-    if (this.changeLog.resolve("canvas", canvas.id).status !== "missing") return;
-    this.appendLocal("canvas", canvas.id, "put", asSyncJson(canvasSnapshot(canvas)));
+  private writeLocalStorage(operations: readonly SyncLocalStorageOperation[]): void {
+    for (let index = 0; index < operations.length; index += 1) {
+      const operation = operations[index];
+      if (operation.objectType === "note") {
+        const current = this.tryNote(operation.objectId);
+        const currentValue = current ? asSyncJson(noteSnapshot(current)) : null;
+        if (operation.operation === "delete") {
+          if (!current) continue;
+          this.assertExpectedDocumentState(operation, current.revision, currentValue);
+          super.remove(operation.objectId);
+          continue;
+        }
+        if (
+          current &&
+          current.revision === operation.targetStorageRevision &&
+          sameSyncValue(currentValue, operation.targetValue)
+        ) {
+          continue;
+        }
+        if (current && this.laterDocumentTargetMatches(operations, index, current.revision, currentValue)) continue;
+        this.assertExpectedDocumentState(operation, current?.revision ?? null, currentValue);
+        const snapshot = parseNoteSnapshot(operation.targetValue);
+        const written = super.put({
+          id: operation.objectId,
+          ...snapshot,
+          baseRevision: (operation.targetStorageRevision ?? 1) - 1,
+        });
+        if (
+          written.revision !== operation.targetStorageRevision ||
+          !sameSyncValue(asSyncJson(noteSnapshot(written)), operation.targetValue)
+        ) {
+          throw new Error("A prepared note write did not materialize its intended state.");
+        }
+        continue;
+      }
+      if (operation.objectType === "canvas") {
+        const current = this.tryCanvas(operation.objectId);
+        const currentValue = current ? asSyncJson(canvasSnapshot(current)) : null;
+        if (operation.operation === "delete") {
+          if (!current) continue;
+          this.assertExpectedDocumentState(operation, current.revision, currentValue);
+          super.removeCanvas(operation.objectId);
+          continue;
+        }
+        if (
+          current &&
+          current.revision === operation.targetStorageRevision &&
+          sameSyncValue(currentValue, operation.targetValue)
+        ) {
+          continue;
+        }
+        if (current && this.laterDocumentTargetMatches(operations, index, current.revision, currentValue)) continue;
+        this.assertExpectedDocumentState(operation, current?.revision ?? null, currentValue);
+        const snapshot = parseCanvasSnapshot(operation.targetValue);
+        const written = super.putCanvas({
+          id: operation.objectId,
+          ...snapshot,
+          baseRevision: (operation.targetStorageRevision ?? 1) - 1,
+        });
+        if (
+          written.revision !== operation.targetStorageRevision ||
+          !sameSyncValue(asSyncJson(canvasSnapshot(written)), operation.targetValue)
+        ) {
+          throw new Error("A prepared canvas write did not materialize its intended state.");
+        }
+        continue;
+      }
+
+      const existing = super.listAttachments().some((item) => item.id === operation.objectId)
+        ? super.getAttachment(operation.objectId)
+        : undefined;
+      const currentValue = existing ? asSyncJson(attachmentSnapshot(existing.data, existing.info)) : null;
+      if (operation.operation === "delete") {
+        if (!existing) continue;
+        this.assertExpectedDocumentState(operation, null, currentValue);
+        super.removeAttachment(operation.objectId);
+        continue;
+      }
+      if (existing && sameSyncValue(currentValue, operation.targetValue)) continue;
+      this.assertExpectedDocumentState(operation, null, currentValue);
+      const snapshot = parseAttachmentSnapshot(operation.targetValue);
+      const info = super.putAttachment(Buffer.from(snapshot.data, "base64"), snapshot.filename, snapshot.mime);
+      if (info.id !== operation.objectId) throw new Error("Attachment sync snapshot does not match its content ID.");
+    }
   }
 
   private ensurePluginBaseline(plugin: PluginPackage): void {
@@ -2258,88 +2367,136 @@ export class SyncedDocumentVault extends DocumentVault {
   }
 
   override put(input: NoteInput): NoteDocument {
+    const deviceId = this.localDeviceId();
     return withVaultLock(this.syncVaultDir, () => {
-      assertSyncSnapshotSize(input, "Note snapshot");
-      const existing = this.tryNote(input.id ?? input.path);
-      if (existing) this.ensureNoteBaseline(existing);
-      const note = super.put(input);
-      this.appendLocal("note", note.id, "put", asSyncJson(noteSnapshot(note)));
-      return note;
+      const prepared = this.prepareNotePuts([input])[0];
+      const before = this.tryNote(prepared.document.id);
+      this.runLocalTransaction(deviceId, [this.noteOperation(prepared.document, before)]);
+      return super.get(prepared.document.id);
     });
   }
 
   override putMany(inputs: NoteInput[]): NoteDocument[] {
+    const deviceId = this.localDeviceId();
     return withVaultLock(this.syncVaultDir, () => {
-      for (const input of inputs) {
-        assertSyncSnapshotSize(input, "Note snapshot");
-        const existing = this.tryNote(input.id ?? input.path);
-        if (existing) this.ensureNoteBaseline(existing);
-      }
-      const notes = super.putMany(inputs);
-      for (const note of notes) {
-        this.appendLocal("note", note.id, "put", asSyncJson(noteSnapshot(note)));
-      }
-      return notes;
+      const prepared = this.prepareNotePuts(inputs);
+      if (prepared.length === 0) return super.putMany([]);
+      const evolving = new Map<string, NoteDocument>();
+      const operations = prepared.map((item) => {
+        const before = evolving.get(item.document.id) ?? this.tryNote(item.document.id);
+        evolving.set(item.document.id, item.document);
+        return this.noteOperation(item.document, before);
+      });
+      this.runLocalTransaction(deviceId, operations);
+      return prepared.map((item) => super.getRevision(item.document.id, item.document.revision));
     });
   }
 
   override remove(reference: string): NoteSummary {
+    const deviceId = this.localDeviceId();
     return withVaultLock(this.syncVaultDir, () => {
       const current = super.get(reference);
-      this.ensureNoteBaseline(current);
-      const removed = super.remove(reference);
-      this.appendLocal("note", current.id, "delete", null);
-      return removed;
+      const beforeValue = prevalidateLocalCaptureSnapshot(noteSnapshot(current), "Note snapshot");
+      const operation: SyncLocalStorageOperation = {
+        objectType: "note",
+        objectId: current.id,
+        operation: "delete",
+        input: null,
+        beforeStorageRevision: current.revision,
+        targetStorageRevision: null,
+        beforeValue,
+        targetValue: null,
+      };
+      this.runLocalTransaction(deviceId, [operation]);
+      return noteSummary(current);
     });
   }
 
   override putCanvas(input: CanvasInput): CanvasDocument {
+    const deviceId = this.localDeviceId();
     return withVaultLock(this.syncVaultDir, () => {
-      assertSyncSnapshotSize(input, "Canvas snapshot");
-      const existing = this.tryCanvas(input.id ?? input.path);
-      if (existing) this.ensureCanvasBaseline(existing);
-      const canvas = super.putCanvas(input);
-      this.appendLocal("canvas", canvas.id, "put", asSyncJson(canvasSnapshot(canvas)));
-      return canvas;
+      const prepared = this.prepareCanvasPut(input);
+      const before = this.tryCanvas(prepared.document.id);
+      this.runLocalTransaction(deviceId, [this.canvasOperation(prepared.document, before)]);
+      return super.getCanvas(prepared.document.id);
     });
   }
 
   override removeCanvas(reference: string): CanvasDocument {
+    const deviceId = this.localDeviceId();
     return withVaultLock(this.syncVaultDir, () => {
       const current = super.getCanvas(reference);
-      this.ensureCanvasBaseline(current);
-      const removed = super.removeCanvas(reference);
-      this.appendLocal("canvas", current.id, "delete", null);
-      return removed;
+      const beforeValue = prevalidateLocalCaptureSnapshot(canvasSnapshot(current), "Canvas snapshot");
+      const operation: SyncLocalStorageOperation = {
+        objectType: "canvas",
+        objectId: current.id,
+        operation: "delete",
+        input: null,
+        beforeStorageRevision: current.revision,
+        targetStorageRevision: null,
+        beforeValue,
+        targetValue: null,
+      };
+      this.runLocalTransaction(deviceId, [operation]);
+      return current;
     });
   }
 
   override putAttachment(data: Buffer, filename: string, mime = "application/octet-stream"): AttachmentInfo {
+    const deviceId = this.localDeviceId();
     if (data.length > MAX_SYNC_ATTACHMENT_BYTES) {
       throw new Error(
         `A synchronized attachment cannot exceed ${MAX_SYNC_ATTACHMENT_BYTES} bytes until blob transport is available.`,
       );
     }
     return withVaultLock(this.syncVaultDir, () => {
-      const before = new Set(super.listAttachments().map((item) => item.id));
-      const info = super.putAttachment(data, filename, mime);
-      const resolution = this.changeLog.resolve("attachment", info.id);
-      if (!before.has(info.id) || resolution.status !== "clean" || resolution.winner?.mutation.operation === "delete") {
-        this.appendLocal("attachment", info.id, "put", asSyncJson(attachmentSnapshot(data, info)));
+      const prepared = this.prepareAttachmentPut(data, filename, mime);
+      const before = prepared.existed ? super.getAttachment(prepared.info.id) : undefined;
+      const targetValue = prevalidateLocalCaptureSnapshot(
+        attachmentSnapshot(prepared.data, prepared.info),
+        "Attachment snapshot",
+      );
+      const resolution = this.changeLog.resolve("attachment", prepared.info.id);
+      if (prepared.existed && resolution.status === "clean" && resolution.winner?.mutation.operation === "put") {
+        return prepared.info;
       }
-      return info;
+      const operation: SyncLocalStorageOperation = {
+        objectType: "attachment",
+        objectId: prepared.info.id,
+        operation: "put",
+        input: targetValue,
+        beforeStorageRevision: null,
+        targetStorageRevision: null,
+        beforeValue: before
+          ? prevalidateLocalCaptureSnapshot(attachmentSnapshot(before.data, before.info), "Attachment snapshot")
+          : null,
+        targetValue,
+      };
+      this.runLocalTransaction(deviceId, [operation]);
+      return super.getAttachment(prepared.info.id).info;
     });
   }
 
   override removeAttachment(id: string): AttachmentInfo {
+    const deviceId = this.localDeviceId();
     return withVaultLock(this.syncVaultDir, () => {
       const attachment = super.getAttachment(id);
-      if (this.changeLog.resolve("attachment", id).status === "missing") {
-        this.appendLocal("attachment", id, "put", asSyncJson(attachmentSnapshot(attachment.data, attachment.info)));
-      }
-      const removed = super.removeAttachment(id);
-      this.appendLocal("attachment", id, "delete", null);
-      return removed;
+      const beforeValue = prevalidateLocalCaptureSnapshot(
+        attachmentSnapshot(attachment.data, attachment.info),
+        "Attachment snapshot",
+      );
+      const operation: SyncLocalStorageOperation = {
+        objectType: "attachment",
+        objectId: id,
+        operation: "delete",
+        input: null,
+        beforeStorageRevision: null,
+        targetStorageRevision: null,
+        beforeValue,
+        targetValue: null,
+      };
+      this.runLocalTransaction(deviceId, [operation]);
+      return attachment.info;
     });
   }
 
@@ -2420,7 +2577,26 @@ export class SyncedDocumentVault extends DocumentVault {
       seen.add(id);
       pending.push(...(changes.get(id)?.parents ?? []));
     }
-    return false;
+    if (objectType === "canvas") {
+      const current = this.tryCanvas(objectId);
+      return operation === "delete"
+        ? !current
+        : !!current &&
+            current.id === receipt.expectedLive.objectId &&
+            current.revision === receipt.expectedLive.storageRevision &&
+            sameSyncValue(asSyncJson(canvasSnapshot(current)), value);
+    }
+    if (objectType === "attachment") {
+      const present = super.listAttachments().some((attachment) => attachment.id === objectId);
+      if (operation === "delete") return !present;
+      if (!present) return false;
+      const attachment = super.getAttachment(objectId);
+      return (
+        attachment.info.id === receipt.expectedLive.objectId &&
+        sameSyncValue(asSyncJson(attachmentSnapshot(attachment.data, attachment.info)), value)
+      );
+    }
+    throw new Error(`Live sync application is not implemented for ${objectType} objects.`);
   }
 
   private applyStorageChange(change: SyncChange): void {
@@ -2487,9 +2663,16 @@ export class SyncedDocumentVault extends DocumentVault {
         throw new Error(`No sync changes exist for ${objectType}:${objectId}.`);
       }
       if (resolution.status === "conflict") {
-        throw new Error(
-          `Cannot apply ${objectType}:${objectId}: ${resolution.heads.length} unresolved sync heads remain.`,
-        );
+        return {
+          objectType,
+          objectId,
+          changeId: resolution.winner.id,
+          revision: resolution.winner.mutation.revision,
+          applied: 0,
+          alreadyApplied: false,
+          conflict: true,
+          heads: resolution.heads,
+        };
       }
       const winner = resolution.winner;
       const applied = this.changeLog.applied(objectType, objectId);
@@ -2504,52 +2687,10 @@ export class SyncedDocumentVault extends DocumentVault {
         };
       }
 
-      const all = this.changeLog.changes();
-      const byId = new Map(all.map((change) => [change.id, change]));
-      if (applied && !byId.has(applied.changeId)) {
-        throw new Error(`Applied sync cursor refers to a missing change: ${applied.changeId}`);
-      }
-      const appliedChange = applied ? byId.get(applied.changeId) : undefined;
-      if (
-        appliedChange &&
-        (appliedChange.mutation.objectType !== objectType || appliedChange.mutation.objectId !== objectId)
-      ) {
-        throw new Error("Applied sync cursor refers to a change for another object.");
-      }
-      if (applied && !this.isAncestor(byId, applied.changeId, winner.id)) {
-        throw new Error("The resolved sync winner does not descend from the locally applied change.");
-      }
-
-      const relevant = all.filter(
-        (change) =>
-          change.mutation.objectType === objectType &&
-          change.mutation.objectId === objectId &&
-          (change.id === winner.id || this.isAncestor(byId, change.id, winner.id)),
-      );
-      let cursor = applied;
+      const planned = planSyncApplication(this.changeLog.changes(), objectType, objectId, winner, applied);
       let appliedCount = 0;
-      for (let revision = (cursor?.revision ?? 0) + 1; revision <= winner.mutation.revision; revision += 1) {
-        const candidates = relevant
-          .filter(
-            (change) =>
-              change.mutation.revision === revision &&
-              (!cursor || this.isAncestor(byId, cursor.changeId, change.id)),
-          )
-          .sort((left, right) => {
-            if (left.mutation.operation !== right.mutation.operation) {
-              return left.mutation.operation === "delete" ? -1 : 1;
-            }
-            return left.id === right.id ? 0 : left.id < right.id ? 1 : -1;
-          });
-        const next = candidates[0];
-        if (!next) throw new Error(`Resolved sync history is missing object revision ${revision}.`);
-        this.applyStorageChange(next);
-        this.changeLog.markApplied(next);
-        cursor = {
-          changeId: next.id,
-          revision: next.mutation.revision,
-          operation: next.mutation.operation,
-        };
+      for (const next of planned) {
+        this.applyEngine.apply(next, this.applyEffects());
         appliedCount += 1;
       }
       return {

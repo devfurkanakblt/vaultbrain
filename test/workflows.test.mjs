@@ -6,17 +6,12 @@ import test from "node:test";
 
 import { DocumentVault } from "../dist/documents.js";
 import { parseFrontmatter } from "../dist/frontmatter.js";
-import {
-  createFromTemplate,
-  openDailyNote,
-  parseLocalDate,
-  renderTemplateText,
-} from "../dist/templates.js";
+import { createFromTemplate, openDailyNote, parseLocalDate, renderTemplateText } from "../dist/templates.js";
 
 const PASSPHRASE = "workflow-test-passphrase";
 
 function tempVault() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "secondbrain-workflow-test-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-workflow-test-"));
 }
 
 test("Obsidian-style YAML frontmatter imports nested properties and exports valid YAML", () => {
@@ -49,10 +44,28 @@ test("Obsidian-style YAML frontmatter imports nested properties and exports vali
 
   const portable = vault.exportMarkdown(note.id);
   const parsed = parseFrontmatter(portable);
-  assert.equal(parsed.attributes.sbrain_id, note.id);
+  assert.equal(parsed.attributes.vbrain_id, note.id);
   assert.equal(parsed.attributes.due, "2026-09-15");
   assert.deepEqual(parsed.attributes.nested, { active: true, score: 9.5 });
   assert.equal(parsed.body, note.body);
+});
+
+test("legacy sbrain_id imports as the note ID without becoming a user property", () => {
+  const vault = new DocumentVault(tempVault(), PASSPHRASE);
+  const note = vault.importMarkdown(
+    "Archive/Legacy.md",
+    [
+      "---",
+      "sbrain_id: 11111111-1111-4111-8111-111111111111",
+      "title: Legacy portable note",
+      "category: archive",
+      "---",
+      "# Legacy portable note",
+    ].join("\n"),
+  );
+
+  assert.equal(note.id, "11111111-1111-4111-8111-111111111111");
+  assert.deepEqual(note.properties, { category: "archive" });
 });
 
 test("frontmatter rejects duplicate, aliased and prototype-shaping input", () => {
@@ -89,7 +102,7 @@ test("templates render deterministic safe variables into body and properties", (
       path: "x.md",
       date: new Date(2026, 8, 15, 9, 7),
     }),
-    "2026/09/15 09:07"
+    "2026/09/15 09:07",
   );
 });
 

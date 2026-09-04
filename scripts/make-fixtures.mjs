@@ -16,6 +16,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { appendAudit } from "../dist/audit.js";
 import { DocumentVault } from "../dist/documents.js";
 import { SyncChangeLog, SyncDeviceManager } from "../dist/sync.js";
 
@@ -132,6 +133,12 @@ if (process.argv.includes("--canvas-only")) {
   process.exit(0);
 }
 
+if (process.argv.includes("--keyring-only")) {
+  writeKeyringFixture();
+  console.log(`Keyring fixture written to ${path.join(fixtures, "keyring-v2")}`);
+  process.exit(0);
+}
+
 /** The pre-versioning envelope, reproduced exactly as v0 wrote it. */
 function encryptLegacy(plaintext, passphrase) {
   const salt = crypto.randomBytes(16);
@@ -154,14 +161,14 @@ const legacyPlaintext = [
   "# @desc: Dummy blood type for format tests",
   'BLOOD_TYPE="0 Rh+"',
   "",
-  "# @desc: Dummy appointment with a quoted \\\"note\\\" inside",
+  '# @desc: Dummy appointment with a quoted \\"note\\" inside',
   'DOCTOR_NEXT_APPOINTMENT="2026-09-15"',
   "",
 ].join("\n");
 fs.writeFileSync(
   path.join(legacyDir, "health.kv.enc"),
   JSON.stringify(encryptLegacy(legacyPlaintext, FIXTURE_PASSPHRASE), null, 2),
-  { mode: 0o600 }
+  { mode: 0o600 },
 );
 
 const documentDir = path.join(fixtures, "documents-v1");
@@ -205,24 +212,48 @@ attachmentVault.putMany([
 attachmentVault.putAttachment(
   Buffer.from("This attachment was written by the TypeScript core and must stay readable.\n", "utf8"),
   "frozen-note.txt",
-  "text/plain"
+  "text/plain",
 );
 attachmentVault.putAttachment(
   Buffer.from(Array.from({ length: 4096 }, (_value, index) => index % 256)),
   "frozen-payload.bin",
-  "application/octet-stream"
+  "application/octet-stream",
 );
 fs.rmSync(path.join(attachmentDir, ".sbrain.lock"), { force: true });
 
 writeCanvasFixture();
 writeSyncEpochFixture();
 
+function writeKeyringFixture() {
+  const dir = path.join(fixtures, "keyring-v2");
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+
+  const vault = new DocumentVault(dir, FIXTURE_PASSPHRASE);
+  vault.put({
+    path: "Atlas/Keyring contract.md",
+    title: "Keyring contract",
+    body: "# Keyring contract\n\nThe wrapped keyset must stay openable. #fixture",
+    properties: { status: "frozen" },
+  });
+  vault.putAttachment(Buffer.from("keyring fixture attachment"), "keyring.txt", "text/plain");
+  vault.lock();
+
+  upsertEntry(dir, "health", "BLOOD_TYPE", "0 Rh+", "blood group", FIXTURE_PASSPHRASE);
+  appendAudit(dir, { actor: "cli-direct-write", file: "health", key: "BLOOD_TYPE" }, FIXTURE_PASSPHRASE);
+
+  migrateToKeyring(dir, FIXTURE_PASSPHRASE);
+  fs.rmSync(path.join(dir, ".sbrain.lock"), { force: true });
+}
+writeKeyringFixture();
+
 fs.writeFileSync(
   path.join(fixtures, "README.md"),
   `# Format fixtures
 
-Checked-in vaults written by earlier releases. Tests open them to prove that a
-change to the storage format did not silently orphan existing data.
+Checked-in vaults written by earlier releases. Vault Brain is the product name,
+but these fixtures retain immutable pre-rename storage and cryptographic
+identifiers so tests prove upgrades do not orphan existing data.
 
 **Passphrase for every fixture here: \`${FIXTURE_PASSPHRASE}\`.**
 
@@ -230,7 +261,7 @@ They contain dummy data only. Never point a fixture at a real vault.
 
 | Directory | Format | What it pins |
 |---|---|---|
-| \`kv-envelope-v0/\` | key-value envelope, pre-versioning | Unversioned \`{salt,iv,authTag,ciphertext}\` files still decrypt, and \`sbrain migrate\` upgrades them in place |
+| \`kv-envelope-v0/\` | key-value envelope, pre-versioning | Unversioned \`{salt,iv,authTag,ciphertext}\` files still decrypt, and \`vbrain migrate\` upgrades them in place |
 | \`documents-v1/\` | document vault manifest v1, index v2 | An encrypted note vault written by the current format still opens, searches and resolves links |
 | \`documents-attachments-v1/\` | document vault with chunk-encrypted attachments | Content-addressed attachments written by the TypeScript core still open in the Rust desktop core |
 | \`documents-canvas-v1/\` | document vault with encrypted canvas objects | Canvas objects, identities, references and AAD written by the TypeScript core stay readable |
@@ -239,7 +270,7 @@ They contain dummy data only. Never point a fixture at a real vault.
 Regenerate deliberately (see \`scripts/make-fixtures.mjs\`) — overwriting a
 fixture throws away the evidence it was there to provide. To cover a new
 format version, add a new directory instead of editing an old one.
-`
+`,
 );
 
 console.log(`Fixtures written to ${fixtures}`);

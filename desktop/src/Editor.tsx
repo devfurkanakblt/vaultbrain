@@ -16,6 +16,11 @@ import {
 interface EditorProps {
   value: string;
   onChange: (value: string) => void;
+  /**
+   * A line to scroll to and place the cursor on. The token changes on every
+   * request so that asking for the same heading twice still moves the view.
+   */
+  reveal?: { line: number; token: number };
 }
 
 const theme = EditorView.theme({
@@ -41,7 +46,7 @@ const theme = EditorView.theme({
   ".ͼi": { color: "#707165", fontStyle: "italic" },
 });
 
-export function MarkdownEditor({ value, onChange }: EditorProps) {
+export function MarkdownEditor({ value, onChange, reveal }: EditorProps) {
   const host = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | undefined>(undefined);
   const changeRef = useRef(onChange);
@@ -78,6 +83,17 @@ export function MarkdownEditor({ value, onChange }: EditorProps) {
     if (!view || view.state.doc.toString() === value) return;
     view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: value } });
   }, [value]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view || !reveal) return;
+    const line = view.state.doc.line(Math.min(Math.max(reveal.line + 1, 1), view.state.doc.lines));
+    view.dispatch({
+      selection: { anchor: line.from },
+      effects: EditorView.scrollIntoView(line.from, { y: "start", yMargin: 28 }),
+    });
+    view.focus();
+  }, [reveal]);
 
   return <div className="editor-host" ref={host} aria-label="Markdown editor" />;
 }

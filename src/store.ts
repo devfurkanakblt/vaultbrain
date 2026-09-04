@@ -3,11 +3,16 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   decrypt,
+  decryptWithKey,
   encrypt,
+  encryptWithKey,
   ENVELOPE_VERSION,
   envelopeVersion,
+  KEYED_ENVELOPE_VERSION,
   type AnyEncryptedPayload,
+  type KeyedEncryptedPayload,
 } from "./crypto.js";
+import { openOrCreateVaultKey, openVaultKey } from "./keyring.js";
 import { parseKV, serializeKV, type KVEntry } from "./format.js";
 import { assertNotSymlink, readTextFileLimited, writeFileAtomic } from "./fs-safe.js";
 import {
@@ -33,6 +38,21 @@ export function listVaultFiles(vaultDir: string): string[] {
     .map((f) => f.replace(/\.kv\.enc$/, ""));
 }
 
+/** The keyed key-value key when this vault has a keyring, otherwise null. */
+function kvKey(vaultDir: string, passphrase: string): Buffer | null {
+  return openVaultKey(vaultDir, passphrase, "kv");
+}
+
+/**
+ * The key-value key for a write. A vault with neither a keyring nor legacy
+ * material becomes keyring-native here: the first write to a fresh vault is
+ * what creates the keyring. A legacy vault still gets `null` and keeps writing
+ * its per-file envelope exactly as before.
+ */
+function kvKeyForWrite(vaultDir: string, passphrase: string): Buffer | null {
+  return openOrCreateVaultKey(vaultDir, passphrase, "kv");
+}
+
 export function loadVaultFile(
   vaultDir: string,
   name: string,
@@ -44,6 +64,12 @@ export function loadVaultFile(
   const payload: AnyEncryptedPayload = JSON.parse(readTextFileLimited(filePath, 64 * 1024 * 1024, "Vault file"));
   const plaintext = decrypt(payload, passphrase);
   return parseKV(plaintext);
+}
+
+function requireKvKey(vaultDir: string, passphrase: string): Buffer {
+  const key = kvKey(vaultDir, passphrase);
+  if (!key) throw new Error("This file is keyring-encrypted but the vault has no readable keyring.");
+  return key;
 }
 
 export interface MigrationReport {
@@ -74,10 +100,11 @@ export function migrateVaultFile(
 ): MigrationReport {
   const from = vaultFileEnvelopeVersion(vaultDir, name);
   if (from === undefined) throw new Error(`No such vault file: ${name}`);
-  if (from === ENVELOPE_VERSION) return { name, from, to: ENVELOPE_VERSION, migrated: false };
+  const to = kvKey(vaultDir, passphrase) ? KEYED_ENVELOPE_VERSION : ENVELOPE_VERSION;
+  if (from === to) return { name, from, to, migrated: false };
   const entries = loadVaultFile(vaultDir, name, passphrase);
   saveVaultFile(vaultDir, name, entries, passphrase);
-  return { name, from, to: ENVELOPE_VERSION, migrated: true };
+  return { name, from, to, migrated: true };
 }
 
 /** Migrates every key-value file in a vault directory. */
@@ -94,7 +121,10 @@ export function saveVaultFile(
   if (!fs.existsSync(vaultDir)) fs.mkdirSync(vaultDir, { recursive: true });
   const filePath = vaultFilePath(vaultDir, name);
   const plaintext = serializeKV(entries);
-  const payload = encrypt(plaintext, passphrase);
+  const key = kvKeyForWrite(vaultDir, passphrase);
+  const payload = key
+    ? encryptWithKey(plaintext, key, normalizeVaultName(name))
+    : encrypt(plaintext, passphrase);
   writeFileAtomic(filePath, JSON.stringify(payload, null, 2), { mode: 0o600 });
 }
 

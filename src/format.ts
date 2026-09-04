@@ -57,9 +57,5 @@ export function parseKV(content: string): KVEntry[] {
 }
 
 export function serializeKV(entries: KVEntry[]): string {
-  return (
-    entries
-      .map((e) => `# @desc: ${e.desc}\n${e.key}=${JSON.stringify(e.value)}`)
-      .join("\n\n") + "\n"
-  );
+  return entries.map((e) => `# @desc: ${e.desc}\n${e.key}=${JSON.stringify(e.value)}`).join("\n\n") + "\n";
 }

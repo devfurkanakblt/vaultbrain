@@ -7,7 +7,6 @@ import {
   DEFAULT_VAULT_DIR,
   listVaultFiles,
   loadVaultFile,
-  migrateVault,
   storeNote,
   upsertEntry,
   vaultFileEnvelopeVersion,
@@ -15,8 +14,17 @@ import {
 import { buildSchema, readSchema, searchSchema, filterNotesByDate } from "./schema.js";
 import { appendAudit, readAudit, verifyAudit } from "./audit.js";
 import { getPassphrase, readSecret } from "./passphrase.js";
-import { forgetPassphrase, keychain, recallPassphrase, rememberPassphrase } from "./keychain.js";
+import {
+  forgetPassphrase,
+  keychain,
+  recallPassphrase,
+  rememberPassphrase,
+  updateRememberedPassphrase,
+} from "./keychain.js";
 import { startMcpServer } from "./mcp-server.js";
+import { migrateToKeyring } from "./keyring-migrate.js";
+import { changeVaultPassphrase, MIN_PASSPHRASE_LENGTH } from "./keyring-passphrase.js";
+import { detectVaultFormat } from "./keyring.js";
 import {
   addGrant,
   approveRequest,
@@ -73,10 +81,8 @@ function openDocumentVault(vaultDir: string, passphrase: string): DocumentVault 
 }
 
 program
-  .name("sbrain")
-  .description(
-    "secondbrain-vault — an .env-style, least-exposure personal data store for the AI age."
-  )
+  .name("vbrain")
+  .description("Vault Brain — an .env-style, least-exposure personal data store for the AI age.")
   .option("--vault <dir>", "vault directory", DEFAULT_VAULT_DIR)
   .option("--sync-device <uuid>", "automatically capture document writes for this sync device")
   .option(
@@ -91,12 +97,12 @@ program
     const dir = program.opts().vault;
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     console.log(`Vault initialized at ${dir}`);
-    console.log(`Set SBRAIN_PASSPHRASE before running add/get/index/mcp.`);
+    console.log(`Set VBRAIN_PASSPHRASE before running add/get/index/mcp.`);
   });
 
 program
   .command("add <file> <keyval>")
-  .description('add or update a key, e.g. sbrain add health DOCTOR_NEXT_APPOINTMENT="2026-09-15"')
+  .description('add or update a key, e.g. vbrain add health DOCTOR_NEXT_APPOINTMENT="2026-09-15"')
   .requiredOption("--desc <description>", "short, NON-sensitive description of what this key holds")
   .action(async (file, keyval, opts) => {
     const eq = keyval.indexOf("=");
@@ -120,7 +126,7 @@ program
 program
   .command("note <category> <text>")
   .description(
-    "dev/testing helper for the freeform journal path (Mode 2's real entry point is the MCP store_note tool, not this)"
+    "dev/testing helper for the freeform journal path (Mode 2's real entry point is the MCP store_note tool, not this)",
   )
   .requiredOption("--desc <description>", "short, NON-sensitive tag for this note")
   .action(async (category, text, opts) => {
@@ -218,9 +224,7 @@ program
     console.log(`Indexed ${total} keys across ${listVaultFiles(dir).length} files -> ${dir}/schema.enc`);
   });
 
-const docs = program
-  .command("docs")
-  .description("encrypted Markdown documents, search and knowledge links");
+const docs = program.command("docs").description("encrypted Markdown documents, search and knowledge links");
 
 docs
   .command("put <path>")
@@ -376,10 +380,7 @@ docs
   .action(async (reference, number) => {
     const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
     const dir = program.opts().vault;
-    const note = new DocumentVault(dir, passphrase).getRevision(
-      reference,
-      Number.parseInt(number, 10)
-    );
+    const note = new DocumentVault(dir, passphrase).getRevision(reference, Number.parseInt(number, 10));
     appendAudit(dir, { actor: "cli-direct", file: "documents", key: note.id }, passphrase);
     process.stdout.write(note.body + "\n");
   });
@@ -390,10 +391,7 @@ docs
   .action(async (reference, number) => {
     const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
     const dir = program.opts().vault;
-    const note = openDocumentVault(dir, passphrase).restore(
-      reference,
-      Number.parseInt(number, 10)
-    );
+    const note = openDocumentVault(dir, passphrase).restore(reference, Number.parseInt(number, 10));
     appendAudit(dir, { actor: "cli-direct-write", file: "documents", key: note.id }, passphrase);
     console.log(`Restored ${note.path} as revision ${note.revision}.`);
   });
@@ -404,10 +402,7 @@ docs
   .action(async (notePath, source) => {
     const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
     const dir = program.opts().vault;
-    const note = openDocumentVault(dir, passphrase).importMarkdown(
-      notePath,
-      fs.readFileSync(source, "utf8")
-    );
+    const note = openDocumentVault(dir, passphrase).importMarkdown(notePath, fs.readFileSync(source, "utf8"));
     appendAudit(dir, { actor: "cli-direct-write", file: "documents", key: note.id }, passphrase);
     console.log(`Imported ${note.path} (${note.id}).`);
   });
@@ -430,7 +425,7 @@ docs
         file: "documents",
         key: `obsidian-import:${report.notes.imported}:${report.attachments.imported}:${report.canvases.imported}`,
       },
-      passphrase
+      passphrase,
     );
     if (opts.report) {
       writeFileAtomic(path.resolve(opts.report), `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
@@ -439,7 +434,7 @@ docs
     console.log(`Imported ${report.notes.imported}/${report.notes.discovered} Markdown notes.`);
     console.log(
       `Imported ${report.attachments.imported}/${report.attachments.discovered} attachments ` +
-      `(${report.attachments.unique} unique encrypted objects).`
+        `(${report.attachments.unique} unique encrypted objects).`,
     );
     console.log(`Imported ${report.canvases.imported}/${report.canvases.discovered} canvases.`);
     const errors = report.issues.filter((issue) => issue.severity === "error");
@@ -487,7 +482,7 @@ docs
     const info = openDocumentVault(dir, passphrase).putAttachment(
       fs.readFileSync(source),
       opts.name ?? path.basename(source),
-      opts.mime
+      opts.mime,
     );
     appendAudit(dir, { actor: "cli-direct-write", file: "attachments", key: info.id }, passphrase);
     console.log(`Stored ${info.filename} (${info.id}, ${info.size} bytes, ${info.chunks} chunks).`);
@@ -533,10 +528,7 @@ docs
   .action(async (canvasPath, source) => {
     const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
     const dir = program.opts().vault;
-    const canvas = openDocumentVault(dir, passphrase).importCanvas(
-      canvasPath,
-      fs.readFileSync(source, "utf8")
-    );
+    const canvas = openDocumentVault(dir, passphrase).importCanvas(canvasPath, fs.readFileSync(source, "utf8"));
     appendAudit(dir, { actor: "cli-direct-write", file: "canvases", key: canvas.id }, passphrase);
     console.log(`Imported ${canvas.path} (${canvas.id}, revision ${canvas.revision}).`);
   });
@@ -549,7 +541,7 @@ docs
     const vault = new DocumentVault(program.opts().vault, passphrase);
     for (const canvas of vault.listCanvases()) {
       console.log(
-        `${canvas.path}  — ${canvas.title}  (${canvas.id}, r${canvas.revision}, ${canvas.nodeCount} nodes, ${canvas.edgeCount} edges)`
+        `${canvas.path}  — ${canvas.title}  (${canvas.id}, r${canvas.revision}, ${canvas.nodeCount} nodes, ${canvas.edgeCount} edges)`,
       );
     }
   });
@@ -634,10 +626,7 @@ docs
   .action(async (reference, number) => {
     const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
     const dir = program.opts().vault;
-    const canvas = new DocumentVault(dir, passphrase).getCanvasRevision(
-      reference,
-      Number.parseInt(number, 10)
-    );
+    const canvas = new DocumentVault(dir, passphrase).getCanvasRevision(reference, Number.parseInt(number, 10));
     appendAudit(dir, { actor: "cli-direct", file: "canvases", key: canvas.id }, passphrase);
     process.stdout.write(`${JSON.stringify(canvas, null, 2)}\n`);
   });
@@ -648,10 +637,7 @@ docs
   .action(async (reference, number) => {
     const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
     const dir = program.opts().vault;
-    const canvas = openDocumentVault(dir, passphrase).restoreCanvas(
-      reference,
-      Number.parseInt(number, 10)
-    );
+    const canvas = openDocumentVault(dir, passphrase).restoreCanvas(reference, Number.parseInt(number, 10));
     appendAudit(dir, { actor: "cli-direct-write", file: "canvases", key: canvas.id }, passphrase);
     console.log(`Restored ${canvas.path} as revision ${canvas.revision}.`);
   });
@@ -721,11 +707,7 @@ docs
       tags: opts.tag,
     });
     if (result.created) {
-      appendAudit(
-        dir,
-        { actor: "cli-direct-write", file: "documents", key: result.note.id },
-        passphrase
-      );
+      appendAudit(dir, { actor: "cli-direct-write", file: "documents", key: result.note.id }, passphrase);
     }
     console.log(`${result.created ? "Created" : "Opened"} ${result.note.path} (${result.note.id}).`);
   });
@@ -1186,7 +1168,7 @@ sync
       for (const change of log.changes()) {
         const mutation = change.mutation;
         console.log(
-          `${change.id}  ${change.deviceId}#${change.sequence}  ${mutation.operation} ${mutation.objectType}:${mutation.objectId}@${mutation.revision}`
+          `${change.id}  ${change.deviceId}#${change.sequence}  ${mutation.operation} ${mutation.objectType}:${mutation.objectId}@${mutation.revision}`,
         );
       }
     } finally {
@@ -1234,7 +1216,9 @@ sync
     const log = new SyncChangeLog(dir, passphrase);
     try {
       const report = log.verify();
-      console.log(`Verified ${report.changes} changes from ${report.devices} devices; ${report.heads.length} causal heads.`);
+      console.log(
+        `Verified ${report.changes} changes from ${report.devices} devices; ${report.heads.length} causal heads.`,
+      );
     } finally {
       log.close();
     }
@@ -1267,9 +1251,11 @@ sync
     try {
       const result = vault.applyResolved(objectType as SyncObjectType, objectId);
       console.log(
-        result.alreadyApplied
-          ? `Already applied ${objectType}:${objectId}@${result.revision}.`
-          : `Applied ${result.applied} change(s); ${objectType}:${objectId}@${result.revision} is current.`,
+        result.conflict
+          ? `Cannot apply ${objectType}:${objectId}; ${result.heads!.length} unresolved sync heads remain.`
+          : result.alreadyApplied
+            ? `Already applied ${objectType}:${objectId}@${result.revision}.`
+            : `Applied ${result.applied} change(s); ${objectType}:${objectId}@${result.revision} is current.`,
       );
     } finally {
       vault.lock();
@@ -1287,7 +1273,7 @@ function parseScope(input: string): GrantScope {
   const [file, keys, actions, redact = "none"] = input.split(":");
   if (!file || !keys || !actions) {
     throw new Error(
-      `Invalid scope: ${input}. Use file:keys:actions[:redaction], e.g. health:*:discover,resolve:partial`
+      `Invalid scope: ${input}. Use file:keys:actions[:redaction], e.g. health:*:discover,resolve:partial`,
     );
   }
   if (!isRedactionLevel(redact)) {
@@ -1295,8 +1281,14 @@ function parseScope(input: string): GrantScope {
   }
   return normalizeScope({
     file,
-    keys: keys.split(",").map((value) => value.trim()).filter(Boolean),
-    actions: actions.split(",").map((value) => value.trim()).filter(Boolean) as GrantAction[],
+    keys: keys
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean),
+    actions: actions
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean) as GrantAction[],
     redact: redact as RedactionLevel,
   });
 }
@@ -1324,10 +1316,7 @@ const grant = program
 grant
   .command("add <agent>")
   .description("grant one agent identity a narrow, optionally expiring slice of the vault")
-  .requiredOption(
-    "--scope <scope...>",
-    "file:keys:actions[:redaction], e.g. health:*:discover,resolve:partial"
-  )
+  .requiredOption("--scope <scope...>", "file:keys:actions[:redaction], e.g. health:*:discover,resolve:partial")
   .option("--expires <when>", "30m, 12h, 7d or an ISO timestamp; omit for no expiry")
   .option("--confirm", "hold every resolution for your approval before it is answered")
   .option("--note <text>", "why this grant exists, for your own review later")
@@ -1344,16 +1333,14 @@ grant
         confirm: opts.confirm ? "always" : "never",
         note: opts.note,
       },
-      passphrase
+      passphrase,
     );
     if (first) {
       console.log("This vault is now GOVERNED: agents without a grant can no longer read it.");
     }
     console.log(`Granted ${created.id.slice(0, 8)} to "${created.agent}".`);
     for (const scope of created.scopes) {
-      console.log(
-        `  ${scope.file} · ${scope.keys.join(",")} · ${scope.actions.join(",")} · redaction ${scope.redact}`
-      );
+      console.log(`  ${scope.file} · ${scope.keys.join(",")} · ${scope.actions.join(",")} · redaction ${scope.redact}`);
     }
     console.log(`  expires ${created.expiresAt ?? "never"} · confirmation ${created.confirm}`);
   });
@@ -1384,7 +1371,7 @@ grant
       console.log(`${entry.id.slice(0, 8)}  ${entry.agent}  [${state}]`);
       for (const scope of entry.scopes) {
         console.log(
-          `    ${scope.file} · ${scope.keys.join(",")} · ${scope.actions.join(",")} · redaction ${scope.redact}`
+          `    ${scope.file} · ${scope.keys.join(",")} · ${scope.actions.join(",")} · redaction ${scope.redact}`,
         );
       }
       console.log(`    expires ${entry.expiresAt ?? "never"} · confirmation ${entry.confirm}`);
@@ -1416,7 +1403,7 @@ grant
     }
     for (const request of requests) {
       console.log(
-        `${request.id.slice(0, 8)}  ${request.agent} wants ${request.file}.${request.key}  (expires ${request.expiresAt})`
+        `${request.id.slice(0, 8)}  ${request.agent} wants ${request.file}.${request.key}  (expires ${request.expiresAt})`,
       );
     }
   });
@@ -1428,9 +1415,7 @@ grant
     const dir = program.opts().vault;
     const passphrase = await getPassphrase({ vaultDir: dir });
     const approved = approveRequest(dir, id, passphrase);
-    console.log(
-      `Approved ${approved.file}.${approved.key} for "${approved.agent}" until ${approved.expiresAt}.`
-    );
+    console.log(`Approved ${approved.file}.${approved.key} for "${approved.agent}" until ${approved.expiresAt}.`);
   });
 
 grant
@@ -1465,7 +1450,7 @@ plugins
     }
     for (const plugin of installed) {
       console.log(
-        `${plugin.name} v${plugin.version}  [${plugin.enabled ? "on" : "off"}]  [${plugin.signatureStatus}]  ${plugin.manifestId}`
+        `${plugin.name} v${plugin.version}  [${plugin.enabled ? "on" : "off"}]  [${plugin.signatureStatus}]  ${plugin.manifestId}`,
       );
       for (const line of describeCapabilities(plugin.capabilities as PluginCapability[])) {
         console.log(`    - ${line}`);
@@ -1497,11 +1482,7 @@ plugins
     delete raw.signature;
     const manifest = parsePluginManifest(raw);
     const source = fs.readFileSync(sourcePath, "utf8");
-    const signature = signPluginPackage(
-      manifest,
-      source,
-      fs.readFileSync(opts.key, "utf8")
-    );
+    const signature = signPluginPackage(manifest, source, fs.readFileSync(opts.key, "utf8"));
     writeFileAtomic(opts.out, `${JSON.stringify({ ...manifest, signature }, null, 2)}\n`, { mode: 0o600 });
     console.log(`Signed manifest written to ${opts.out}.`);
   });
@@ -1619,7 +1600,7 @@ program
     }
     console.log(
       `Audit integrity: ${verification.valid ? "VALID" : "INVALID"} ` +
-        `(${verification.signedEntries} signed, ${verification.legacyEntries} legacy)`
+        `(${verification.signedEntries} signed, ${verification.legacyEntries} legacy)`,
     );
     if (verification.error) console.log(`  ${verification.error}`);
     for (const entry of entries) {
@@ -1630,7 +1611,7 @@ program
       ].filter(Boolean);
       console.log(
         `${entry.timestamp}  ${entry.actor}  ${entry.file}.${entry.key}` +
-          (governed.length ? `  (${governed.join(", ")})` : "")
+          (governed.length ? `  (${governed.join(", ")})` : ""),
       );
     }
     if (!verification.valid) process.exitCode = 2;
@@ -1652,24 +1633,94 @@ program
 
 program
   .command("migrate")
-  .description("rewrite key-value vault files in the current encrypted envelope format")
+  .description("upgrade this vault to the encrypted keyring format and rewrite key-value files")
   .action(async () => {
     const dir = program.opts().vault;
     const passphrase = await getPassphrase({ vaultDir: dir });
-    const reports = migrateVault(dir, passphrase);
-    if (reports.length === 0) {
-      console.log("No key-value files found; nothing to migrate.");
-      return;
+    const report = migrateToKeyring(dir, passphrase);
+
+    if (report.created) {
+      console.log(`Wrote ${path.join(dir, "keyring.json")}.`);
+      if (report.adopted.length > 0) {
+        console.log(`Adopted existing keys: ${report.adopted.join(", ")}.`);
+        console.log(`Attachment identities, sync change IDs and the audit chain are unchanged.`);
+      }
+      console.log(`Generated new keys: ${report.generated.join(", ")}.`);
+    } else {
+      console.log("This vault already has a keyring.");
     }
-    for (const report of reports) {
-      console.log(
-        report.migrated
-          ? `${report.name}: envelope v${report.from} -> v${report.to}`
-          : `${report.name}: already envelope v${report.to}`
+
+    if (report.kvFilesRewritten.length > 0) {
+      console.log(`Rewrote ${report.kvFilesRewritten.length} key-value file(s): ${report.kvFilesRewritten.join(", ")}.`);
+    }
+    if (report.grantsRewritten) console.log("Rewrote grants.enc in the keyed envelope.");
+    if (report.manifestTombstoned) {
+      console.log("Replaced documents/manifest.json with a version marker; its passphrase verifier is gone.");
+    }
+    console.log("Desktop builds older than this release cannot open a migrated vault.");
+  });
+
+const passphraseCommand = program.command("passphrase").description("manage the passphrase that wraps this vault's keys");
+
+passphraseCommand
+  .command("change")
+  .description("change the vault passphrase and re-wrap the keyring at the current KDF cost")
+  .option("--allow-same-passphrase", "re-wrap the keyring at the current cost without changing the passphrase")
+  .action(async (opts) => {
+    const dir = program.opts().vault;
+    // Never taken from the OS credential store: a stale or attacker-primed
+    // credential must not be able to authorize a passphrase change on its
+    // own, the way `unlock` resolves its passphrase.
+    const current = process.env.VBRAIN_PASSPHRASE ?? (await readSecret("Current vault passphrase: "));
+    if (!current) {
+      console.error("A passphrase is required.");
+      process.exit(1);
+    }
+    const next = process.env.VBRAIN_NEW_PASSPHRASE ?? (await readNewPassphrase());
+
+    const report = changeVaultPassphrase(dir, current, next, {
+      allowSamePassphrase: Boolean(opts.allowSamePassphrase),
+    });
+
+    console.log(`Passphrase changed for ${dir}.`);
+    console.log(`Re-wrapped ${report.slotsRewritten} keyring slot(s) at scrypt N=${report.newN}.`);
+    if (report.previousN !== report.newN) {
+      console.log(`Key-derivation cost raised from N=${report.previousN}.`);
+    }
+    if (report.slotsPreserved > 0) {
+      console.log(`Left ${report.slotsPreserved} slot(s) this passphrase does not open untouched:`);
+      for (const slot of report.preserved) {
+        console.log(`  ${slot.id} (${slot.label}), created ${slot.createdAt}, scrypt N=${slot.n}.`);
+      }
+    }
+
+    const keychainResult = updateRememberedPassphrase(dir, next);
+    if (keychainResult.updated) {
+      console.log(`Updated the remembered passphrase in the OS credential store (${keychainResult.backend}).`);
+    } else if (keychainResult.error) {
+      const credentialState = keychainResult.cleared
+        ? "The remembered credential was removed. Run 'vbrain unlock --remember' to store the new passphrase."
+        : "The remembered credential could not be removed either. Run 'vbrain lock' to clear it.";
+      console.error(
+        `Warning: the passphrase changed, but the OS credential store (${keychainResult.backend}) could not be updated (${keychainResult.error}). ` +
+          credentialState,
       );
     }
-    console.log(`${reports.filter((report) => report.migrated).length} of ${reports.length} file(s) migrated.`);
+
+    console.log("This does not re-encrypt anything: every note, attachment and sync change keeps its key.");
+    console.log("If the old passphrase leaked, run 'vbrain rekey' once it ships.");
   });
+
+/** Two masked entries that have to agree, so a typo cannot become the new passphrase. */
+async function readNewPassphrase(): Promise<string> {
+  const first = await readSecret("New vault passphrase: ");
+  if (first.length < MIN_PASSPHRASE_LENGTH) {
+    throw new Error(`The new passphrase must be at least ${MIN_PASSPHRASE_LENGTH} characters.`);
+  }
+  const second = await readSecret("Repeat new vault passphrase: ");
+  if (first !== second) throw new Error("The two entries did not match; nothing was changed.");
+  return first;
+}
 
 program
   .command("unlock")
@@ -1677,7 +1728,7 @@ program
   .option("--remember", "store the passphrase in the OS credential store for this vault")
   .action(async (opts) => {
     const dir = program.opts().vault;
-    const passphrase = process.env.SBRAIN_PASSPHRASE ?? (await readSecret("Vault passphrase: "));
+    const passphrase = process.env.VBRAIN_PASSPHRASE ?? (await readSecret("Vault passphrase: "));
     if (!passphrase) {
       console.error("A passphrase is required.");
       process.exit(1);
@@ -1687,7 +1738,7 @@ program
     console.log(`Unlocked ${dir}.`);
     if (opts.remember) {
       const backend = rememberPassphrase(dir, passphrase);
-      console.log(`Passphrase remembered in the OS credential store (${backend}). Run 'sbrain lock' to forget it.`);
+      console.log(`Passphrase remembered in the OS credential store (${backend}). Run 'vbrain lock' to forget it.`);
     }
   });
 
@@ -1699,7 +1750,7 @@ program
     console.log(
       forgetPassphrase(dir)
         ? `Locked: the remembered passphrase for ${dir} was removed from the OS credential store.`
-        : `Nothing to forget: no remembered passphrase for ${dir}.`
+        : `Nothing to forget: no remembered passphrase for ${dir}.`,
     );
   });
 
@@ -1710,6 +1761,7 @@ program
     const dir = program.opts().vault;
     const backend = keychain();
     console.log(`Credential store: ${backend.name}${backend.available() ? "" : " (unavailable)"}`);
+    console.log(`Vault format: ${detectVaultFormat(dir)}`);
     console.log(`Remembered for ${dir}: ${recallPassphrase(dir) ? "yes" : "no"}`);
     for (const name of listVaultFiles(dir)) {
       console.log(`  ${name}.kv.enc: envelope v${vaultFileEnvelopeVersion(dir, name)}`);

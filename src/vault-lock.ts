@@ -17,11 +17,14 @@ export interface LockRecord {
 }
 
 export class VaultBusyError extends Error {
-  constructor(readonly holder: LockRecord | undefined, lockPath: string) {
+  constructor(
+    readonly holder: LockRecord | undefined,
+    lockPath: string,
+  ) {
     super(
       holder
         ? `Vault is being written by process ${holder.pid} on ${holder.host} since ${holder.acquiredAt}. Close that session, or remove ${lockPath} if it crashed.`
-        : `Vault is locked by another process. Remove ${lockPath} if no session is running.`
+        : `Vault is locked by another process. Remove ${lockPath} if no session is running.`,
     );
     this.name = "VaultBusyError";
   }
@@ -68,7 +71,7 @@ function isReclaimable(record: LockRecord | undefined, staleMs: number): boolean
 /**
  * Runs `operation` while holding an exclusive on-disk lock for the vault, so
  * two processes cannot interleave a note write with an index write. The lock
- * is advisory between secondbrain-vault processes — it protects against a
+ * is advisory between Vault Brain processes — it protects against a
  * second CLI/MCP/desktop session, not against someone editing files by hand.
  *
  * A same-host lock left behind by a process proven dead is reclaimed after the
@@ -77,7 +80,7 @@ function isReclaimable(record: LockRecord | undefined, staleMs: number): boolean
 export function withVaultLock<T>(
   vaultDir: string,
   operation: () => T,
-  options: { staleMs?: number; waitMs?: number } = {}
+  options: { staleMs?: number; waitMs?: number } = {},
 ): T {
   const staleMs = options.staleMs ?? DEFAULT_STALE_MS;
   const waitMs = options.waitMs ?? DEFAULT_WAIT_MS;

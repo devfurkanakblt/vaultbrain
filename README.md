@@ -1,4 +1,4 @@
-# secondbrain-vault
+# Vault Brain
 
 > A least-exposure, `.env`-style personal data vault for the AI age.
 
@@ -8,8 +8,12 @@
 > [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), and
 > [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-**TL;DR (TR):** Obsidian gibi "2. beyin" araçları kişisel verini (sağlık, kimlik,
-finans) düz metin olarak AI ajanlarına besliyor. `secondbrain-vault`, veriyi
+> **Compatibility:** Vault Brain is the product and CLI name. Existing vault
+> storage, cryptographic, plugin-signature, sync, and writer-lock identifiers
+> remain immutable so data created by earlier releases stays readable.
+
+**TL;DR (TR):** Obsidian gibi kişisel bilgi yönetimi araçları verini (sağlık, kimlik,
+finans) düz metin olarak AI ajanlarına besliyor. `Vault Brain`, veriyi
 şifreli anahtar-değer çiftleri olarak saklar; AI önce sadece anahtar adlarını
 ve açıklamaları görür (değerleri değil), ihtiyaç duyduğu **tek** değeri talep
 eder, ve her erişim denetim kaydına (audit log) yazılır.
@@ -23,7 +27,7 @@ vault, not just the fact you asked about.
 
 This project borrows a habit developers already trust: **`.env` files**. We
 don't hand an agent a whole config file to "figure out" — we let it ask for
-one variable at a time. `secondbrain-vault` applies the same discipline to
+one variable at a time. `Vault Brain` applies the same discipline to
 personal data.
 
 ## Two modes — read this before you wire it into anything
@@ -54,21 +58,21 @@ gives it.
 
 ```bash
 # A kitchen assistant that may read one key, in one category, for a week.
-sbrain grant add claude-code \
+vbrain grant add claude-code \
   --scope "health:BLOOD_TYPE:discover,resolve:none" \
   --expires 7d --note "meal planning"
 
 # The same agent may see that an IBAN exists and confirm the last four digits,
 # but never read the whole thing.
-sbrain grant add claude-code --scope "finance:IBAN:discover,resolve:partial"
+vbrain grant add claude-code --scope "finance:IBAN:discover,resolve:partial"
 
 # Anything under this grant waits for you before it is answered.
-sbrain grant add research-bot --scope "*:*:discover:full" --confirm
+vbrain grant add research-bot --scope "*:*:discover:full" --confirm
 
-sbrain grant list                  # every grant, active, expired or revoked
-sbrain grant requests              # resolutions waiting on you
-sbrain grant approve <id>          # single-use, expires in five minutes
-sbrain grant revoke <id>           # effective on the agent's very next call
+vbrain grant list                  # every grant, active, expired or revoked
+vbrain grant requests              # resolutions waiting on you
+vbrain grant approve <id>          # single-use, expires in five minutes
+vbrain grant revoke <id>           # effective on the agent's very next call
 ```
 
 A scope reads `file:keys:actions[:redaction]`. Keys are exact names, a
@@ -110,11 +114,21 @@ BLOOD_TYPE="0 Rh+"
 
 ## Quickstart
 
+The npm package is named `vault-brain`; installing it globally exposes the
+short, project-specific `vbrain` command:
+
+```bash
+npm install --global vault-brain
+vbrain --help
+```
+
+For local development from this repository:
+
 ```bash
 npm install
 npm run build
 
-export SBRAIN_PASSPHRASE="use-a-real-passphrase-here"
+export VBRAIN_PASSPHRASE="use-a-real-passphrase-here"
 
 node dist/cli.js --vault ./vault/personal init
 node dist/cli.js --vault ./vault/personal add health 'DOCTOR_NEXT_APPOINTMENT="2026-09-15"' --desc "Bir sonraki doktor kontrol tarihi"
@@ -152,15 +166,29 @@ node dist/cli.js --vault ./vault/personal lock
 
 # Rewrite pre-versioning files in the current encrypted envelope
 node dist/cli.js --vault ./vault/personal migrate
+
+# Re-wrap the keyring under a new passphrase, at the current KDF cost
+node dist/cli.js --vault ./vault/personal passphrase change
 ```
 
 Encrypted files carry an explicit envelope version, cipher name and the exact
 scrypt parameters they were written with, and those header fields are
 authenticated together with the ciphertext — an attacker cannot edit the
 recorded cost factor to weaken the next derivation without the tag check
-failing. Files written before versioning existed still open, and `sbrain
+failing. Files written before versioning existed still open, and `vbrain
 migrate` upgrades them in place. `test/fixtures/` holds vaults written by
 earlier formats so a future change has to prove it can still read them.
+
+- `vbrain passphrase change` — change the vault passphrase. The keyring is
+  re-wrapped at the current key-derivation cost, so this is also how a vault
+  created under an older, cheaper setting raises its work factor. Nothing is
+  re-encrypted, and it takes the same time on a 100,000-note vault as on an
+  empty one. Add `--allow-same-passphrase` to raise the cost without changing
+  the passphrase. It never consults the OS credential store for the current
+  passphrase, so running it unattended requires both `VBRAIN_PASSPHRASE` (the
+  current passphrase) and `VBRAIN_NEW_PASSPHRASE` (the replacement) to be set.
+  If this vault has a passphrase remembered in the OS credential store, it is
+  updated to the new one.
 
 ## Encrypted Markdown documents
 
@@ -358,10 +386,10 @@ a manifest and one JavaScript file, and its reach is finite and declared.
 ```
 
 ```bash
-sbrain plugins install ./plugin.json ./main.js   # installs, but leaves it off
-sbrain plugins list                              # what is installed and what it may reach
-sbrain plugins enable word-count
-sbrain plugins remove word-count                 # takes the plugin's settings with it
+vbrain plugins install ./plugin.json ./main.js   # installs, but leaves it off
+vbrain plugins list                              # what is installed and what it may reach
+vbrain plugins enable word-count
+vbrain plugins remove word-count                 # takes the plugin's settings with it
 ```
 
 Publishers can bind the manifest and exact source bytes into one Ed25519
@@ -369,16 +397,16 @@ package. The public key travels in the signature; the private key never enters
 the vault:
 
 ```bash
-sbrain plugins keygen ./publisher.private.pem
-sbrain plugins sign ./plugin.json ./main.js \
+vbrain plugins keygen ./publisher.private.pem
+vbrain plugins sign ./plugin.json ./main.js \
   --key ./publisher.private.pem --out ./plugin.signed.json
-sbrain plugins install ./plugin.signed.json ./main.js
+vbrain plugins install ./plugin.signed.json ./main.js
 
 # Signed-only operation and local emergency revocation
-sbrain plugins restricted on
-sbrain plugins revoke-signer word-count
-sbrain plugins policy
-sbrain plugins restore-signer <64-character-key-id>
+vbrain plugins restricted on
+vbrain plugins revoke-signer word-count
+vbrain plugins policy
+vbrain plugins restore-signer <64-character-key-id>
 ```
 
 Restricted mode refuses unsigned installation and prevents already-installed
@@ -471,7 +499,7 @@ prototype-shaping keys are rejected before anything enters encrypted storage.
 ```json
 {
   "mcpServers": {
-    "secondbrain-vault": {
+    "vault-brain": {
       "command": "node",
       "args": [
         "/absolute/path/to/secondbrain-vault/dist/cli.js",
@@ -615,7 +643,7 @@ cost scales with the number of _keys_, not the size of your notes.
 
 ## Threat model / honesty notes
 
-- Encryption protects data **at rest**. Once `sbrain get` or `resolve_key`
+- Encryption protects data **at rest**. Once `vbrain get` or `resolve_key`
   decrypts a value, it's plaintext in that process's memory / stdout — treat
   it like any other secret in a terminal.
 - The passphrase prompt is masked on a real terminal, and `sbrain unlock
@@ -624,7 +652,7 @@ cost scales with the number of _keys_, not the size of your notes.
   exercised by this project's tests, because that is the platform it is
   developed on. An OS credential store protects the secret from other users and
   other machines — not from code already running as you.
-- `SBRAIN_PASSPHRASE` still wins over both, which is what makes scripts and MCP
+- `VBRAIN_PASSPHRASE` still wins over both, which is what makes scripts and MCP
   work; an environment variable is visible to your own processes, so prefer the
   credential store for interactive use.
 - Nothing here stops a user (or a misconfigured agent with general filesystem

@@ -41,7 +41,19 @@ export interface LegacyEncryptedPayload {
   ciphertext: string;
 }
 
-export type AnyEncryptedPayload = EncryptedPayload | LegacyEncryptedPayload;
+/** Envelope version written when the vault has a keyring: no KDF, the key comes from the keyset. */
+export const KEYED_ENVELOPE_VERSION = 2;
+
+export interface KeyedEncryptedPayload {
+  version: 2;
+  cipher: "aes-256-gcm";
+  keyId: "kv";
+  iv: string;
+  authTag: string;
+  ciphertext: string;
+}
+
+export type AnyEncryptedPayload = EncryptedPayload | LegacyEncryptedPayload | KeyedEncryptedPayload;
 
 const LEGACY_PARAMETERS: Omit<ScryptParameters, "salt"> = {
   name: "scrypt",
@@ -84,8 +96,10 @@ function validateParameters(kdf: unknown): ScryptParameters {
   if (!Number.isSafeInteger(N) || N < 2 ** 14 || N > 2 ** 20 || (N & (N - 1)) !== 0) {
     throw new Error("Encrypted envelope declares an unacceptable scrypt cost.");
   }
-  if (!Number.isSafeInteger(r) || r < 1 || r > 32) throw new Error("Encrypted envelope declares an unacceptable scrypt block size.");
-  if (!Number.isSafeInteger(p) || p < 1 || p > 16) throw new Error("Encrypted envelope declares an unacceptable scrypt parallelism.");
+  if (!Number.isSafeInteger(r) || r < 1 || r > 32)
+    throw new Error("Encrypted envelope declares an unacceptable scrypt block size.");
+  if (!Number.isSafeInteger(p) || p < 1 || p > 16)
+    throw new Error("Encrypted envelope declares an unacceptable scrypt parallelism.");
   base64Bytes(candidate.salt, 16, 64, "salt");
   return { name: "scrypt", N, r, p, salt: candidate.salt };
 }
@@ -108,7 +122,7 @@ function deriveKey(passphrase: string, salt: Buffer, parameters: Omit<ScryptPara
 function headerAad(version: number, kdf: ScryptParameters): Buffer {
   return Buffer.from(
     JSON.stringify({ version, cipher: ALGO, kdf: { name: kdf.name, N: kdf.N, r: kdf.r, p: kdf.p, salt: kdf.salt } }),
-    "utf8"
+    "utf8",
   );
 }
 
@@ -144,9 +158,12 @@ export function encrypt(plaintext: string, passphrase: string): EncryptedPayload
  */
 export function decrypt(payload: AnyEncryptedPayload, passphrase: string): string {
   const version = envelopeVersion(payload);
+  if (version === KEYED_ENVELOPE_VERSION) {
+    throw new Error("This file is encrypted with the vault keyring; open it with the vault's keyset, not a passphrase.");
+  }
   if (version > ENVELOPE_VERSION) {
     throw new Error(
-      `This vault file uses envelope version ${version}; this build understands up to ${ENVELOPE_VERSION}. Upgrade secondbrain-vault to open it.`
+      `This vault file uses envelope version ${version}; this build understands up to ${ENVELOPE_VERSION}. Upgrade Vault Brain to open it.`,
     );
   }
   if (version !== 0 && version !== 1) throw new Error(`Unsupported encrypted envelope version: ${version}`);
@@ -167,12 +184,56 @@ export function decrypt(payload: AnyEncryptedPayload, passphrase: string): strin
     const decipher = crypto.createDecipheriv(ALGO, key, iv);
     if (!legacy) decipher.setAAD(headerAad(version, kdf));
     decipher.setAuthTag(authTag);
-    const dec = Buffer.concat([
-      decipher.update(Buffer.from(payload.ciphertext, "base64")),
-      decipher.final(),
-    ]);
+    const dec = Buffer.concat([decipher.update(Buffer.from(payload.ciphertext, "base64")), decipher.final()]);
     return dec.toString("utf8");
   } finally {
     key.fill(0);
   }
+}
+
+const KEYED_AAD_CONTEXT = "secondbrain-vault:kv:v2";
+
+/**
+ * The logical file name is authenticated, so an attacker with write access
+ * cannot swap one encrypted category for another and have it open as that
+ * category. The v1 envelope could not do this: it bound only its own header.
+ */
+function keyedAad(name: string): Buffer {
+  if (!name || name.length > 128) throw new Error("Invalid encrypted file identity.");
+  return Buffer.from(
+    JSON.stringify({ context: KEYED_AAD_CONTEXT, version: KEYED_ENVELOPE_VERSION, cipher: ALGO, keyId: "kv", name }),
+    "utf8",
+  );
+}
+
+export function encryptWithKey(plaintext: string, key: Buffer, name: string): KeyedEncryptedPayload {
+  if (key.length !== KEY_LEN) throw new Error("A 256-bit key is required.");
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv(ALGO, key, iv);
+  cipher.setAAD(keyedAad(name));
+  const enc = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+  return {
+    version: KEYED_ENVELOPE_VERSION,
+    cipher: ALGO,
+    keyId: "kv",
+    iv: iv.toString("base64"),
+    authTag: cipher.getAuthTag().toString("base64"),
+    ciphertext: enc.toString("base64"),
+  };
+}
+
+export function decryptWithKey(payload: KeyedEncryptedPayload, key: Buffer, name: string): string {
+  if (payload.version !== KEYED_ENVELOPE_VERSION) {
+    throw new Error(`Unsupported keyed envelope version: ${String(payload.version)}`);
+  }
+  if (payload.cipher !== ALGO) throw new Error("Unsupported cipher in encrypted envelope.");
+  if (payload.keyId !== "kv") throw new Error(`Unsupported key ID in encrypted envelope: ${String(payload.keyId)}`);
+  if (key.length !== KEY_LEN) throw new Error("A 256-bit key is required.");
+  const decipher = crypto.createDecipheriv(ALGO, key, base64Bytes(payload.iv, 12, 12, "iv"));
+  decipher.setAAD(keyedAad(name));
+  decipher.setAuthTag(base64Bytes(payload.authTag, 16, 16, "authentication tag"));
+  return Buffer.concat([
+    decipher.update(Buffer.from(payload.ciphertext, "base64")),
+    decipher.final(),
+  ]).toString("utf8");
 }

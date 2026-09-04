@@ -30,9 +30,9 @@
 export function sandboxSource(pluginSource: string): string {
   return [
     `(${bootstrap.toString()})();`,
-    ";(function (sbrain) {",
+    ";(function (vbrain) {",
     pluginSource,
-    "\n})(self.__sbrainBridge);",
+    "\n})(self.__vbrainBridge);",
   ].join("\n");
 }
 
@@ -67,7 +67,7 @@ function bootstrap() {
     } catch {
       // A global that refuses to be replaced is reported rather than silently
       // tolerated, so the host can decide what to do about a partial sandbox.
-      scope.__sbrainSandboxIncomplete = true;
+      scope.__vbrainSandboxIncomplete = true;
     }
   }
 
@@ -139,7 +139,7 @@ function bootstrap() {
 
   for (const group of Object.values(bridge)) Object.freeze(group);
   Object.freeze(bridge);
-  Object.defineProperty(scope, "__sbrainBridge", {
+  Object.defineProperty(scope, "__vbrainBridge", {
     configurable: false,
     writable: false,
     enumerable: false,
@@ -181,7 +181,7 @@ function bootstrap() {
     port.postMessage({
       kind: "emit",
       event: "ready",
-      payload: { sandboxIncomplete: scope.__sbrainSandboxIncomplete === true },
+      payload: { sandboxIncomplete: scope.__vbrainSandboxIncomplete === true },
     })
   );
 }

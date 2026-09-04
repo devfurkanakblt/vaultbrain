@@ -18,6 +18,7 @@ const sampleNote: NoteDocument = {
 };
 
 const bridgeMock = vi.hoisted(() => ({
+  pickVaultDirectory: vi.fn(),
   unlock: vi.fn(),
   lock: vi.fn(),
   listNotes: vi.fn(),
@@ -210,8 +211,50 @@ describe("desktop workspace", () => {
   it("unlocks locally and opens the first encrypted note", async () => {
     await unlockWorkspace();
     expect(bridgeMock.unlock).toHaveBeenCalledWith("./vault/personal", "safe passphrase");
+    expect(screen.getByText("VB")).toBeInTheDocument();
     expect(screen.getByRole("navigation", { name: "Vault notes" })).toBeInTheDocument();
     expect(screen.getByText("Encrypted & saved")).toBeInTheDocument();
+  });
+
+  it("fills the vault path from the native folder chooser", async () => {
+    bridgeMock.pickVaultDirectory.mockResolvedValue("D:/Vaults/Field notes");
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose a vault folder" }));
+    await waitFor(() => expect(screen.getByLabelText("Vault location")).toHaveValue("D:/Vaults/Field notes"));
+  });
+
+  it("leaves the vault path alone when the folder chooser is dismissed", async () => {
+    bridgeMock.pickVaultDirectory.mockResolvedValue(null);
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose a vault folder" }));
+    await waitFor(() => expect(bridgeMock.pickVaultDirectory).toHaveBeenCalled());
+    expect(screen.getByLabelText("Vault location")).toHaveValue("./vault/personal");
+  });
+
+  it("remembers unlocked vault paths and flags one this device has not opened", async () => {
+    render(<App />);
+    const location = screen.getByLabelText("Vault location");
+    expect(location).toHaveAccessibleDescription(/has not opened/iu);
+
+    fireEvent.change(screen.getByLabelText("Passphrase"), { target: { value: "safe passphrase" } });
+    fireEvent.click(screen.getByRole("button", { name: /unlock workspace/i }));
+    await screen.findByDisplayValue("Product principles");
+    expect(JSON.parse(localStorage.getItem("vbrain:vaults")!)).toEqual(["./vault/personal"]);
+
+    cleanup();
+    render(<App />);
+    const reopened = screen.getByLabelText("Vault location");
+    expect(reopened).not.toHaveAccessibleDescription();
+    // The one remembered vault is the one already in the field, so the list has
+    // nowhere else to offer and stays out of the way.
+    expect(screen.queryByRole("button", { name: "./vault/personal" })).not.toBeInTheDocument();
+
+    fireEvent.change(reopened, { target: { value: "D:/Vaults/Work" } });
+    expect(reopened).toHaveAccessibleDescription(/has not opened/iu);
+    fireEvent.click(screen.getByRole("button", { name: "./vault/personal" }));
+    expect(screen.getByLabelText("Vault location")).toHaveValue("./vault/personal");
   });
 
   it("searches notes and opens a result", async () => {
@@ -415,7 +458,7 @@ describe("desktop workspace", () => {
   });
 
   it("locks the workspace after the configured idle window and says so", async () => {
-    localStorage.setItem("sbrain:idle-lock", "1");
+    localStorage.setItem("vbrain:idle-lock", "1");
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       await unlockWorkspace();
@@ -430,7 +473,7 @@ describe("desktop workspace", () => {
   });
 
   it("keeps the vault open past the idle window while auto-lock is disabled", async () => {
-    localStorage.setItem("sbrain:idle-lock", "0");
+    localStorage.setItem("vbrain:idle-lock", "0");
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       await unlockWorkspace();
@@ -484,11 +527,11 @@ describe("desktop workspace", () => {
     fireEvent.change(within(editor).getByLabelText("Accent hex"), { target: { value: "#ff8800" } });
     await waitFor(() => expect(document.documentElement.style.getPropertyValue("--acid")).toBe("#ff8800"));
     expect(document.documentElement.style.getPropertyValue("--acid-deep")).toBe(shade("#ff8800", -0.34));
-    expect(JSON.parse(localStorage.getItem("sbrain:theme")!)).toMatchObject({ accent: "#ff8800", preset: "custom" });
+    expect(JSON.parse(localStorage.getItem("vbrain:theme")!)).toMatchObject({ accent: "#ff8800", preset: "custom" });
 
     fireEvent.click(within(editor).getByRole("button", { name: /reset to archive/i }));
     await waitFor(() => expect(document.documentElement.style.getPropertyValue("--acid")).toBe(DEFAULT_THEME.accent));
-    expect(localStorage.getItem("sbrain:theme")).toBeNull();
+    expect(localStorage.getItem("vbrain:theme")).toBeNull();
   });
 
   it("opens a canvas, adds a node and writes the board back encrypted", async () => {

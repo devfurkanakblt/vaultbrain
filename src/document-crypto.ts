@@ -25,8 +25,16 @@ export interface DocumentPayload {
 
 export interface DocumentKeySession {
   rootDir: string;
+  /** Encrypts every object under `documents/`. */
   key: Buffer;
-  manifest: DocumentManifest;
+  /** Keys the content address of an attachment. Never rotated. */
+  attachmentIdKey: Buffer;
+  /** Keys sync change IDs. Never rotated: the causal DAG references them. */
+  syncChangeKey: Buffer;
+  /** Keys sync change body encryption (the envelope subkey). Rotatable. */
+  syncEnvelopeKey: Buffer;
+  /** The legacy manifest, or null when the keys came from the vault keyring. */
+  manifest: DocumentManifest | null;
 }
 
 function derive(passphrase: string, salt: Buffer, N: number): Buffer {
@@ -46,6 +54,18 @@ export function openDocumentKey(vaultDir: string, passphrase: string): DocumentK
   const manifestPath = resolveInside(rootDir, "manifest.json");
   assertNoSymlinkComponents(vaultDir, rootDir);
   fs.mkdirSync(rootDir, { recursive: true, mode: 0o700 });
+
+  const vaultKeys = openOrCreateVaultKeys(vaultDir, passphrase);
+  if (vaultKeys) {
+    return {
+      rootDir,
+      key: vaultKeys.documents,
+      attachmentIdKey: vaultKeys.attachmentId,
+      syncChangeKey: vaultKeys.syncChange,
+      syncEnvelopeKey: vaultKeys.syncEnvelope,
+      manifest: null,
+    };
+  }
 
   let manifest: DocumentManifest;
   if (fs.existsSync(manifestPath)) {
@@ -69,17 +89,24 @@ export function openDocumentKey(vaultDir: string, passphrase: string): DocumentK
       kdf: { name: "scrypt", N: SCRYPT_N, salt: salt.toString("base64") },
       verifier: verifier(key),
     };
-    writeFileAtomic(manifestPath, JSON.stringify(manifest, null, 2), { mode: 0o600 });
-    return { rootDir, key, manifest };
   }
 
-  const key = derive(passphrase, Buffer.from(manifest.kdf.salt, "base64"), manifest.kdf.N);
-  const actual = Buffer.from(verifier(key), "hex");
-  const expected = Buffer.from(manifest.verifier, "hex");
-  if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) {
-    throw new Error("Unable to unlock document vault: wrong passphrase or damaged manifest.");
-  }
-  return { rootDir, key, manifest };
+  const salt = crypto.randomBytes(16);
+  const key = derive(passphrase, salt, SCRYPT_N);
+  manifest = {
+    version: 1,
+    kdf: { name: "scrypt", N: SCRYPT_N, salt: salt.toString("base64") },
+    verifier: verifier(key),
+  };
+  writeFileAtomic(manifestPath, JSON.stringify(manifest, null, 2), { mode: 0o600 });
+  return {
+    rootDir,
+    key,
+    attachmentIdKey: Buffer.from(key),
+    syncChangeKey: Buffer.from(key),
+    syncEnvelopeKey: Buffer.from(key),
+    manifest,
+  };
 }
 
 export function encryptDocument(plaintext: string, key: Buffer, aad: string): DocumentPayload {
