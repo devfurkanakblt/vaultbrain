@@ -167,6 +167,9 @@ node dist/cli.js --vault ./vault/personal lock
 
 # Rewrite pre-versioning files in the current encrypted envelope
 node dist/cli.js --vault ./vault/personal migrate
+
+# Re-wrap the keyring under a new passphrase, at the current KDF cost
+node dist/cli.js --vault ./vault/personal passphrase change
 ```
 
 Encrypted files carry an explicit envelope version, cipher name and the exact
@@ -176,6 +179,17 @@ recorded cost factor to weaken the next derivation without the tag check
 failing. Files written before versioning existed still open, and `vbrain
 migrate` upgrades them in place. `test/fixtures/` holds vaults written by
 earlier formats so a future change has to prove it can still read them.
+
+- `vbrain passphrase change` — change the vault passphrase. The keyring is
+  re-wrapped at the current key-derivation cost, so this is also how a vault
+  created under an older, cheaper setting raises its work factor. Nothing is
+  re-encrypted, and it takes the same time on a 100,000-note vault as on an
+  empty one. Add `--allow-same-passphrase` to raise the cost without changing
+  the passphrase. It never consults the OS credential store for the current
+  passphrase, so running it unattended requires both `VBRAIN_PASSPHRASE` (the
+  current passphrase) and `VBRAIN_NEW_PASSPHRASE` (the replacement) to be set.
+  If this vault has a passphrase remembered in the OS credential store, it is
+  updated to the new one.
 
 ## Encrypted Markdown documents
 

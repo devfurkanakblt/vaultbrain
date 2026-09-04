@@ -19,14 +19,48 @@ export function accountFor(vaultDir: string): string {
   return crypto.createHash("sha256").update(path.resolve(vaultDir)).digest("hex").slice(0, 32);
 }
 
-function run(command: string, args: string[], input?: string): string {
-  return execFileSync(command, args, {
-    input,
-    encoding: "utf8",
-    stdio: ["pipe", "pipe", "pipe"],
-    windowsHide: true,
-    timeout: 20_000,
-  });
+/**
+ * Every backend call goes through here, so this is the one place that has to
+ * keep a failing command from leaking its arguments. `execFileSync` builds
+ * its failure message as "Command failed: <file> <args joined>", and more
+ * than one backend passes a secret as an argv element (notably macOS'
+ * `security -w <secret>`) — so on failure the message is replaced with one
+ * that names only the command and its exit status, never the arguments.
+ *
+ * Exported only so tests can drive this sanitisation directly with a
+ * guaranteed-to-fail command; no backend call site needs the export.
+ */
+export function run(command: string, args: string[], input?: string): string {
+  try {
+    return execFileSync(command, args, {
+      input,
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+      timeout: 20_000,
+    });
+  } catch (error) {
+    const record = error && typeof error === "object" ? (error as Record<string, unknown>) : undefined;
+    const status = record && "status" in record ? (record.status as number | null | undefined) : undefined;
+    const code = record && "code" in record ? (record.code as string | number | null | undefined) : undefined;
+    const signal = record && "signal" in record ? (record.signal as string | null | undefined) : undefined;
+    const statusText = status === undefined || status === null ? "unknown" : String(status);
+    const codeText = code === undefined || code === null ? "" : ` [${code}]`;
+    // `execFileSync`'s own error carries `spawnargs`, which on some backends
+    // (macOS' `security -w <secret>`) is the secret itself. Node's default
+    // inspection of a thrown error prints `.cause` too, so attaching the raw
+    // error as `cause` would leak the secret the moment anyone lets this
+    // propagate to a default handler or logs `util.inspect(error)` — the
+    // sanitised `.message` alone is not enough of a guarantee. Attach only a
+    // scrubbed cause carrying the diagnostic fields that cannot themselves
+    // contain arguments, so `preserve-caught-error` stays satisfied without
+    // re-attaching argv.
+    const scrubbedCause = { code, status, signal };
+    const symptom = new Error(`Command failed: ${command}${codeText} (exit status ${statusText})`, {
+      cause: scrubbedCause,
+    });
+    throw symptom;
+  }
 }
 
 function canRun(command: string, args: string[]): boolean {
@@ -192,4 +226,47 @@ export function recallPassphrase(vaultDir: string): string | undefined {
 
 export function forgetPassphrase(vaultDir: string): boolean {
   return keychain().forget(accountFor(vaultDir));
+}
+
+/**
+ * Replaces this vault's remembered passphrase after it has changed. A vault
+ * with nothing remembered is left alone: storing a credential the user never
+ * asked to store is `vbrain unlock --remember`'s job, not a side effect of a
+ * passphrase change. A store that refuses the write is reported rather than
+ * thrown, because by the time this runs the vault has already changed and the
+ * caller must not report failure for an operation that completed.
+ *
+ * The failure `error`, if any, is always a short fixed description — never the
+ * raw error from the backend. On some backends (notably macOS, which passes
+ * the secret as an argv element to `security`) `execFileSync`'s failure
+ * message embeds the full command line, which would put the new passphrase in
+ * cleartext into logs or a terminal. When the update cannot complete, the
+ * stale credential is forgotten instead of left behind, since a stale
+ * credential makes every later command fail against the *old* passphrase with
+ * no indication why; `cleared` reports whether that forget succeeded.
+ */
+export function updateRememberedPassphrase(
+  vaultDir: string,
+  passphrase: string,
+): { updated: boolean; backend: string; cleared: boolean; error?: string } {
+  const backend = keychain();
+  const account = accountFor(vaultDir);
+  try {
+    if (!backend.lookup(account)) return { updated: false, backend: backend.name, cleared: false };
+    backend.store(account, passphrase);
+    return { updated: true, backend: backend.name, cleared: false };
+  } catch {
+    let cleared: boolean;
+    try {
+      cleared = backend.forget(account);
+    } catch {
+      cleared = false;
+    }
+    return {
+      updated: false,
+      backend: backend.name,
+      cleared,
+      error: "the credential store rejected the write",
+    };
+  }
 }

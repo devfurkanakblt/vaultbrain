@@ -88,6 +88,16 @@ or calling AI model may hold that plaintext.
 - Upgrading a vault to the keyring format does not strengthen copies that
   already exist. A backup taken before `vbrain migrate` keeps the older
   key-derivation cost and still opens with the passphrase it was written under.
+- Changing the passphrase does not re-encrypt content. It replaces the wrapping
+  around the vault's keys, nothing more. Anyone who already knew the old
+  passphrase and holds a copy of the vault reads what that copy contains, before
+  and after. `vbrain rekey` will be the answer to a leaked passphrase once it
+  ships; it has not shipped yet.
+
+  A vault created before the default key-derivation cost rose keeps its old cost
+  until its passphrase is changed once. `vbrain passphrase change` writes every
+  slot at the current default, so one run raises the work factor without touching
+  a single note.
 - Every vault, newly created or migrated, keeps its data keys only inside
   `keyring.json`: it wraps the keys that decrypt everything, and the correct
   passphrase alone cannot recover a vault whose keyring is lost or corrupted.
