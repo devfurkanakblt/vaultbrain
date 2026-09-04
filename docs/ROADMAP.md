@@ -89,17 +89,17 @@ Each phase must ship a usable vertical slice and keep older vaults readable.
   - [x] Rust core opens a keyring vault, and both cores create new vaults keyring-native
 - [x] Passphrase change, including the KDF cost upgrade path
 - [ ] Full re-key after a compromised passphrase
-- [ ] Survivable keyrings: a second way in, a way to look inside, and a record of every change
-  - [ ] Recovery slot, so one forgotten passphrase or one damaged `keyring.json` is not
+- [x] Survivable keyrings: a second way in, a way to look inside, and a record of every change
+  - [x] Recovery slot, so one forgotten passphrase or one damaged `keyring.json` is not
         the permanent loss of every note. The format already carries a slot list and
         reserves this slot; nothing writes one yet, and the keyring concentrated into
         one small file what used to be derived from the passphrase directly.
-  - [ ] `vbrain keyring status`, listing every slot with its id, label, creation time
+  - [x] `vbrain keyring status`, listing every slot with its id, label, creation time
         and KDF cost. Without it a slot someone else added is invisible — a passphrase
         change deliberately preserves the slots it cannot open — and a user has no way
         to learn their vault still sits at the old cost, which makes the upgrade path
         undiscoverable.
-  - [ ] Audit entries for `migrate` and `passphrase change`. Every content command
+  - [x] Audit entries for `migrate` and `passphrase change`. Every content command
         already appends to the passphrase-authenticated chain; the two commands that
         touch key material append nothing, so "when did this vault's passphrase last
         change" has no answer. The `audit` key is permanent, so entries written before

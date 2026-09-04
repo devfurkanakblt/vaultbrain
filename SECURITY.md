@@ -98,12 +98,16 @@ or calling AI model may hold that plaintext.
   until its passphrase is changed once. `vbrain passphrase change` writes every
   slot at the current default, so one run raises the work factor without touching
   a single note.
-- Every vault, newly created or migrated, keeps its data keys only inside
-  `keyring.json`: it wraps the keys that decrypt everything, and the correct
-  passphrase alone cannot recover a vault whose keyring is lost or corrupted.
-  A backup that omits `keyring.json` is not a backup. Migration additionally
-  removes the legacy manifest's key-check material, so a migrated vault has no
-  fallback path at all once its keyring is gone.
+- Without a recovery kit, a vault keeps its only wrapped data-key copies in
+  `keyring.json`; the correct primary passphrase alone cannot reconstruct a
+  lost or corrupted keyring. `vbrain keyring recovery create` writes an
+  independently usable wrapped copy outside the vault. Store its 256-bit code
+  separately: possession of both kit and code is equivalent to vault access.
+- Removing a recovery slot does not erase offline kit copies. A suspected kit
+  disclosure requires removing the slot, re-keying the content and creating a
+  new kit. Permanent attachment-ID, sync-change-ID and audit keys deliberately
+  survive re-key, so an old kit still exposes those stable identities and can
+  open ciphertext backups made before the re-key.
 - Key names and descriptions exported to `schema.json`, plus explicitly
   plaintext recovery metadata documented in the architecture, must be treated
   as non-secret metadata.

@@ -25,6 +25,13 @@ import { startMcpServer } from "./mcp-server.js";
 import { migrateToKeyring } from "./keyring-migrate.js";
 import { changeVaultPassphrase, MIN_PASSPHRASE_LENGTH } from "./keyring-passphrase.js";
 import { detectVaultFormat } from "./keyring.js";
+import { readKeyringStatus } from "./keyring-status.js";
+import {
+  createRecoveryKit,
+  generateRecoveryCode,
+  removeRecoverySlot,
+  restoreVaultKeyring,
+} from "./keyring-recovery.js";
 import {
   addGrant,
   approveRequest,
@@ -1227,6 +1234,84 @@ program
       console.log("Replaced documents/manifest.json with a version marker; its passphrase verifier is gone.");
     }
     console.log("Desktop builds older than this release cannot open a migrated vault.");
+  });
+
+const keyringCommand = program.command("keyring").description("inspect and recover the encrypted vault keyring");
+
+keyringCommand
+  .command("status")
+  .description("list public keyring slot metadata without unlocking the vault")
+  .option("--json", "emit machine-readable JSON")
+  .action((opts) => {
+    const status = readKeyringStatus(program.opts().vault);
+    if (opts.json) {
+      console.log(JSON.stringify(status, null, 2));
+      return;
+    }
+    console.log(`Vault format: ${status.format}`);
+    if (status.format !== "keyring") {
+      if (status.format === "legacy") console.log("Run 'vbrain migrate' to create a keyring.");
+      return;
+    }
+    console.log(`Keyring version: ${status.version}`);
+    console.log(`Recovery configured: ${status.recoveryConfigured ? "yes" : "no"}`);
+    for (const slot of status.slots) {
+      console.log(
+        `${slot.id}  ${slot.label}  ${slot.type}  created ${slot.createdAt}  ` +
+          `scrypt N=${slot.kdf.N}, r=${slot.kdf.r}, p=${slot.kdf.p} (${slot.kdf.cost})`,
+      );
+    }
+  });
+
+const recoveryCommand = keyringCommand.command("recovery").description("manage offline recovery access");
+
+recoveryCommand
+  .command("create")
+  .description("create a recovery slot and an independently stored recovery kit")
+  .requiredOption("--out <file>", "write the recovery kit outside the vault")
+  .action(async (opts) => {
+    const dir = program.opts().vault;
+    const current = process.env.VBRAIN_PASSPHRASE ?? (await readSecret("Current vault passphrase: "));
+    if (!current) throw new Error("A passphrase is required.");
+    const supplied = process.env.VBRAIN_RECOVERY_CODE;
+    const recoveryCode = supplied ?? generateRecoveryCode();
+    if (!supplied) {
+      console.error("Write down this recovery code and store it separately from the kit:");
+      console.error(recoveryCode);
+    }
+    const confirmation =
+      process.env.VBRAIN_RECOVERY_CONFIRM ?? (await readSecret("Repeat the recovery code to confirm: "));
+    if (confirmation !== recoveryCode) throw new Error("The recovery-code confirmation did not match; nothing changed.");
+    const report = createRecoveryKit(dir, current, opts.out, { recoveryCode });
+    console.log(`Recovery kit created at ${report.kitPath}.`);
+    console.log(`Recovery slot: ${report.slotId}.`);
+  });
+
+recoveryCommand
+  .command("restore")
+  .description("restore a missing or damaged keyring from a recovery kit")
+  .requiredOption("--from <file>", "recovery kit file")
+  .action(async (opts) => {
+    const dir = program.opts().vault;
+    const recoveryCode = process.env.VBRAIN_RECOVERY_CODE ?? (await readSecret("Recovery code: "));
+    const next = process.env.VBRAIN_NEW_PASSPHRASE ?? (await readNewPassphrase());
+    const report = restoreVaultKeyring(dir, opts.from, recoveryCode, next);
+    console.log(`Vault keyring restored with recovery slot ${report.slotId}.`);
+    console.log(`Verified encrypted objects: ${report.verifiedObjects}.`);
+    if (report.backupPath) console.log(`Previous keyring preserved at ${report.backupPath}.`);
+  });
+
+recoveryCommand
+  .command("remove")
+  .description("detach one recovery slot; an existing offline kit remains usable until re-key")
+  .requiredOption("--slot <uuid>", "recovery slot ID shown by keyring status")
+  .action(async (opts) => {
+    const dir = program.opts().vault;
+    const current = process.env.VBRAIN_PASSPHRASE ?? (await readSecret("Current vault passphrase: "));
+    if (!current) throw new Error("A passphrase is required.");
+    const report = removeRecoverySlot(dir, current, opts.slot);
+    console.log(`Removed recovery slot ${report.slotId}; ${report.remainingSlots} slot(s) remain.`);
+    console.error("Warning: removing the slot does not invalidate copies of the offline recovery kit. Run 'vbrain rekey' to rotate content keys.");
   });
 
 const passphraseCommand = program.command("passphrase").description("manage the passphrase that wraps this vault's keys");

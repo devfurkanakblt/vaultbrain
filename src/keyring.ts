@@ -175,13 +175,35 @@ export function zeroKeySet(keys: KeySet): void {
 }
 
 export function wrapKeySet(keys: KeySet, passphrase: string, N: number = DEFAULT_SCRYPT_N): KeyringSlot {
+  return wrapKeySetSlot(keys, passphrase, { N, label: "primary" });
+}
+
+export interface WrapKeySetSlotOptions {
+  N?: number;
+  label: string;
+  id?: string;
+  createdAt?: string;
+}
+
+/** Wrap the keyset in a named slot without changing the on-disk slot format. */
+export function wrapKeySetSlot(
+  keys: KeySet,
+  passphrase: string,
+  options: WrapKeySetSlotOptions,
+): KeyringSlot {
   if (!passphrase) throw new Error("A non-empty vault passphrase is required.");
   const header = {
-    id: crypto.randomUUID(),
+    id: options.id ?? crypto.randomUUID(),
     type: "passphrase" as const,
-    label: "primary",
-    kdf: validateKdf({ name: "scrypt", N, r: SCRYPT_R, p: SCRYPT_P, salt: crypto.randomBytes(16).toString("base64") }),
-    createdAt: new Date().toISOString(),
+    label: options.label,
+    kdf: validateKdf({
+      name: "scrypt",
+      N: options.N ?? DEFAULT_SCRYPT_N,
+      r: SCRYPT_R,
+      p: SCRYPT_P,
+      salt: crypto.randomBytes(16).toString("base64"),
+    }),
+    createdAt: options.createdAt ?? new Date().toISOString(),
   };
   const derived = deriveSlotKey(passphrase, header.kdf);
   try {
