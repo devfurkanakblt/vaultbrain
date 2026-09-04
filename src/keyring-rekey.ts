@@ -294,9 +294,13 @@ export function stagedTree(vaultDir: string): string {
  * the old one. Nothing live is touched, so any failure here — a wrong
  * passphrase, a damaged object, a full disk — leaves the vault byte-identical.
  *
- * Any prior staging attempt is discarded before this one starts: a leftover
- * `.rekey/new` from an interrupted run must not be mistaken for a complete,
- * verified stage.
+ * Any prior staging attempt is discarded before this one starts, and that
+ * unconditional removal is the entire basis for the anti-resume property:
+ * nothing on disk distinguishes a complete, verified `.rekey/new` from one a
+ * process left behind when it was killed mid-loop, so a leftover tree is
+ * never resumed or trusted — it is destroyed and rebuilt from scratch. (Task
+ * 4's journal is where a completeness marker lands; until then, do not add a
+ * code path that reuses an existing staging tree.)
  */
 export function stageRekey(vaultDir: string, oldKeys: KeySet, newKeys: KeySet, items: RekeyItem[]): void {
   const tree = stagedTree(vaultDir);
@@ -325,8 +329,16 @@ export function stageRekey(vaultDir: string, oldKeys: KeySet, newKeys: KeySet, i
     } catch (error) {
       // Fail closed: any failure anywhere in the loop discards the whole
       // shadow tree rather than leaving a partially staged (and therefore
-      // partially unverified) directory behind.
-      fs.rmSync(stagingRoot(vaultDir), { recursive: true, force: true });
+      // partially unverified) directory behind. The cleanup is itself
+      // guarded: a locked or read-only staging tree must not replace the
+      // diagnostic the operator needs — a wrong passphrase, a damaged
+      // object, a full disk — with an EBUSY from the removal. A surviving
+      // tree is harmless because the next run clears it on entry.
+      try {
+        fs.rmSync(stagingRoot(vaultDir), { recursive: true, force: true });
+      } catch {
+        // Intentionally ignored: the original failure is the one to report.
+      }
       throw error;
     } finally {
       plaintext?.fill(0);

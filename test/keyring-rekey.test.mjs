@@ -494,6 +494,26 @@ function pinnedKeySet(oldKeys) {
   return keys;
 }
 
+/**
+ * The fail-closed contract of a refused stage: every live file byte-identical
+ * to the hashes taken before the attempt, no file appearing or disappearing
+ * anywhere under the vault, and no staging tree left behind. Comparing the
+ * key sets and not just the values is what makes a surviving `.rekey` visible
+ * — a value-only comparison cannot see a file that was not there before.
+ */
+function assertVaultUnchanged(dir, before) {
+  const after = hashVault(dir);
+  for (const [relative, hash] of Object.entries(before)) {
+    assert.equal(after[relative], hash, `${relative} must not have changed`);
+  }
+  assert.deepEqual(
+    Object.keys(after).sort(),
+    Object.keys(before).sort(),
+    "a refused stage must not add or remove a single file anywhere in the vault",
+  );
+  assert.equal(fs.existsSync(stagingRoot(dir)), false, "the staging tree must not survive a refused stage");
+}
+
 test("staging writes a full shadow tree and touches nothing live", () => {
   const { dir } = seedVault();
   const oldKeys = openVaultKeys(dir, PASSPHRASE);
@@ -531,10 +551,7 @@ test("staging refuses when an artifact does not open under the current keyset", 
 
   assert.throws(() => stageRekey(dir, wrongKeys, newKeys, items), /.*/u);
 
-  const after = hashVault(dir);
-  for (const [relative, hash] of Object.entries(before)) {
-    assert.equal(after[relative], hash, `${relative} must not have changed`);
-  }
+  assertVaultUnchanged(dir, before);
 
   fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -565,6 +582,130 @@ test("a staging directory at the vault root does not break planRekey and is neve
     false,
     "no item under .rekey should ever be scheduled as vault content",
   );
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// The three tests below inject a failure PART WAY THROUGH the staging loop.
+// The wrong-keyset test above fails on the very first item, so it can never
+// show that a partially built shadow tree is discarded — the shape where
+// "no partial staging tree survives" means anything at all.
+
+// Kills the mutation "delete the fs.rmSync from stageRekey's catch block":
+// several items stage successfully before the damaged one, so removing the
+// cleanup leaves a real, partially populated .rekey tree that
+// assertVaultUnchanged sees as files that appeared.
+test("a damaged artifact at the end of the list leaves no partial staging tree", () => {
+  const { dir } = seedVault();
+  const oldKeys = openVaultKeys(dir, PASSPHRASE);
+  const newKeys = pinnedKeySet(oldKeys);
+  const items = planRekey(dir);
+  assert.ok(items.length > 3, "the seeded vault must hold several artifacts for this to be a mid-loop failure");
+
+  // A well-formed envelope sealed under a key this vault does not hold: what
+  // a damaged or foreign object looks like on disk. Written to the LAST item
+  // so everything before it stages cleanly first.
+  const damaged = items[items.length - 1];
+  const livePath = path.join(dir, ...damaged.path.split("/"));
+  fs.writeFileSync(livePath, encryptItem(damaged, randomKeySet(), Buffer.from("not this vault's plaintext")));
+
+  // Hashed after the damage, so the corrupted file is part of the baseline
+  // the vault must still match once staging refuses.
+  const before = hashVault(dir);
+
+  assert.throws(
+    () => stageRekey(dir, oldKeys, newKeys, items),
+    /Unsupported state or unable to authenticate data/u,
+  );
+
+  assertVaultUnchanged(dir, before);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// Kills two mutations at once: replacing the disk read-back with the buffer
+// already in hand (`verified = Buffer.from(plaintext)`), and neutering the
+// comparison (`verified.equals(verified)`). Both make a staged file that does
+// NOT carry its item's plaintext pass verification, so stageRekey returns
+// instead of throwing.
+//
+// The staged payload substituted here is a valid envelope over a plaintext
+// ten bytes short — the outcome of a write that landed but did not land in
+// full. A raw byte truncation of the ciphertext would only prove the reader
+// throws on garbage, which a mutated comparison would still do; a short but
+// well-formed payload is what forces the byte-for-byte comparison to be the
+// thing that catches it.
+test("the disk read-back catches a staged file that does not carry its plaintext", () => {
+  const { dir } = seedVault();
+  const oldKeys = openVaultKeys(dir, PASSPHRASE);
+  const newKeys = pinnedKeySet(oldKeys);
+  const items = planRekey(dir);
+  const plaintextOf = (item) => decryptItem(item, oldKeys, fs.readFileSync(path.join(dir, ...item.path.split("/"))));
+
+  // Partway through the list, so items stage cleanly on either side of it.
+  const targetIndex = items.findIndex((item, index) => index >= 2 && plaintextOf(item).length > 10);
+  assert.ok(targetIndex > 1, "the seeded vault must hold a mid-list artifact long enough to shorten");
+  const target = items[targetIndex];
+  const shortPlaintext = plaintextOf(target).subarray(0, -10);
+  const shortPayload = encryptItem(target, newKeys, shortPlaintext);
+
+  const before = hashVault(dir);
+  const realWriteFileSync = fs.writeFileSync;
+  let writes = 0;
+  try {
+    // writeFileAtomic (src/fs-safe.ts) issues exactly one writeFileSync per
+    // staged artifact, so the Nth call is items[N - 1].
+    fs.writeFileSync = (destination, data, options) => {
+      writes += 1;
+      return realWriteFileSync(destination, writes === targetIndex + 1 ? shortPayload : data, options);
+    };
+
+    assert.throws(() => stageRekey(dir, oldKeys, newKeys, items), /does not carry its plaintext/u);
+  } finally {
+    fs.writeFileSync = realWriteFileSync;
+  }
+
+  assert.equal(writes, targetIndex + 1, "staging must stop at the damaged write, not carry on past it");
+  assertVaultUnchanged(dir, before);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// A full disk partway through the loop: the original ENOSPC must reach the
+// caller unchanged, and the two artifacts already staged must not survive.
+test("a mid-list I/O failure aborts staging with the original error and no leftovers", () => {
+  const { dir } = seedVault();
+  const oldKeys = openVaultKeys(dir, PASSPHRASE);
+  const newKeys = pinnedKeySet(oldKeys);
+  const items = planRekey(dir);
+  assert.ok(items.length > 3, "the seeded vault must hold several artifacts for this to be a mid-loop failure");
+
+  const before = hashVault(dir);
+  const realOpenSync = fs.openSync;
+  let opens = 0;
+  try {
+    // writeFileAtomic opens the temporary sibling it writes; the third open
+    // is the third artifact, so two are already staged when the disk fills.
+    fs.openSync = (...args) => {
+      opens += 1;
+      if (opens === 3) {
+        const full = new Error("ENOSPC: no space left on device, open");
+        full.code = "ENOSPC";
+        throw full;
+      }
+      return realOpenSync(...args);
+    };
+
+    assert.throws(() => stageRekey(dir, oldKeys, newKeys, items), (error) => {
+      assert.equal(error.code, "ENOSPC", "the original I/O error must reach the caller, not a cleanup failure");
+      return true;
+    });
+  } finally {
+    fs.openSync = realOpenSync;
+  }
+
+  assert.equal(opens, 3, "staging must stop at the failed write, not carry on past it");
+  assertVaultUnchanged(dir, before);
 
   fs.rmSync(dir, { recursive: true, force: true });
 });
