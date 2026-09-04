@@ -208,17 +208,8 @@ export interface RekeyReport {
   rotated: KeyName[];
   /** Keys carried across unchanged, with the reason for each. */
   pinned: { name: KeyName; reason: string }[];
-  /** Re-encrypted artifacts, by class. */
-  reencrypted: {
-    documents: number;
-    history: number;
-    attachments: number;
-    attachmentChunks: number;
-    syncChanges: number;
-    kvFiles: string[];
-    grants: boolean;
-    indexes: number;
-  };
+  /** Re-encrypted artifacts, counted by the key that covers them. */
+  reencrypted: { documents: number; kv: number; syncChanges: number; total: number };
   /** Slots dropped because the current passphrase could not open them. */
   droppedSlots: { id: string; label: string; createdAt: string }[];
   /** Whether a new passphrase was set, or the current one reused. */
