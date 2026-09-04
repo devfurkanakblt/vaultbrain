@@ -201,22 +201,38 @@ export function forgetPassphrase(vaultDir: string): boolean {
  * passphrase change. A store that refuses the write is reported rather than
  * thrown, because by the time this runs the vault has already changed and the
  * caller must not report failure for an operation that completed.
+ *
+ * The failure `error`, if any, is always a short fixed description — never the
+ * raw error from the backend. On some backends (notably macOS, which passes
+ * the secret as an argv element to `security`) `execFileSync`'s failure
+ * message embeds the full command line, which would put the new passphrase in
+ * cleartext into logs or a terminal. When the update cannot complete, the
+ * stale credential is forgotten instead of left behind, since a stale
+ * credential makes every later command fail against the *old* passphrase with
+ * no indication why; `cleared` reports whether that forget succeeded.
  */
 export function updateRememberedPassphrase(
   vaultDir: string,
   passphrase: string,
-): { updated: boolean; backend: string; error?: string } {
+): { updated: boolean; backend: string; cleared: boolean; error?: string } {
   const backend = keychain();
   const account = accountFor(vaultDir);
   try {
-    if (!backend.lookup(account)) return { updated: false, backend: backend.name };
+    if (!backend.lookup(account)) return { updated: false, backend: backend.name, cleared: false };
     backend.store(account, passphrase);
-    return { updated: true, backend: backend.name };
-  } catch (error) {
+    return { updated: true, backend: backend.name, cleared: false };
+  } catch {
+    let cleared: boolean;
+    try {
+      cleared = backend.forget(account);
+    } catch {
+      cleared = false;
+    }
     return {
       updated: false,
       backend: backend.name,
-      error: error instanceof Error ? error.message : String(error),
+      cleared,
+      error: "the credential store rejected the write",
     };
   }
 }

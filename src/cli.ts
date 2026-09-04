@@ -1237,7 +1237,14 @@ passphraseCommand
   .option("--allow-same-passphrase", "re-wrap the keyring at the current cost without changing the passphrase")
   .action(async (opts) => {
     const dir = program.opts().vault;
-    const current = await getPassphrase({ vaultDir: dir, prompt: "Current vault passphrase: " });
+    // Never taken from the OS credential store: a stale or attacker-primed
+    // credential must not be able to authorize a passphrase change on its
+    // own, the way `unlock` resolves its passphrase.
+    const current = process.env.VBRAIN_PASSPHRASE ?? (await readSecret("Current vault passphrase: "));
+    if (!current) {
+      console.error("A passphrase is required.");
+      process.exit(1);
+    }
     const next = process.env.VBRAIN_NEW_PASSPHRASE ?? (await readNewPassphrase());
 
     const report = changeVaultPassphrase(dir, current, next, {
@@ -1250,16 +1257,22 @@ passphraseCommand
       console.log(`Key-derivation cost raised from N=${report.previousN}.`);
     }
     if (report.slotsPreserved > 0) {
-      console.log(`Left ${report.slotsPreserved} slot(s) this passphrase does not open untouched.`);
+      console.log(`Left ${report.slotsPreserved} slot(s) this passphrase does not open untouched:`);
+      for (const slot of report.preserved) {
+        console.log(`  ${slot.id} (${slot.label}), created ${slot.createdAt}, scrypt N=${slot.n}.`);
+      }
     }
 
     const keychainResult = updateRememberedPassphrase(dir, next);
     if (keychainResult.updated) {
       console.log(`Updated the remembered passphrase in the OS credential store (${keychainResult.backend}).`);
     } else if (keychainResult.error) {
+      const credentialState = keychainResult.cleared
+        ? "the remembered credential was removed"
+        : "the remembered credential could not be removed either";
       console.error(
-        `Warning: this vault has a remembered passphrase but it could not be updated (${keychainResult.backend}: ${keychainResult.error}). ` +
-          "It is now stale — run 'vbrain unlock --remember' to store the new one.",
+        `Warning: the passphrase changed, but the OS credential store (${keychainResult.backend}) could not be updated (${keychainResult.error}). ` +
+          `${credentialState}. Run 'vbrain unlock --remember' to store the new passphrase.`,
       );
     }
 

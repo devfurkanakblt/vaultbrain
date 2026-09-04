@@ -23,11 +23,20 @@ import { withVaultLock } from "./vault-lock.js";
  */
 export const MIN_PASSPHRASE_LENGTH = 12;
 
+export interface PreservedSlot {
+  id: string;
+  label: string;
+  createdAt: string;
+  n: number;
+}
+
 export interface PassphraseChangeReport {
   /** Slots re-wrapped under the new passphrase. */
   slotsRewritten: number;
   /** Slots the current passphrase could not open, carried across untouched. */
   slotsPreserved: number;
+  /** Detail on each preserved slot, in the order it appears in the keyring. */
+  preserved: PreservedSlot[];
   /** The scrypt cost of the first slot that opened, before the change. */
   previousN: number;
   /** The cost every rewritten slot now carries. */
@@ -77,6 +86,7 @@ export function changeVaultPassphrase(
     let opened: KeySet | undefined;
     let previousN = 0;
     let slotsPreserved = 0;
+    const preserved: PreservedSlot[] = [];
     const slots: KeyringSlot[] = [];
     const newlyWrapped: KeyringSlot[] = [];
 
@@ -90,10 +100,18 @@ export function changeVaultPassphrase(
           // slot alive across a passphrase change.
           slots.push(slot);
           slotsPreserved += 1;
+          preserved.push({ id: slot.id, label: slot.label, createdAt: slot.createdAt, n: slot.kdf.N });
           continue;
         }
-        if (opened) zeroKeySet(keys);
-        else {
+        if (opened) {
+          if (!sameKeySet(keys, opened)) {
+            zeroKeySet(keys);
+            throw new Error(
+              "A second slot this passphrase opens carries a different keyset; refusing to write the keyring.",
+            );
+          }
+          zeroKeySet(keys);
+        } else {
           opened = keys;
           previousN = slot.kdf.N;
         }
@@ -143,7 +161,7 @@ export function changeVaultPassphrase(
       }
 
       const rewritten = slots.length - slotsPreserved;
-      return { slotsRewritten: rewritten, slotsPreserved, previousN, newN: DEFAULT_SCRYPT_N };
+      return { slotsRewritten: rewritten, slotsPreserved, preserved, previousN, newN: DEFAULT_SCRYPT_N };
     } finally {
       if (opened) zeroKeySet(opened);
     }

@@ -91,7 +91,8 @@ or calling AI model may hold that plaintext.
 - Changing the passphrase does not re-encrypt content. It replaces the wrapping
   around the vault's keys, nothing more. Anyone who already knew the old
   passphrase and holds a copy of the vault reads what that copy contains, before
-  and after. `vbrain rekey` is the answer to a leaked passphrase.
+  and after. `vbrain rekey` will be the answer to a leaked passphrase once it
+  ships; it has not shipped yet.
 
   A vault created before the default key-derivation cost rose keeps its old cost
   until its passphrase is changed once. `vbrain passphrase change` writes every

@@ -53,8 +53,12 @@ Everything below runs inside `withVaultLock(vaultDir, ...)`.
    migrates a vault as a side effect — two irreversible operations do not
    belong in one invocation, and `migrate` has its own output and its own
    "older desktop builds cannot open this" warning to deliver.
-2. Read the current passphrase by the existing path: `VBRAIN_PASSPHRASE`, then
-   the OS credential store for this vault, then a masked prompt.
+2. Read the current passphrase from `VBRAIN_PASSPHRASE`, or otherwise from a
+   masked prompt. Unlike most commands, this one never falls back to the OS
+   credential store for the current passphrase: anyone at an unlocked machine
+   with a remembered credential must not be able to change the passphrase and
+   lock the owner out. This departs from `getPassphrase`'s usual resolution
+   order and mirrors how `unlock` already resolves its own passphrase.
 3. `readKeyring(vaultDir)` and unwrap the keyset. A wrong passphrase surfaces
    as a GCM authentication failure and is reported as one sentence.
 4. Read the new passphrase from `VBRAIN_NEW_PASSPHRASE`, or prompt twice and
@@ -92,17 +96,31 @@ new key-wrapping material rather than an edit of the old.
 
 The keyset itself is unchanged, byte for byte. No object under `documents/`,
 no attachment, no sync change and no audit entry is read or rewritten. The cost
-of the command is two scrypt derivations and one small file write, whatever the
-size of the vault.
+of the command is four scrypt derivations and one small file write, whatever
+the size of the vault: the unwrap of the current passphrase, the wrap under
+the new one, a pre-write verification that the freshly wrapped slot unwraps
+back to the same keyset, and a post-write read-back that proves the file
+actually on disk opens under the new passphrase — plus one further derivation
+per preserved slot, since the read-back step re-verifies those too. The two
+verification steps are not optional overhead: they are what makes a bad write
+fail loudly instead of leaving an unrecoverable vault.
 
 ## Module boundary
 
 New file `src/keyring-passphrase.ts`, one export:
 
 ```ts
+export interface PreservedSlot {
+  id: string;
+  label: string;
+  createdAt: string;
+  n: number;
+}
+
 export interface PassphraseChangeReport {
   slotsRewritten: number;
   slotsPreserved: number;
+  preserved: PreservedSlot[];
   previousN: number;
   newN: number;
 }
@@ -150,9 +168,10 @@ re-encrypt anything, and that a leaked passphrase needs `vbrain rekey`.
 
 ## Non-interactive use
 
-The current passphrase resolves through `getPassphrase`, unchanged. The new one
-comes from `VBRAIN_NEW_PASSPHRASE` when that is set, and from two masked
-prompts otherwise. This mirrors `VBRAIN_PASSPHRASE` exactly, so scripted use and
+The current passphrase resolves from `VBRAIN_PASSPHRASE`, or a masked prompt —
+never the OS credential store; see step 2. The new one comes from
+`VBRAIN_NEW_PASSPHRASE` when that is set, and from two masked prompts
+otherwise. This mirrors `VBRAIN_PASSPHRASE` exactly, so scripted use and
 the end-to-end tests drive the real CLI rather than only the library function.
 
 The prompting path reuses `readSecret` and enforces the match between the two

@@ -17,8 +17,15 @@ import {
   wrapKeySet,
   writeKeyring,
 } from "../dist/keyring.js";
-import { accountFor, setKeychainBackend, updateRememberedPassphrase } from "../dist/keychain.js";
-import { changeVaultPassphrase, MIN_PASSPHRASE_LENGTH } from "../dist/keyring-passphrase.js";
+import {
+  accountFor,
+  forgetPassphrase,
+  keychain,
+  rememberPassphrase,
+  setKeychainBackend,
+  updateRememberedPassphrase,
+} from "../dist/keychain.js";
+import { changeVaultPassphrase } from "../dist/keyring-passphrase.js";
 import { loadVaultFile, upsertEntry } from "../dist/store.js";
 
 const PASSPHRASE = "phase-73-current-passphrase";
@@ -154,11 +161,15 @@ test("a slot the current passphrase cannot open is preserved untouched", () => {
 
   assert.equal(report.slotsRewritten, 1);
   assert.equal(report.slotsPreserved, 1);
+  assert.deepEqual(report.preserved, [
+    { id: recovery.id, label: recovery.label, createdAt: recovery.createdAt, n: recovery.kdf.N },
+  ]);
   const slots = readSlots(dir);
+  assert.equal(slots.length, 2, "no slot may be dropped or added");
   assert.deepEqual(
-    slots.find((slot) => slot.id === recovery.id),
+    slots[1],
     recovery,
-    "the foreign slot must survive byte for byte",
+    "the foreign slot must survive byte for byte, still at its original index",
   );
   forgetVaultKeys();
   assert.ok(openVaultKeys(dir, "recovery-slot-passphrase"));
@@ -210,8 +221,43 @@ test("--allow-same-passphrase re-wraps at the current cost without changing the 
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test("the minimum length is the documented one", () => {
-  assert.equal(MIN_PASSPHRASE_LENGTH, 12);
+test("an 11-character new passphrase is refused and a 12-character one is accepted", () => {
+  const { dir } = seedVault();
+
+  assert.throws(
+    () => changeVaultPassphrase(dir, PASSPHRASE, "a".repeat(11)),
+    /at least 12 characters/iu,
+  );
+
+  const report = changeVaultPassphrase(dir, PASSPHRASE, "b".repeat(12));
+  assert.equal(report.slotsRewritten, 1);
+  forgetVaultKeys();
+  assert.ok(openVaultKeys(dir, "b".repeat(12)));
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("two slots that both open under the current passphrase but carry different keysets are refused", () => {
+  const dir = tempDir("mismatched-slots");
+  const keysA = randomKeySet();
+  const keysB = randomKeySet();
+  writeKeyring(dir, {
+    version: 2,
+    slots: [wrapKeySet(keysA, PASSPHRASE, 2 ** 14), wrapKeySet(keysB, PASSPHRASE, 2 ** 14)],
+  });
+  const before = fs.readFileSync(path.join(dir, "keyring.json"));
+
+  assert.throws(
+    () => changeVaultPassphrase(dir, PASSPHRASE, NEW_PASSPHRASE),
+    /different keyset/iu,
+  );
+  assert.deepEqual(
+    fs.readFileSync(path.join(dir, "keyring.json")),
+    before,
+    "a refusal must leave the keyring untouched",
+  );
+
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 /** A fake credential store. `failOnStore` makes writes throw, as a locked keychain does. */
@@ -267,7 +313,7 @@ test("a vault with nothing remembered is left alone", () => {
   }
 });
 
-test("a store that refuses the write is reported rather than thrown", () => {
+test("a store that refuses the write is reported rather than thrown, and never leaks the passphrase", () => {
   const { dir } = seedVault();
   const fake = fakeKeychain({ failOnStore: true });
   setKeychainBackend(fake.backend);
@@ -277,7 +323,33 @@ test("a store that refuses the write is reported rather than thrown", () => {
     const result = updateRememberedPassphrase(dir, NEW_PASSPHRASE);
 
     assert.equal(result.updated, false);
-    assert.match(result.error ?? "", /locked/u);
+    assert.ok(result.error, "a failure must be reported");
+    for (const value of Object.values(result)) {
+      if (typeof value === "string") {
+        assert.ok(
+          !value.includes(NEW_PASSPHRASE),
+          `field must not contain the passphrase: ${value}`,
+        );
+      }
+    }
+  } finally {
+    setKeychainBackend(undefined);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a failed credential update forgets the stale credential instead of leaving it behind", () => {
+  const { dir } = seedVault();
+  const fake = fakeKeychain({ failOnStore: true });
+  setKeychainBackend(fake.backend);
+  try {
+    fake.entries.set(accountFor(dir), PASSPHRASE);
+
+    const result = updateRememberedPassphrase(dir, NEW_PASSPHRASE);
+
+    assert.equal(result.updated, false);
+    assert.equal(result.cleared, true);
+    assert.equal(fake.entries.has(accountFor(dir)), false, "the stale credential must be gone");
   } finally {
     setKeychainBackend(undefined);
     fs.rmSync(dir, { recursive: true, force: true });
@@ -328,6 +400,56 @@ test("the CLI refuses a short new passphrase and leaves the vault alone", () => 
 
   forgetVaultKeys();
   assert.ok(openVaultKeys(dir, PASSPHRASE), "the old passphrase must still work");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("the CLI never takes the current passphrase from the OS credential store", (t) => {
+  if (!keychain().available()) {
+    t.skip("no OS credential store is available on this machine");
+    return;
+  }
+
+  const { dir } = seedVault();
+  rememberPassphrase(dir, PASSPHRASE);
+  try {
+    // VBRAIN_PASSPHRASE is deliberately unset, and stdin is not a TTY (the
+    // default for a spawned child with no `input`), so it reads EOF rather
+    // than a real answer. Before the fix, `getPassphrase` would have quietly
+    // used the credential store instead of prompting, and the command would
+    // have completed anyway; the command must now not complete.
+    const childEnv = { ...process.env, VBRAIN_NEW_PASSPHRASE: NEW_PASSPHRASE };
+    delete childEnv.VBRAIN_PASSPHRASE;
+    const result = spawnSync(process.execPath, [cliPath, "--vault", dir, "passphrase", "change"], {
+      encoding: "utf8",
+      timeout: 10_000,
+      env: childEnv,
+    });
+
+    assert.doesNotMatch(result.stdout ?? "", /Passphrase changed/u);
+
+    forgetVaultKeys();
+    assert.ok(openVaultKeys(dir, PASSPHRASE), "the vault must still open under the original passphrase");
+  } finally {
+    forgetPassphrase(dir);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the CLI's --allow-same-passphrase re-wraps the keyring end to end", () => {
+  const { dir } = seedVault();
+
+  const result = runCli(["--vault", dir, "passphrase", "change", "--allow-same-passphrase"], {
+    VBRAIN_PASSPHRASE: PASSPHRASE,
+    VBRAIN_NEW_PASSPHRASE: PASSPHRASE,
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Passphrase changed/u);
+  assert.match(result.stdout, new RegExp(`N=${DEFAULT_SCRYPT_N}`, "u"));
+
+  forgetVaultKeys();
+  assert.ok(openVaultKeys(dir, PASSPHRASE), "the vault must still open under the same passphrase");
 
   fs.rmSync(dir, { recursive: true, force: true });
 });
