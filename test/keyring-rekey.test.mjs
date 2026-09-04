@@ -6,7 +6,8 @@ import test from "node:test";
 
 import { appendAudit } from "../dist/audit.js";
 import { DocumentVault } from "../dist/documents.js";
-import { planRekey } from "../dist/keyring-rekey.js";
+import { decryptItem, encryptItem, planRekey } from "../dist/keyring-rekey.js";
+import { openVaultKeys, randomKeySet } from "../dist/keyring.js";
 import { upsertEntry } from "../dist/store.js";
 import { saveGrants, emptyGrantFile } from "../dist/grants.js";
 import { SyncChangeLog } from "../dist/sync.js";
@@ -273,6 +274,66 @@ test("sync state files and a sync change all classify with the AAD or ID that wr
     kind: "document",
     identity: "secondbrain-vault:sync-apply-receipt:v1",
   });
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("an artifact re-encrypted under a new keyset carries the same plaintext", () => {
+  const { dir } = seedVault();
+  const oldKeys = openVaultKeys(dir, PASSPHRASE);
+  const newKeys = randomKeySet();
+  // The identity keys are pinned, so a re-key never touches them.
+  newKeys.attachmentId = Buffer.from(oldKeys.attachmentId);
+  newKeys.syncChange = Buffer.from(oldKeys.syncChange);
+  newKeys.audit = Buffer.from(oldKeys.audit);
+
+  for (const item of planRekey(dir)) {
+    const raw = fs.readFileSync(path.join(dir, ...item.path.split("/")));
+    const plaintext = decryptItem(item, oldKeys, raw);
+    const rewritten = encryptItem(item, newKeys, plaintext);
+
+    assert.notDeepEqual(rewritten, raw, `${item.path} must not keep its ciphertext`);
+    assert.deepEqual(decryptItem(item, newKeys, rewritten), plaintext, `${item.path} must round trip`);
+    assert.throws(() => decryptItem(item, oldKeys, rewritten), /.*/u, `${item.path} must not open under the old keyset`);
+  }
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// seedVault() does not produce a sync change, so the round-trip test above
+// never exercises the "sync-change" branch. This test drives a real
+// SyncChangeLog so that branch — the only place kind: "sync-change" is
+// reachable at all — is actually covered.
+test("a sync change keeps its ID and its envelope shape across a re-encryption", () => {
+  const dir = tempDir();
+  const log = new SyncChangeLog(dir, PASSPHRASE);
+  const deviceId = "33333333-3333-4333-8333-333333333333";
+  const change = log.append(deviceId, {
+    objectType: "note",
+    objectId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    operation: "put",
+    baseRevision: null,
+    revision: 1,
+    value: { title: "Plan", body: "private body" },
+  });
+  log.close();
+
+  const oldKeys = openVaultKeys(dir, PASSPHRASE);
+  const newKeys = randomKeySet();
+  newKeys.syncChange = Buffer.from(oldKeys.syncChange);
+
+  const item = planRekey(dir).find((candidate) => candidate.kind === "sync-change");
+  assert.ok(item, "a sync change should have been scheduled");
+  assert.equal(item.identity, change.id);
+
+  const raw = fs.readFileSync(path.join(dir, ...item.path.split("/")));
+  const rewritten = encryptItem(item, newKeys, decryptItem(item, oldKeys, raw));
+  const before = JSON.parse(raw.toString("utf8"));
+  const after = JSON.parse(rewritten.toString("utf8"));
+
+  assert.equal(after.id, before.id);
+  assert.equal(after.version, 1);
+  assert.notEqual(after.payload.ciphertext, before.payload.ciphertext);
 
   fs.rmSync(dir, { recursive: true, force: true });
 });

@@ -13,8 +13,22 @@ import {
   pluginAad,
   pluginStoreAad,
 } from "./documents.js";
+import { decryptWithKey, encryptWithKey, type KeyedEncryptedPayload } from "./crypto.js";
+import {
+  decryptDocument,
+  decryptDocumentBytes,
+  encryptDocument,
+  encryptDocumentBytes,
+  type DocumentPayload,
+} from "./document-crypto.js";
+import type { KeySet } from "./keyring.js";
 import { resolveInside } from "./safety.js";
-import { APPLIED_AAD } from "./sync/protocol.js";
+import {
+  APPLIED_AAD,
+  CHANGE_AAD_PREFIX,
+  changeEncryptionKey,
+  validateEncryptedSyncChange,
+} from "./sync/protocol.js";
 import { APPLY_RECEIPT_AAD, LOCAL_TRANSACTION_AAD } from "./sync/transaction.js";
 
 export const STAGING_DIRNAME = ".rekey";
@@ -194,4 +208,65 @@ export function planRekey(vaultDir: string): RekeyItem[] {
   if (fs.existsSync(documentsDir)) walkDocuments(documentsDir, "", items);
 
   return items;
+}
+
+/**
+ * The bytes an artifact protects, whatever envelope it wears. The `kv`
+ * envelope is UTF-8 text and the other two are byte payloads, so everything
+ * is normalized to a Buffer: the staging phase compares plaintexts to prove a
+ * re-encryption preserved content, and that comparison must not care which
+ * envelope produced it.
+ */
+export function decryptItem(item: RekeyItem, keys: KeySet, raw: Buffer): Buffer {
+  const parsed = JSON.parse(raw.toString("utf8")) as unknown;
+
+  if (item.kind === "document") {
+    return decryptDocumentBytes(parsed as DocumentPayload, keys.documents, item.identity);
+  }
+
+  if (item.kind === "kv") {
+    return Buffer.from(decryptWithKey(parsed as KeyedEncryptedPayload, keys.kv, item.identity), "utf8");
+  }
+
+  const envelope = validateEncryptedSyncChange(parsed);
+  if (envelope.id !== item.identity) throw new Error(`Sync change filename does not match its envelope: ${item.identity}`);
+  const envelopeKey = changeEncryptionKey(keys.syncEnvelope, envelope.id);
+  try {
+    return Buffer.from(
+      decryptDocument(envelope.payload, envelopeKey, `${CHANGE_AAD_PREFIX}${envelope.id}`),
+      "utf8",
+    );
+  } finally {
+    envelopeKey.fill(0);
+  }
+}
+
+/**
+ * The inverse, serialized exactly the way the module that owns each artifact
+ * writes it: two-space JSON for the key-value envelopes `saveVaultFile` and
+ * `saveGrants` produce, compact JSON for everything else. A re-key must not
+ * be visible as a formatting change.
+ */
+export function encryptItem(item: RekeyItem, keys: KeySet, plaintext: Buffer): Buffer {
+  if (item.kind === "document") {
+    const payload = encryptDocumentBytes(plaintext, keys.documents, item.identity);
+    return Buffer.from(JSON.stringify(payload), "utf8");
+  }
+
+  if (item.kind === "kv") {
+    const payload = encryptWithKey(plaintext.toString("utf8"), keys.kv, item.identity);
+    return Buffer.from(JSON.stringify(payload, null, 2), "utf8");
+  }
+
+  const envelopeKey = changeEncryptionKey(keys.syncEnvelope, item.identity);
+  try {
+    const payload = encryptDocument(
+      plaintext.toString("utf8"),
+      envelopeKey,
+      `${CHANGE_AAD_PREFIX}${item.identity}`,
+    );
+    return Buffer.from(JSON.stringify({ version: 1, id: item.identity, payload }), "utf8");
+  } finally {
+    envelopeKey.fill(0);
+  }
 }
