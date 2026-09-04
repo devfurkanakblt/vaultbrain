@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { AlertTriangle, Ban, CircleDot, KeyRound, LockKeyhole, Puzzle, ShieldCheck, Trash2, Upload } from "lucide-react";
 import { describeCapabilities, isPluginCapability, parsePluginManifest, type PluginCapability } from "./plugins/manifest";
 import type { PluginRuntimeState } from "./plugins/protocol";
-import type { PluginSecurityPolicy, PluginSummary } from "./types";
+import type { Notify, PluginSecurityPolicy, PluginSummary } from "./types";
 
 interface PluginManagerProps {
   plugins: PluginSummary[];
@@ -14,7 +14,7 @@ interface PluginManagerProps {
   onRestricted: (enabled: boolean) => Promise<void>;
   onRevoke: (plugin: PluginSummary) => Promise<void>;
   onRestore: (keyId: string) => Promise<void>;
-  onNotice: (message: string) => void;
+  onNotice: Notify;
 }
 
 function readableBytes(bytes: number) {
@@ -49,7 +49,7 @@ export function PluginManager({ plugins, policy, states, onInstall, onToggle, on
         name: manifest.name,
       });
     } catch (error) {
-      onNotice(error instanceof Error ? error.message : String(error));
+      onNotice(error instanceof Error ? error.message : String(error), "error");
     } finally {
       if (manifestInput.current) manifestInput.current.value = "";
     }
@@ -62,7 +62,7 @@ export function PluginManager({ plugins, policy, states, onInstall, onToggle, on
       await onInstall(pending.manifest, pending.source);
       setPending(undefined);
     } catch (error) {
-      onNotice(error instanceof Error ? error.message : String(error));
+      onNotice(error instanceof Error ? error.message : String(error), "error");
     } finally {
       setBusy(false);
     }

@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { Download, FileArchive, FileImage, FileText, LoaderCircle, Paperclip, Trash2, Upload, X } from "lucide-react";
 import { vaultBridge } from "./bridge";
-import type { AttachmentInfo } from "./types";
+import { useConfirm } from "./Confirm";
+import type { AttachmentInfo, Notify } from "./types";
 
 interface AttachmentLibraryProps {
   attachments: AttachmentInfo[];
   onRefresh: () => Promise<void>;
-  onNotice: (message: string) => void;
+  onNotice: Notify;
 }
 
 function readableBytes(bytes: number) {
@@ -46,6 +47,7 @@ function AttachmentIcon({ mime }: { mime: string }) {
 export function AttachmentLibrary({ attachments, onRefresh, onNotice }: AttachmentLibraryProps) {
   const input = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
+  const [confirm, confirmDialog] = useConfirm();
   const [selected, setSelected] = useState<AttachmentInfo>();
   const [previewUrl, setPreviewUrl] = useState("");
 
@@ -64,7 +66,7 @@ export function AttachmentLibrary({ attachments, onRefresh, onNotice }: Attachme
       await onRefresh();
       onNotice(`${files.length} attachment${files.length === 1 ? "" : "s"} encrypted and stored.`);
     } catch (error) {
-      onNotice(error instanceof Error ? error.message : String(error));
+      onNotice(error instanceof Error ? error.message : String(error), "error");
     } finally {
       setBusy(false);
       if (input.current) input.current.value = "";
@@ -88,14 +90,18 @@ export function AttachmentLibrary({ attachments, onRefresh, onNotice }: Attachme
         setPreviewUrl(url);
       }
     } catch (error) {
-      onNotice(error instanceof Error ? error.message : String(error));
+      onNotice(error instanceof Error ? error.message : String(error), "error");
     } finally {
       setBusy(false);
     }
   }
 
   async function remove(info: AttachmentInfo) {
-    if (!window.confirm(`Delete ${info.filename} from the encrypted vault? Canvas references will remain as missing references.`)) return;
+    if (!await confirm({
+      title: `Delete ${info.filename}?`,
+      body: "The file is removed from the encrypted vault. Any canvas that pointed at it keeps the card, which will then read as a missing reference.",
+      action: "Delete file",
+    })) return;
     setBusy(true);
     try {
       await vaultBridge.deleteAttachment(info.id);
@@ -107,13 +113,14 @@ export function AttachmentLibrary({ attachments, onRefresh, onNotice }: Attachme
       await onRefresh();
       onNotice(`${info.filename} deleted.`);
     } catch (error) {
-      onNotice(error instanceof Error ? error.message : String(error));
+      onNotice(error instanceof Error ? error.message : String(error), "error");
     } finally {
       setBusy(false);
     }
   }
 
   return <section className="asset-library" aria-label="Encrypted attachments">
+    {confirmDialog}
     <header className="asset-header">
       <div><p className="eyebrow">ENCRYPTED OBJECT STORE</p><h2>Attachments</h2><span>Files are content-addressed, chunked, and decrypted only when opened.</span></div>
       <button className="asset-upload" onClick={() => input.current?.click()} disabled={busy}>

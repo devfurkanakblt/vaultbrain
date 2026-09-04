@@ -383,7 +383,7 @@ describe("desktop workspace", () => {
 
     fireEvent.keyDown(window, { key: "k", ctrlKey: true });
     const palette = await screen.findByRole("dialog", { name: "Command palette" });
-    fireEvent.click(within(palette).getByRole("button", { name: "Workspaces and saved layouts" }));
+    fireEvent.click(within(palette).getByRole("option", { name: "Workspaces and saved layouts" }));
 
     const dialog = await screen.findByRole("dialog", { name: "Workspaces" });
     fireEvent.change(within(dialog).getByLabelText("Workspace name"), { target: { value: "Morning review" } });
@@ -518,7 +518,7 @@ describe("desktop workspace", () => {
     await unlockWorkspace();
     fireEvent.keyDown(window, { key: "k", ctrlKey: true });
     const palette = await screen.findByRole("dialog", { name: "Command palette" });
-    fireEvent.click(within(palette).getByRole("button", { name: "Customize theme" }));
+    fireEvent.click(within(palette).getByRole("option", { name: "Customize theme" }));
     const editor = await screen.findByRole("dialog", { name: "Theme editor" });
 
     fireEvent.click(within(editor).getByRole("button", { name: /slate/i }));
@@ -529,7 +529,7 @@ describe("desktop workspace", () => {
     expect(document.documentElement.style.getPropertyValue("--acid-deep")).toBe(shade("#ff8800", -0.34));
     expect(JSON.parse(localStorage.getItem("vbrain:theme")!)).toMatchObject({ accent: "#ff8800", preset: "custom" });
 
-    fireEvent.click(within(editor).getByRole("button", { name: /reset to archive/i }));
+    fireEvent.click(within(editor).getByRole("button", { name: /reset to/i }));
     await waitFor(() => expect(document.documentElement.style.getPropertyValue("--acid")).toBe(DEFAULT_THEME.accent));
     expect(localStorage.getItem("vbrain:theme")).toBeNull();
   });
@@ -618,25 +618,29 @@ describe("desktop workspace", () => {
   });
 
   it("deletes the open note and clears it from the workspace", async () => {
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
     bridgeMock.listNotes.mockResolvedValueOnce([{ ...sampleNote }]).mockResolvedValue([]);
     await unlockWorkspace();
 
     fireEvent.click(screen.getByTitle("Delete this note"));
+    const ask = await screen.findByRole("alertdialog", { name: /Delete .Product principles/u });
+    expect(within(ask).getByText(/its encrypted history stays in the vault/u)).toBeInTheDocument();
+    fireEvent.click(within(ask).getByRole("button", { name: "Delete note" }));
+
     await waitFor(() => expect(bridgeMock.deleteNote).toHaveBeenCalledWith(sampleNote.id));
     expect(await screen.findByText("The archive is quiet.")).toBeInTheDocument();
     expect(screen.getByText(/Restore it from the deleted-notes list/u)).toBeInTheDocument();
-    confirm.mockRestore();
   });
 
   it("keeps the note when a delete is declined", async () => {
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
     await unlockWorkspace();
 
     fireEvent.click(screen.getByTitle("Delete this note"));
+    const ask = await screen.findByRole("alertdialog", { name: /Delete .Product principles/u });
+    fireEvent.click(within(ask).getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
     expect(bridgeMock.deleteNote).not.toHaveBeenCalled();
     expect(screen.getByDisplayValue("Product principles")).toBeInTheDocument();
-    confirm.mockRestore();
   });
 
   it("reads an archived revision and restores it forward", async () => {
@@ -658,7 +662,7 @@ describe("desktop workspace", () => {
     await unlockWorkspace();
     fireEvent.keyDown(window, { key: "k", ctrlKey: true });
     const palette = await screen.findByRole("dialog", { name: "Command palette" });
-    fireEvent.click(within(palette).getByRole("button", { name: "Restore a deleted note" }));
+    fireEvent.click(within(palette).getByRole("option", { name: "Restore a deleted note" }));
 
     const dialog = await screen.findByRole("dialog", { name: "Deleted notes" });
     expect(await within(dialog).findByText("Removed thought")).toBeInTheDocument();
@@ -674,7 +678,7 @@ describe("desktop workspace", () => {
     await unlockWorkspace();
     fireEvent.keyDown(window, { key: "k", ctrlKey: true });
     const palette = await screen.findByRole("dialog", { name: "Command palette" });
-    fireEvent.click(within(palette).getByRole("button", { name: "New note from a template" }));
+    fireEvent.click(within(palette).getByRole("option", { name: "New note from a template" }));
 
     const dialog = await screen.findByRole("dialog", { name: "New note from template" });
     await waitFor(() => expect(bridgeMock.templates).toHaveBeenCalled());
@@ -707,21 +711,155 @@ describe("desktop workspace", () => {
     await unlockWorkspace();
     fireEvent.keyDown(window, { key: "k", ctrlKey: true });
     const palette = await screen.findByRole("dialog", { name: "Command palette" });
-    fireEvent.click(within(palette).getByRole("button", { name: "New note from a template" }));
+    fireEvent.click(within(palette).getByRole("option", { name: "New note from a template" }));
 
     const dialog = await screen.findByRole("dialog", { name: "New note from template" });
     expect(within(dialog).getByText(/No note in this vault carries the/u)).toBeInTheDocument();
     expect(within(dialog).queryByRole("button", { name: "Create note" })).not.toBeInTheDocument();
   });
 
+  it("filters the command palette and runs what the keyboard lands on", async () => {
+    await unlockWorkspace();
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    const palette = await screen.findByRole("dialog", { name: "Command palette" });
+    const field = within(palette).getByLabelText("Filter commands");
+
+    fireEvent.change(field, { target: { value: "theme" } });
+    const narrowed = within(palette).getAllByRole("option");
+    expect(narrowed).toHaveLength(1);
+    expect(narrowed[0]).toHaveTextContent("Customize theme");
+
+    fireEvent.keyDown(field, { key: "Enter" });
+    expect(await screen.findByRole("dialog", { name: "Theme editor" })).toBeInTheDocument();
+  });
+
+  it("moves the palette selection with the arrow keys and says when nothing matches", async () => {
+    await unlockWorkspace();
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    const palette = await screen.findByRole("dialog", { name: "Command palette" });
+    const field = within(palette).getByLabelText("Filter commands");
+
+    fireEvent.change(field, { target: { value: "note" } });
+    const options = within(palette).getAllByRole("option");
+    expect(options[0]).toHaveAttribute("aria-selected", "true");
+
+    // Down one, then run: the second match, not the first.
+    fireEvent.keyDown(field, { key: "ArrowDown" });
+    expect(within(palette).getAllByRole("option")[1]).toHaveAttribute("aria-selected", "true");
+    fireEvent.keyDown(field, { key: "Enter" });
+    expect(await screen.findByRole("dialog", { name: "Quick switcher" })).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    const reopened = await screen.findByRole("dialog", { name: "Command palette" });
+    fireEvent.change(within(reopened).getByLabelText("Filter commands"), { target: { value: "xylophone" } });
+    expect(within(reopened).queryAllByRole("option")).toHaveLength(0);
+    expect(within(reopened).getByText(/No command matches/u)).toBeInTheDocument();
+  });
+
+  it("reads a failure as an alert instead of a confirmation", async () => {
+    bridgeMock.dailyNote.mockRejectedValueOnce(new Error("Daily folder is read-only."));
+    await unlockWorkspace();
+    fireEvent.keyDown(window, { key: "d", ctrlKey: true });
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Daily folder is read-only.");
+    expect(alert).toHaveClass("error");
+    // A success still arrives as a plain status, not an alert.
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("opens the vault menu and locks the workspace from it", async () => {
+    await unlockWorkspace();
+    fireEvent.click(screen.getByTitle("Current encrypted vault"));
+
+    const menu = await screen.findByRole("menu", { name: "Vault" });
+    expect(within(menu).getByText("./vault/personal")).toBeInTheDocument();
+    fireEvent.click(within(menu).getByRole("menuitem", { name: /Lock and switch vault/u }));
+
+    await waitFor(() => expect(bridgeMock.lock).toHaveBeenCalled());
+    expect(await screen.findByLabelText("Passphrase")).toBeInTheDocument();
+  });
+
+  it("reports how the vault divides across folders", async () => {
+    bridgeMock.listNotes.mockResolvedValue([
+      { ...sampleNote },
+      { ...sampleNote, id: "n2", path: "Atlas/Second.md", title: "Second" },
+      { ...sampleNote, id: "n3", path: "Journal/Today.md", title: "Today" },
+    ]);
+    await unlockWorkspace();
+
+    const bar = await screen.findByRole("img", { name: "3 notes across 2 folders" });
+    const segments = bar.querySelectorAll("span");
+    expect(segments).toHaveLength(2);
+    // Widest folder first, so the bar reads as a ranking.
+    expect(segments[0]).toHaveAttribute("title", "Atlas · 2 notes");
+    expect(segments[1]).toHaveAttribute("title", "Journal · 1 note");
+  });
+
+  it("zooms the canvas board and returns it to its own scale", async () => {
+    await unlockWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "Canvas" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Product map/u }));
+    await waitFor(() => expect(bridgeMock.getCanvas).toHaveBeenCalledWith(sampleCanvas.id));
+
+    const level = await screen.findByTitle("Reset to 100%");
+    expect(level).toHaveTextContent("100%");
+
+    fireEvent.click(screen.getByTitle("Zoom in"));
+    expect(level).toHaveTextContent("125%");
+    fireEvent.click(screen.getByTitle("Zoom in"));
+    expect(level).toHaveTextContent("156%");
+
+    fireEvent.click(level);
+    expect(level).toHaveTextContent("100%");
+
+    fireEvent.click(screen.getByTitle("Zoom out"));
+    expect(level).toHaveTextContent("80%");
+  });
+
+  it("asks in the app's own dialog before deleting a canvas", async () => {
+    await unlockWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "Canvas" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Product map/u }));
+    await waitFor(() => expect(bridgeMock.getCanvas).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByTitle("Delete canvas"));
+    const ask = await screen.findByRole("alertdialog", { name: /Delete the canvas/u });
+    fireEvent.click(within(ask).getByRole("button", { name: "Cancel" }));
+    expect(bridgeMock.deleteCanvas).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTitle("Delete canvas"));
+    const again = await screen.findByRole("alertdialog", { name: /Delete the canvas/u });
+    fireEvent.click(within(again).getByRole("button", { name: "Delete canvas" }));
+    await waitFor(() => expect(bridgeMock.deleteCanvas).toHaveBeenCalledWith(sampleCanvas.id));
+  });
+
+  it("keeps a board link to http and https addresses", async () => {
+    await unlockWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "Canvas" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Product map/u }));
+    await waitFor(() => expect(bridgeMock.getCanvas).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByTitle("Add web link"));
+    const field = await screen.findByLabelText("Link address");
+    fireEvent.change(field, { target: { value: "notes://secret" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add link" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/must begin with http/u);
+
+    fireEvent.change(screen.getByLabelText("Link address"), { target: { value: "https://example.com/plan" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add link" }));
+    expect(await screen.findByText("example.com")).toBeInTheDocument();
+  });
+
   it("warns when an edited theme drops below readable contrast", async () => {
     await unlockWorkspace();
     fireEvent.keyDown(window, { key: "k", ctrlKey: true });
     const palette = await screen.findByRole("dialog", { name: "Command palette" });
-    fireEvent.click(within(palette).getByRole("button", { name: "Customize theme" }));
+    fireEvent.click(within(palette).getByRole("option", { name: "Customize theme" }));
     const editor = await screen.findByRole("dialog", { name: "Theme editor" });
 
-    expect(within(editor).getByText(/· AA$/u)).toBeInTheDocument();
+    expect(within(editor).getAllByText(/· AA$/u).length).toBeGreaterThan(0);
     fireEvent.change(within(editor).getByLabelText("Ink hex"), { target: { value: "#e9e6dc" } });
     expect(await within(editor).findByText(/below AA$/u)).toBeInTheDocument();
   });
