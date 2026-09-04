@@ -7,8 +7,28 @@ import test from "node:test";
 
 import { appendAudit } from "../dist/audit.js";
 import { DocumentVault } from "../dist/documents.js";
-import { decryptItem, encryptItem, planRekey, stageRekey, stagedTree, stagingRoot } from "../dist/keyring-rekey.js";
-import { openVaultKeys, randomKeySet } from "../dist/keyring.js";
+import {
+  commitRekey,
+  decryptItem,
+  encryptItem,
+  installStaged,
+  journalPath,
+  planRekey,
+  recoverRekey,
+  STAGING_DIRNAME,
+  stageRekey,
+  stagedTree,
+  stagingRoot,
+} from "../dist/keyring-rekey.js";
+import {
+  KEYRING_VERSION,
+  forgetVaultKeys,
+  openVaultKeys,
+  randomKeySet,
+  readKeyring,
+  wrapKeySet,
+  writeKeyring,
+} from "../dist/keyring.js";
 import { upsertEntry } from "../dist/store.js";
 import { saveGrants, emptyGrantFile } from "../dist/grants.js";
 import { SyncChangeLog } from "../dist/sync.js";
@@ -706,6 +726,217 @@ test("a mid-list I/O failure aborts staging with the original error and no lefto
 
   assert.equal(opens, 3, "staging must stop at the failed write, not carry on past it");
   assertVaultUnchanged(dir, before);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+const NEW_PASSPHRASE = "phase-74-replacement-passphrase";
+
+/** Stage a re-key and return everything the commit needs, without committing. */
+function preparedRekey(dir) {
+  const oldKeys = openVaultKeys(dir, PASSPHRASE);
+  const newKeys = pinnedKeySet(oldKeys);
+  const items = planRekey(dir);
+  stageRekey(dir, oldKeys, newKeys, items);
+  const slot = wrapKeySet(newKeys, NEW_PASSPHRASE);
+  return {
+    oldKeys,
+    newKeys,
+    journal: { version: 1, slotId: slot.id, files: items.map((item) => item.path) },
+    keyring: { version: KEYRING_VERSION, slots: [slot] },
+  };
+}
+
+/**
+ * `hashVault` covers the whole directory, staging tree included, so a
+ * baseline taken while `.rekey` exists cannot be compared against a vault the
+ * commit or the rollback has since cleaned up. These are the live files only
+ * — the ones a re-key must either replace wholesale or leave untouched.
+ */
+function liveHashes(dir) {
+  return Object.fromEntries(
+    Object.entries(hashVault(dir)).filter(([relative]) => !relative.startsWith(`${STAGING_DIRNAME}/`)),
+  );
+}
+
+test("a committed re-key installs every staged file and clears the staging tree", () => {
+  const { dir } = seedVault();
+  const { newKeys, journal, keyring } = preparedRekey(dir);
+
+  commitRekey(dir, journal, keyring);
+
+  assert.equal(fs.existsSync(stagingRoot(dir)), false);
+  for (const item of planRekey(dir)) {
+    const raw = fs.readFileSync(path.join(dir, ...item.path.split("/")));
+    assert.ok(decryptItem(item, newKeys, raw).length >= 0);
+  }
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a crash before the new keyring rolls the re-key back", () => {
+  const { dir } = seedVault();
+  const { journal } = preparedRekey(dir);
+  const before = liveHashes(dir);
+  // Simulate a crash between the journal write and the keyring write.
+  fs.writeFileSync(journalPath(dir), `${JSON.stringify(journal)}\n`);
+
+  assert.equal(recoverRekey(dir), "rolled-back");
+  assert.equal(fs.existsSync(stagingRoot(dir)), false);
+
+  forgetVaultKeys();
+  assert.ok(openVaultKeys(dir, PASSPHRASE), "the old passphrase must still open the vault");
+  const after = liveHashes(dir);
+  for (const [relative, hash] of Object.entries(before)) {
+    assert.equal(after[relative], hash, `${relative} must not have changed`);
+  }
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a crash partway through the installs is finished by the next run", () => {
+  const { dir } = seedVault();
+  const { newKeys, journal, keyring } = preparedRekey(dir);
+
+  // Simulate a crash after the keyring write with only the first file installed.
+  fs.writeFileSync(journalPath(dir), `${JSON.stringify(journal)}\n`);
+  writeKeyring(dir, keyring);
+  installStaged(dir, { ...journal, files: journal.files.slice(0, 1) });
+
+  assert.equal(recoverRekey(dir), "finished");
+  assert.equal(fs.existsSync(stagingRoot(dir)), false);
+  for (const item of planRekey(dir)) {
+    const raw = fs.readFileSync(path.join(dir, ...item.path.split("/")));
+    assert.ok(decryptItem(item, newKeys, raw).length >= 0, `${item.path} must open under the new keyset`);
+  }
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("recovery is a no-op on a vault with no journal, and clears an aborted stage", () => {
+  const { dir } = seedVault();
+  assert.equal(recoverRekey(dir), "none");
+
+  preparedRekey(dir);
+  assert.equal(fs.existsSync(stagedTree(dir)), true);
+  assert.equal(recoverRekey(dir), "none");
+  assert.equal(fs.existsSync(stagingRoot(dir)), false);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// The three tests above hand-build the states a crash produces. The two below
+// produce them the only way that also pins the commit ORDER: by failing a
+// real `commitRekey` mid-flight and handing what it left on disk to
+// `recoverRekey`.
+//
+// This one kills the mutation "write the keyring before the journal": the
+// injected failure hits the keyring's atomic rename, so if the journal were
+// written second it would never exist and there would be nothing to recover.
+test("a real crash on the keyring write rolls back and leaves the old passphrase working", () => {
+  const { dir } = seedVault();
+  const { journal, keyring } = preparedRekey(dir);
+  const before = liveHashes(dir);
+
+  const realRenameSync = fs.renameSync;
+  try {
+    fs.renameSync = (from, to, ...rest) => {
+      if (path.basename(to) === "keyring.json") {
+        const failure = new Error("EIO: simulated crash during the keyring write");
+        failure.code = "EIO";
+        throw failure;
+      }
+      return realRenameSync(from, to, ...rest);
+    };
+
+    assert.throws(() => commitRekey(dir, journal, keyring), /simulated crash/u);
+  } finally {
+    fs.renameSync = realRenameSync;
+  }
+
+  assert.equal(fs.existsSync(journalPath(dir)), true, "the journal must land before the keyring write");
+  assert.equal(
+    readKeyring(dir).slots.some((slot) => slot.id === journal.slotId),
+    false,
+    "the keyring must not carry the new slot after a failed keyring write",
+  );
+
+  assert.equal(recoverRekey(dir), "rolled-back");
+  assert.equal(fs.existsSync(stagingRoot(dir)), false);
+
+  forgetVaultKeys();
+  assert.ok(openVaultKeys(dir, PASSPHRASE), "the old passphrase must still open the vault");
+  assert.deepEqual(liveHashes(dir), before, "a rolled-back re-key must leave every live file byte-identical");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// Kills the mutation "install the staged files before writing the keyring",
+// and the mutation "clear the staging tree before the installs": the crash
+// lands after two real installs, so only a run that still has both the
+// journal and the staged remainder on disk can finish the job.
+test("a real crash partway through the installs is finished by the next run", () => {
+  const { dir } = seedVault();
+  const { newKeys, journal, keyring } = preparedRekey(dir);
+  assert.ok(journal.files.length > 3, "the seeded vault must hold several artifacts for a mid-install crash");
+
+  const tree = stagedTree(dir);
+  const realRenameSync = fs.renameSync;
+  let installs = 0;
+  try {
+    fs.renameSync = (from, to, ...rest) => {
+      // The journal's and the keyring's atomic writes rename too; only a
+      // rename out of the staged tree is an install.
+      if (String(from).startsWith(tree)) {
+        installs += 1;
+        if (installs === 3) {
+          const failure = new Error("EIO: simulated crash partway through the installs");
+          failure.code = "EIO";
+          throw failure;
+        }
+      }
+      return realRenameSync(from, to, ...rest);
+    };
+
+    assert.throws(() => commitRekey(dir, journal, keyring), /simulated crash/u);
+  } finally {
+    fs.renameSync = realRenameSync;
+  }
+
+  assert.equal(installs, 3, "the crash must land after two files were really installed");
+  assert.equal(fs.existsSync(stagingRoot(dir)), true, "the staged remainder must survive a crash mid-install");
+  assert.ok(
+    readKeyring(dir).slots.some((slot) => slot.id === journal.slotId),
+    "the keyring must already carry the new slot once the installs have begun",
+  );
+
+  assert.equal(recoverRekey(dir), "finished");
+  assert.equal(fs.existsSync(stagingRoot(dir)), false);
+  for (const item of planRekey(dir)) {
+    const raw = fs.readFileSync(path.join(dir, ...item.path.split("/")));
+    assert.ok(decryptItem(item, newKeys, raw).length >= 0, `${item.path} must open under the new keyset`);
+  }
+
+  forgetVaultKeys();
+  assert.ok(openVaultKeys(dir, NEW_PASSPHRASE), "the new passphrase must open the finished vault");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// Kills the mutation "drop the journal validation": a journal whose slotId is
+// not a slot ID can never be found in a keyring, so an unvalidated read would
+// silently roll a committed re-key back — destroying the staged tree the
+// vault now depends on.
+test("a malformed journal refuses recovery instead of touching the vault", () => {
+  const { dir } = seedVault();
+  const { journal } = preparedRekey(dir);
+  fs.writeFileSync(journalPath(dir), `${JSON.stringify({ ...journal, slotId: "not-a-slot-id" })}\n`);
+  const before = liveHashes(dir);
+
+  assert.throws(() => recoverRekey(dir), /malformed/u);
+
+  assert.equal(fs.existsSync(stagedTree(dir)), true, "a refused recovery must not destroy the staged tree");
+  assert.deepEqual(liveHashes(dir), before, "a refused recovery must not touch a single live file");
 
   fs.rmSync(dir, { recursive: true, force: true });
 });

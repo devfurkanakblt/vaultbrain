@@ -22,7 +22,7 @@ import {
   type DocumentPayload,
 } from "./document-crypto.js";
 import { writeFileAtomic } from "./fs-safe.js";
-import type { KeySet } from "./keyring.js";
+import { readKeyring, writeKeyring, type KeyringFile, type KeySet } from "./keyring.js";
 import { resolveInside } from "./safety.js";
 import {
   APPLIED_AAD,
@@ -345,4 +345,89 @@ export function stageRekey(vaultDir: string, oldKeys: KeySet, newKeys: KeySet, i
       verified?.fill(0);
     }
   }
+}
+
+export interface RekeyJournal {
+  version: 1;
+  /** The ID of the slot the new keyring carries. */
+  slotId: string;
+  /** Vault-relative POSIX paths still to install. */
+  files: string[];
+}
+
+export function journalPath(vaultDir: string): string {
+  return resolveInside(stagingRoot(vaultDir), "journal.json");
+}
+
+function readJournal(vaultDir: string): RekeyJournal | null {
+  const filePath = journalPath(vaultDir);
+  if (!fs.existsSync(filePath)) return null;
+  const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as RekeyJournal;
+  if (
+    parsed?.version !== 1 ||
+    typeof parsed.slotId !== "string" ||
+    !/^[0-9a-f-]{36}$/u.test(parsed.slotId) ||
+    !Array.isArray(parsed.files) ||
+    parsed.files.some((entry) => typeof entry !== "string")
+  ) {
+    throw new Error("The re-key journal is malformed; refusing to touch the vault.");
+  }
+  return { version: 1, slotId: parsed.slotId, files: parsed.files };
+}
+
+/**
+ * Moves the staged tree over the live vault. Every rename is atomic and a
+ * file already installed is simply absent from the staging tree, so replaying
+ * this from the top of the list is safe — which is what makes recovery after
+ * a crash mid-install a plain re-run.
+ */
+export function installStaged(vaultDir: string, journal: RekeyJournal): void {
+  const tree = stagedTree(vaultDir);
+  for (const relative of journal.files) {
+    const staged = resolveInside(tree, relative);
+    if (!fs.existsSync(staged)) continue;
+    const live = resolveInside(vaultDir, relative);
+    fs.mkdirSync(path.dirname(live), { recursive: true, mode: 0o700 });
+    fs.renameSync(staged, live);
+  }
+}
+
+/**
+ * The commit, in the only order that is recoverable in both directions:
+ * journal, then the keyring, then the installs. Writing `keyring.json` is a
+ * single-file replace and therefore the point of no return; the journal
+ * written before it is what lets a later run tell which side of that point a
+ * crash landed on.
+ */
+export function commitRekey(vaultDir: string, journal: RekeyJournal, keyring: KeyringFile): void {
+  fs.mkdirSync(stagingRoot(vaultDir), { recursive: true, mode: 0o700 });
+  writeFileAtomic(journalPath(vaultDir), `${JSON.stringify(journal)}\n`, { mode: 0o600 });
+  writeKeyring(vaultDir, keyring);
+  installStaged(vaultDir, journal);
+  fs.rmSync(stagingRoot(vaultDir), { recursive: true, force: true });
+}
+
+/**
+ * Finishes or discards an interrupted re-key. The journal names the slot the
+ * new keyring carries, so its presence in `keyring.json` is what says whether
+ * the commit point was passed.
+ */
+export function recoverRekey(vaultDir: string): "none" | "rolled-back" | "finished" {
+  const journal = readJournal(vaultDir);
+  if (!journal) {
+    // A staging tree with no journal is an abandoned stage: nothing live was
+    // ever touched, so it is safe to drop.
+    fs.rmSync(stagingRoot(vaultDir), { recursive: true, force: true });
+    return "none";
+  }
+
+  const committed = readKeyring(vaultDir)?.slots.some((slot) => slot.id === journal.slotId) ?? false;
+  if (!committed) {
+    fs.rmSync(stagingRoot(vaultDir), { recursive: true, force: true });
+    return "rolled-back";
+  }
+
+  installStaged(vaultDir, journal);
+  fs.rmSync(stagingRoot(vaultDir), { recursive: true, force: true });
+  return "finished";
 }
