@@ -102,6 +102,12 @@ or calling AI model may hold that plaintext.
   attacker who held the passphrase and a copy of the vault has already read
   what that copy contained. `vbrain rekey` is forward-looking: afterwards no
   byte on disk opens under the old passphrase or the old keys.
+- A re-key keeps exactly one keyring slot: the one wrapping the passphrase it
+  was given. Every other slot is dropped, deliberately — a slot this passphrase
+  cannot open is wrapped around the keyset the re-key supersedes, so preserving
+  it would keep the leaked passphrase's keys reachable. A vault carrying a
+  recovery slot or a second person's slot loses it, and the run reports each
+  one it dropped. Re-add them after the re-key.
 - A re-key pins the two keys that derive identities, `attachmentId` and
   `syncChange`. Someone who kept the old keyset can therefore still confirm
   that a guessed file or a guessed sync change is present, from directory

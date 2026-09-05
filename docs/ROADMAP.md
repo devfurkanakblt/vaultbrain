@@ -112,8 +112,8 @@ Each phase must ship a usable vertical slice and keep older vaults readable.
         change deliberately preserves the slots it cannot open — and a user has no way
         to learn their vault still sits at the old cost, which makes the upgrade path
         undiscoverable.
-  - [ ] Audit entries for `migrate` and `passphrase change`. Every content command
-        already appends to the passphrase-authenticated chain; the two commands that
-        touch key material append nothing, so "when did this vault's passphrase last
-        change" has no answer. The `audit` key is permanent, so entries written before
+  - [ ] Audit entries for `migrate`, `passphrase change` and `rekey`. Every content
+        command already appends to the passphrase-authenticated chain; the three
+        commands that touch key material append nothing, so "when did this vault's
+        passphrase last change" and "when were its keys last replaced" have no answer. The `audit` key is permanent, so entries written before
         and after a change verify in the same chain.

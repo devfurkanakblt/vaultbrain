@@ -198,7 +198,10 @@ earlier formats so a future change has to prove it can still read them.
   same keys, so the leaked passphrase would still open a copy of
   `keyring.json` taken before the change. It asks for a new passphrase, and
   `--keep-passphrase` skips that when the keys, not the passphrase, are what
-  is suspect. Attachment identities, sync change IDs and the audit chain are
+  is suspect. It drops every keyring slot the passphrase you give it cannot
+  open: a recovery slot, or a second person's slot, stops working the moment
+  the re-key commits, so re-add it afterwards. Attachment identities, sync
+  change IDs and the audit chain are
   deliberately unchanged, so attachments keep their content addresses, peers
   keep converging and `vbrain audit verify` keeps validating the whole chain.
 
