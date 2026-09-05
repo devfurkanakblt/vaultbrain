@@ -91,13 +91,21 @@ or calling AI model may hold that plaintext.
 - Changing the passphrase does not re-encrypt content. It replaces the wrapping
   around the vault's keys, nothing more. Anyone who already knew the old
   passphrase and holds a copy of the vault reads what that copy contains, before
-  and after. `vbrain rekey` will be the answer to a leaked passphrase once it
-  ships; it has not shipped yet.
+  and after. `vbrain rekey` is the answer to a leaked passphrase: it replaces
+  the keys and re-encrypts every object under them.
 
   A vault created before the default key-derivation cost rose keeps its old cost
   until its passphrase is changed once. `vbrain passphrase change` writes every
   slot at the current default, so one run raises the work factor without touching
   a single note.
+- A re-key does not retract what a leaked passphrase already exposed. An
+  attacker who held the passphrase and a copy of the vault has already read
+  what that copy contained. `vbrain rekey` is forward-looking: afterwards no
+  byte on disk opens under the old passphrase or the old keys.
+- A re-key pins the two keys that derive identities, `attachmentId` and
+  `syncChange`. Someone who kept the old keyset can therefore still confirm
+  that a guessed file or a guessed sync change is present, from directory
+  names alone, without decrypting anything. They cannot read its contents.
 - Every vault, newly created or migrated, keeps its data keys only inside
   `keyring.json`: it wraps the keys that decrypt everything, and the correct
   passphrase alone cannot recover a vault whose keyring is lost or corrupted.

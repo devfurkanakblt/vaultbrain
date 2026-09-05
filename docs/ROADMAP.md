@@ -88,8 +88,17 @@ Each phase must ship a usable vertical slice and keep older vaults readable.
   - [x] `vbrain migrate` upgrades an existing vault without re-encrypting an object
   - [x] Rust core opens a keyring vault, and both cores create new vaults keyring-native
 - [x] Passphrase change, including the KDF cost upgrade path
-- [ ] Full re-key after a compromised passphrase
+- [x] Full re-key after a compromised passphrase
 - [ ] Survivable keyrings: a second way in, a way to look inside, and a record of every change
+  - [ ] Attachment identity migration, closing the confirmation oracle a
+        re-key leaves behind. Rotating `attachmentId` renames every attachment
+        directory and rewrites every canvas object, canvas history revision
+        and index reference that names one, and every peer must run it at the
+        same time or their attachment IDs diverge.
+  - [ ] A deliberate lock-break path. Nothing in the CLI can reclaim a vault
+        lock on purpose; a crashed `vbrain rekey` holds it for up to 15
+        minutes (`REKEY_STALE_MS`), and until it expires or a person deletes
+        `.sbrain.lock` by hand, every other command refuses to run.
   - [ ] Recovery slot, so one forgotten passphrase or one damaged `keyring.json` is not
         the permanent loss of every note. The format already carries a slot list and
         reserves this slot; nothing writes one yet, and the keyring concentrated into

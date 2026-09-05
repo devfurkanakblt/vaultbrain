@@ -170,6 +170,9 @@ node dist/cli.js --vault ./vault/personal migrate
 
 # Re-wrap the keyring under a new passphrase, at the current KDF cost
 node dist/cli.js --vault ./vault/personal passphrase change
+
+# Replace the vault's keys and re-encrypt every object under them
+node dist/cli.js --vault ./vault/personal rekey
 ```
 
 Encrypted files carry an explicit envelope version, cipher name and the exact
@@ -190,6 +193,14 @@ earlier formats so a future change has to prove it can still read them.
   current passphrase) and `VBRAIN_NEW_PASSPHRASE` (the replacement) to be set.
   If this vault has a passphrase remembered in the OS credential store, it is
   updated to the new one.
+- `vbrain rekey` replaces the vault's keys and re-encrypts every object under
+  them. Use it when a passphrase has leaked: a passphrase change re-wraps the
+  same keys, so the leaked passphrase would still open a copy of
+  `keyring.json` taken before the change. It asks for a new passphrase, and
+  `--keep-passphrase` skips that when the keys, not the passphrase, are what
+  is suspect. Attachment identities, sync change IDs and the audit chain are
+  deliberately unchanged, so attachments keep their content addresses, peers
+  keep converging and `vbrain audit verify` keeps validating the whole chain.
 
 ## Encrypted Markdown documents
 

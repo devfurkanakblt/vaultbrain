@@ -5,6 +5,13 @@ Versioning once the encrypted storage format reaches 1.0.
 
 ## Unreleased
 
+- `vbrain rekey`: a new vault keyset with every object re-encrypted under it,
+  for when a passphrase has leaked and re-wrapping the same keys is not
+  enough. Staged beside the live vault, verified, then committed through a
+  journal, so an interrupted run either rolls back or is finished by the next
+  one. `documents`, `kv` and `syncEnvelope` rotate; `attachmentId`,
+  `syncChange` and `audit` are pinned, so attachment identities, sync change
+  IDs and the audit chain survive.
 - `vbrain passphrase change`: re-wraps the vault keyring under a new passphrase
   at the current key-derivation cost, without re-encrypting any object.
 - Taught the Rust desktop core to open passphrase-wrapped keyring vaults, and
