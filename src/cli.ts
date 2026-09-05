@@ -48,7 +48,7 @@ import {
 import { isRedactionLevel, REDACTION_LEVELS, type RedactionLevel } from "./redaction.js";
 import { describeCapabilities, parsePluginManifest, type PluginCapability } from "./plugins.js";
 import { generatePluginSigningKey, signPluginPackage } from "./plugin-signatures.js";
-import { DocumentVault, type PropertyValue } from "./documents.js";
+import { DocumentVault, type PropertyValue, type PurgeReport } from "./documents.js";
 import { OllamaLocalModelAdapter } from "./semantic.js";
 import { importObsidianVault } from "./obsidian-import.js";
 import { readTextFileLimited, writeFileAtomic } from "./fs-safe.js";
@@ -1882,6 +1882,108 @@ program
       );
     }
     await startMcpServer(dir, opts.agent);
+  });
+
+const purge = program
+  .command("purge")
+  .description("permanently remove an object and every revision of it (see 'remove' to keep history)");
+
+/**
+ * Without `--yes` every purge command is a preview. The thing being asked for
+ * is irreversible and the report of what would go is exactly the information
+ * needed to decide, so showing it costs one extra command and prevents the
+ * mistake that has no undo.
+ */
+function reportPurge(report: PurgeReport): void {
+  const name = report.path ? `${report.path} (${report.id})` : report.id;
+  console.log(
+    `Purged ${report.kind} ${name}: ` +
+      `${report.liveRemoved ? "the object" : "no live object"} and ${report.revisionsRemoved} archived revision(s).`,
+  );
+  console.log("This is not recoverable from this vault.");
+  if (report.syncChangesPresent > 0) {
+    console.log(
+      `Warning: this vault's sync log still holds ${report.syncChangesPresent} encrypted change(s). ` +
+        "A purge does not rewrite them, and any of them may carry an earlier version of what you just purged.",
+    );
+    console.log(
+      "The same content also remains in any backup taken before now, on any relay it was pushed to, " +
+        "and on any device that pulled it. Nothing here reaches those.",
+    );
+  }
+}
+
+purge
+  .command("note <reference>")
+  .description("permanently remove a note and every archived revision of it")
+  .option("--yes", "actually do it; without this the command only reports what would go")
+  .action(async (reference, opts) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const vault = openDocumentVault(dir, passphrase);
+    if (!opts.yes) {
+      const revisions = vault.revisions(reference);
+      console.log(`Would purge note ${reference}: ${revisions.length} revision(s), including the current one.`);
+      console.log("Nothing was removed. Re-run with --yes to purge it.");
+      process.exitCode = 2;
+      return;
+    }
+    const report = vault.purgeNote(reference);
+    appendAudit(
+      dir,
+      { actor: "cli-direct-write", file: "documents", key: `purge:note:${report.id}` },
+      passphrase,
+    );
+    reportPurge(report);
+  });
+
+purge
+  .command("canvas <reference>")
+  .description("permanently remove a canvas and every archived revision of it")
+  .option("--yes", "actually do it; without this the command only reports what would go")
+  .action(async (reference, opts) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const vault = openDocumentVault(dir, passphrase);
+    if (!opts.yes) {
+      const revisions = vault.canvasRevisions(reference);
+      console.log(`Would purge canvas ${reference}: ${revisions.length} revision(s), including the current one.`);
+      console.log("Nothing was removed. Re-run with --yes to purge it.");
+      process.exitCode = 2;
+      return;
+    }
+    const report = vault.purgeCanvas(reference);
+    appendAudit(
+      dir,
+      { actor: "cli-direct-write", file: "documents", key: `purge:canvas:${report.id}` },
+      passphrase,
+    );
+    reportPurge(report);
+  });
+
+purge
+  .command("attachment <id>")
+  .description("permanently remove an attachment and every chunk of it")
+  .option("--yes", "actually do it; without this the command only reports what would go")
+  .action(async (id, opts) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const vault = openDocumentVault(dir, passphrase);
+    if (!opts.yes) {
+      const info = vault.listAttachments().find((candidate) => candidate.id === id);
+      if (!info) throw new Error(`Attachment not found: ${id}`);
+      console.log(`Would purge attachment ${info.filename} (${info.id}): ${info.chunks} chunk(s), ${info.size} bytes.`);
+      console.log("Nothing was removed. Re-run with --yes to purge it.");
+      process.exitCode = 2;
+      return;
+    }
+    const report = vault.purgeAttachment(id);
+    appendAudit(
+      dir,
+      { actor: "cli-direct-write", file: "documents", key: `purge:attachment:${report.id}` },
+      passphrase,
+    );
+    reportPurge(report);
   });
 
 program

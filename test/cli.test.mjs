@@ -235,3 +235,42 @@ test("the pre-rename SBRAIN_ environment names still work", () => {
     fs.rmSync(vaultDir, { recursive: true, force: true });
   }
 });
+
+test("vbrain purge previews first, then removes the object and its history", () => {
+  const vaultDir = tempVault("purge");
+  const outside = tempVault("purge-out");
+  const env = { VBRAIN_PASSPHRASE: "cli-purge-test-passphrase" };
+  const flags = ["--vault", vaultDir];
+
+  const source = path.join(outside, "Results.md");
+  fs.writeFileSync(source, "---\ntitle: Results\n---\n# Results\n");
+  runCli([...flags, "docs", "import", "Health/Results.md", source], env);
+  fs.writeFileSync(source, "---\ntitle: Results\n---\n# Results\n\nEdited.\n");
+  runCli([...flags, "docs", "import", "Health/Results.md", source], env);
+
+  // Without --yes it is a preview that changes nothing and exits non-zero.
+  let preview;
+  try {
+    runCli([...flags, "purge", "note", "Health/Results.md"], env);
+    assert.fail("the preview must not exit zero");
+  } catch (error) {
+    preview = `${error.stdout ?? ""}`;
+    assert.equal(error.status, 2);
+  }
+  assert.match(preview, /Would purge note/u);
+  assert.match(preview, /Nothing was removed/u);
+  assert.match(runCli([...flags, "docs", "list"], env), /Health\/Results\.md/u);
+
+  const purged = runCli([...flags, "purge", "note", "Health/Results.md", "--yes"], env);
+  assert.match(purged, /Purged note Health\/Results\.md/u);
+  assert.match(purged, /not recoverable/u);
+  assert.doesNotMatch(runCli([...flags, "docs", "list"], env), /Health\/Results\.md/u);
+  assert.match(fs.readFileSync(path.join(vaultDir, "audit.log"), "utf8"), /purge:note:/u);
+
+  // The history directory is gone with it.
+  const history = path.join(vaultDir, "documents", "history");
+  assert.equal(!fs.existsSync(history) || fs.readdirSync(history).length === 0, true);
+
+  fs.rmSync(vaultDir, { recursive: true, force: true });
+  fs.rmSync(outside, { recursive: true, force: true });
+});
