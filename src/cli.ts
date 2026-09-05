@@ -48,7 +48,12 @@ import {
 import { isRedactionLevel, REDACTION_LEVELS, type RedactionLevel } from "./redaction.js";
 import { describeCapabilities, parsePluginManifest, type PluginCapability } from "./plugins.js";
 import { generatePluginSigningKey, signPluginPackage } from "./plugin-signatures.js";
-import { DocumentVault, type PropertyValue } from "./documents.js";
+import {
+  DocumentVault,
+  type PropertyValue,
+  type PurgeReport,
+  type RetentionPolicy,
+} from "./documents.js";
 import { OllamaLocalModelAdapter } from "./semantic.js";
 import { createBackup, restoreBackup, verifyBackup } from "./backup.js";
 import { exportVault } from "./export.js";
@@ -1884,6 +1889,197 @@ program
       );
     }
     await startMcpServer(dir, opts.agent);
+  });
+
+const retention = program
+  .command("retention")
+  .description("how much revision history this vault keeps");
+
+function describeRetention(policy: RetentionPolicy): string {
+  const parts: string[] = [];
+  if (policy.keepRevisions !== null) parts.push(`the newest ${policy.keepRevisions} archived revision(s) per object`);
+  if (policy.keepDays !== null) parts.push(`archived revisions from the last ${policy.keepDays} day(s)`);
+  return parts.length > 0 ? parts.join(", and ") : "every revision, forever";
+}
+
+retention
+  .command("show")
+  .description("print the retention policy this vault carries")
+  .action(async () => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const policy = openDocumentVault(dir, passphrase).getRetentionPolicy();
+    console.log(`This vault keeps ${describeRetention(policy)}.`);
+    console.log(JSON.stringify(policy, null, 2));
+  });
+
+retention
+  .command("set")
+  .description("set the retention policy and apply it to the history that already exists")
+  .option("--keep-revisions <count>", "archived revisions to keep per object")
+  .option("--keep-days <days>", "drop archived revisions older than this")
+  .option("--unlimited", "keep every revision forever, the default for a new vault")
+  .action(async (opts) => {
+    const dir = program.opts().vault;
+    const number = (value: string | undefined, label: string): number | null => {
+      if (value === undefined) return null;
+      const parsed = Number(value);
+      if (!Number.isSafeInteger(parsed)) throw new Error(`${label} must be a whole number.`);
+      return parsed;
+    };
+    const policy = opts.unlimited
+      ? { version: 1 as const, keepRevisions: null, keepDays: null }
+      : {
+          version: 1 as const,
+          keepRevisions: number(opts.keepRevisions, "--keep-revisions"),
+          keepDays: number(opts.keepDays, "--keep-days"),
+        };
+    if (!opts.unlimited && policy.keepRevisions === null && policy.keepDays === null) {
+      throw new Error(
+        "Give --keep-revisions, --keep-days, or both. Use --unlimited to say you want no bound at all."
+      );
+    }
+
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const report = openDocumentVault(dir, passphrase).setRetentionPolicy(policy);
+    appendAudit(
+      dir,
+      {
+        actor: "cli-direct-write",
+        file: "documents",
+        key: `retention:${report.policy.keepRevisions ?? "all"}:${report.policy.keepDays ?? "all"}`,
+      },
+      passphrase,
+    );
+    console.log(`This vault now keeps ${describeRetention(report.policy)}.`);
+    console.log(
+      `Applied to existing history: ${report.revisionsRemoved} revision(s) removed from ` +
+        `${report.objectsPruned} of ${report.objectsExamined} object(s) with history.`,
+    );
+    if (report.revisionsRemoved > 0) console.log("Those revisions are not recoverable from this vault.");
+  });
+
+retention
+  .command("apply")
+  .description("apply the stored policy to existing history without changing it")
+  .action(async () => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const report = openDocumentVault(dir, passphrase).sweepRetention();
+    console.log(`Policy: ${describeRetention(report.policy)}.`);
+    console.log(
+      `${report.revisionsRemoved} revision(s) removed from ${report.objectsPruned} of ` +
+        `${report.objectsExamined} object(s) with history.`,
+    );
+    if (report.revisionsRemoved > 0) {
+      appendAudit(
+        dir,
+        { actor: "cli-direct-write", file: "documents", key: `retention-sweep:${report.revisionsRemoved}` },
+        passphrase,
+      );
+    }
+  });
+
+const purge = program
+  .command("purge")
+  .description("permanently remove an object and every revision of it (see 'remove' to keep history)");
+
+/**
+ * Without `--yes` every purge command is a preview. The thing being asked for
+ * is irreversible and the report of what would go is exactly the information
+ * needed to decide, so showing it costs one extra command and prevents the
+ * mistake that has no undo.
+ */
+function reportPurge(report: PurgeReport): void {
+  const name = report.path ? `${report.path} (${report.id})` : report.id;
+  console.log(
+    `Purged ${report.kind} ${name}: ` +
+      `${report.liveRemoved ? "the object" : "no live object"} and ${report.revisionsRemoved} archived revision(s).`,
+  );
+  console.log("This is not recoverable from this vault.");
+  if (report.syncChangesPresent > 0) {
+    console.log(
+      `Warning: this vault's sync log still holds ${report.syncChangesPresent} encrypted change(s). ` +
+        "A purge does not rewrite them, and any of them may carry an earlier version of what you just purged.",
+    );
+    console.log(
+      "The same content also remains in any backup taken before now, on any relay it was pushed to, " +
+        "and on any device that pulled it. Nothing here reaches those.",
+    );
+  }
+}
+
+purge
+  .command("note <reference>")
+  .description("permanently remove a note and every archived revision of it")
+  .option("--yes", "actually do it; without this the command only reports what would go")
+  .action(async (reference, opts) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const vault = openDocumentVault(dir, passphrase);
+    if (!opts.yes) {
+      const revisions = vault.revisions(reference);
+      console.log(`Would purge note ${reference}: ${revisions.length} revision(s), including the current one.`);
+      console.log("Nothing was removed. Re-run with --yes to purge it.");
+      process.exitCode = 2;
+      return;
+    }
+    const report = vault.purgeNote(reference);
+    appendAudit(
+      dir,
+      { actor: "cli-direct-write", file: "documents", key: `purge:note:${report.id}` },
+      passphrase,
+    );
+    reportPurge(report);
+  });
+
+purge
+  .command("canvas <reference>")
+  .description("permanently remove a canvas and every archived revision of it")
+  .option("--yes", "actually do it; without this the command only reports what would go")
+  .action(async (reference, opts) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const vault = openDocumentVault(dir, passphrase);
+    if (!opts.yes) {
+      const revisions = vault.canvasRevisions(reference);
+      console.log(`Would purge canvas ${reference}: ${revisions.length} revision(s), including the current one.`);
+      console.log("Nothing was removed. Re-run with --yes to purge it.");
+      process.exitCode = 2;
+      return;
+    }
+    const report = vault.purgeCanvas(reference);
+    appendAudit(
+      dir,
+      { actor: "cli-direct-write", file: "documents", key: `purge:canvas:${report.id}` },
+      passphrase,
+    );
+    reportPurge(report);
+  });
+
+purge
+  .command("attachment <id>")
+  .description("permanently remove an attachment and every chunk of it")
+  .option("--yes", "actually do it; without this the command only reports what would go")
+  .action(async (id, opts) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const vault = openDocumentVault(dir, passphrase);
+    if (!opts.yes) {
+      const info = vault.listAttachments().find((candidate) => candidate.id === id);
+      if (!info) throw new Error(`Attachment not found: ${id}`);
+      console.log(`Would purge attachment ${info.filename} (${info.id}): ${info.chunks} chunk(s), ${info.size} bytes.`);
+      console.log("Nothing was removed. Re-run with --yes to purge it.");
+      process.exitCode = 2;
+      return;
+    }
+    const report = vault.purgeAttachment(id);
+    appendAudit(
+      dir,
+      { actor: "cli-direct-write", file: "documents", key: `purge:attachment:${report.id}` },
+      passphrase,
+    );
+    reportPurge(report);
   });
 
 program

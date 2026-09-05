@@ -305,3 +305,79 @@ test("vbrain backup and restore carry a vault to a new directory, and refuse a b
   fs.rmSync(vaultDir, { recursive: true, force: true });
   fs.rmSync(outside, { recursive: true, force: true });
 });
+
+test("vbrain purge previews first, then removes the object and its history", () => {
+  const vaultDir = tempVault("purge");
+  const outside = tempVault("purge-out");
+  const env = { VBRAIN_PASSPHRASE: "cli-purge-test-passphrase" };
+  const flags = ["--vault", vaultDir];
+
+  const source = path.join(outside, "Results.md");
+  fs.writeFileSync(source, "---\ntitle: Results\n---\n# Results\n");
+  runCli([...flags, "docs", "import", "Health/Results.md", source], env);
+  fs.writeFileSync(source, "---\ntitle: Results\n---\n# Results\n\nEdited.\n");
+  runCli([...flags, "docs", "import", "Health/Results.md", source], env);
+
+  // Without --yes it is a preview that changes nothing and exits non-zero.
+  let preview;
+  try {
+    runCli([...flags, "purge", "note", "Health/Results.md"], env);
+    assert.fail("the preview must not exit zero");
+  } catch (error) {
+    preview = `${error.stdout ?? ""}`;
+    assert.equal(error.status, 2);
+  }
+  assert.match(preview, /Would purge note/u);
+  assert.match(preview, /Nothing was removed/u);
+  assert.match(runCli([...flags, "docs", "list"], env), /Health\/Results\.md/u);
+
+  const purged = runCli([...flags, "purge", "note", "Health/Results.md", "--yes"], env);
+  assert.match(purged, /Purged note Health\/Results\.md/u);
+  assert.match(purged, /not recoverable/u);
+  assert.doesNotMatch(runCli([...flags, "docs", "list"], env), /Health\/Results\.md/u);
+  assert.match(fs.readFileSync(path.join(vaultDir, "audit.log"), "utf8"), /purge:note:/u);
+
+  // The history directory is gone with it.
+  const history = path.join(vaultDir, "documents", "history");
+  assert.equal(!fs.existsSync(history) || fs.readdirSync(history).length === 0, true);
+
+  fs.rmSync(vaultDir, { recursive: true, force: true });
+  fs.rmSync(outside, { recursive: true, force: true });
+});
+
+test("vbrain retention bounds history and reports what it removed", () => {
+  const vaultDir = tempVault("retention");
+  const outside = tempVault("retention-out");
+  const env = { VBRAIN_PASSPHRASE: "cli-retention-test-passphrase" };
+  const flags = ["--vault", vaultDir];
+  const source = path.join(outside, "Journal.md");
+
+  for (let revision = 1; revision <= 5; revision += 1) {
+    fs.writeFileSync(source, `---\ntitle: Journal\n---\n# Journal\n\nrevision ${revision}\n`);
+    runCli([...flags, "docs", "import", "Journal.md", source], env);
+  }
+  assert.match(runCli([...flags, "retention", "show"], env), /every revision, forever/u);
+  assert.match(runCli([...flags, "docs", "history", "Journal.md"], env), /5/u);
+
+  const set = runCli([...flags, "retention", "set", "--keep-revisions", "2"], env);
+  assert.match(set, /newest 2 archived revision/u);
+  assert.match(set, /2 revision\(s\) removed from 1 of 1 object/u);
+  assert.match(set, /not recoverable/u);
+  assert.match(runCli([...flags, "retention", "show"], env), /newest 2 archived revision/u);
+  assert.match(fs.readFileSync(path.join(vaultDir, "audit.log"), "utf8"), /retention:2:all/u);
+
+  // A further edit is bounded as it is written, not only when a sweep runs.
+  fs.writeFileSync(source, "---\ntitle: Journal\n---\n# Journal\n\nrevision 6\n");
+  runCli([...flags, "docs", "import", "Journal.md", source], env);
+  const history = runCli([...flags, "docs", "history", "Journal.md"], env);
+  assert.equal(history.trim().split("\n").length, 3, history);
+
+  // A no-op sweep says so rather than claiming work.
+  assert.match(runCli([...flags, "retention", "apply"], env), /0 revision\(s\) removed/u);
+
+  // Asking for a bound without naming one is refused rather than guessed at.
+  assert.throws(() => runCli([...flags, "retention", "set"], env), /Use --unlimited/u);
+
+  fs.rmSync(vaultDir, { recursive: true, force: true });
+  fs.rmSync(outside, { recursive: true, force: true });
+});

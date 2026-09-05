@@ -38,6 +38,7 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
   syncEnrollmentRequest: { path: "(transferred)", reads: [1, 2], writes: [1, 2] },
   syncFreshnessCheckpoint: { path: "documents/sync/checkpoint.enc", reads: [1], writes: [1] },
   syncAppliedState: { path: "documents/sync/applied.enc", reads: [1], writes: [1] },
+  retentionPolicy: { path: "documents/retention.enc", reads: [1], writes: [1] },
   vaultBackup: { path: "(backup archive)", reads: [1], writes: [1] },
 } as const;
 
@@ -50,6 +51,7 @@ export const AAD = {
   documentKeyCheck: "secondbrain-vault:document-key:v1",
   documentIndex: "secondbrain-vault:document-index:v1",
   pluginPolicy: "secondbrain-vault:plugin-policy:v1",
+  retentionPolicy: "secondbrain-vault:retention-policy:v1",
   attachmentId: "secondbrain-vault:attachment-id:v1\0",
   syncChangeId: "secondbrain-vault:sync-change-id:v1",
   syncBlobKey: "secondbrain-vault:sync-blob-key:v1",

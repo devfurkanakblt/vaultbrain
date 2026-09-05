@@ -5,6 +5,28 @@ Versioning once the encrypted storage format reaches 1.0.
 
 ## Unreleased
 
+- `vbrain purge note|canvas|attachment` permanently removes an object and every
+  archived revision of it. `docs remove` archives the outgoing revision before
+  it unlinks, so a removed note's content stayed in the vault for its lifetime
+  and "this should never have been written down" had no answer at all. Without
+  `--yes` the command is a preview that changes nothing. It records the object
+  id in the audit chain, and says what it does not reach — including, on a
+  synchronized vault, the change log it did not rewrite.
+- A retention policy the vault carries and both cores honour: `vbrain retention
+  set --keep-revisions N --keep-days D` bounds how much history every object
+  keeps and applies that bound to the history that already exists, and the
+  desktop core prunes to the same bound as it writes. Nothing pruned revisions
+  before, so a note edited daily grew one encrypted file per edit forever. The
+  default stays unlimited, because silently discarding history someone already
+  has would be the worse failure. The policy lives encrypted in
+  `documents/retention.enc` and is declared in the frozen 1.0 inventory.
+- `docs/DELETION.md` states what `remove`, `purge` and retention each do, what a
+  purge cannot reach — earlier backups, the local sync change log, a relay the
+  changes reached, a device that already pulled them, unreferenced blocks on the
+  disk — and records the decision that a purge is local: 1.x ships no deletion
+  tombstone, because a change cannot leave the causal DAG without invalidating
+  the checkpoints that make withheld history detectable, and a delete
+  instruction over an untrusted relay cannot be confirmed.
 - `vbrain backup <archive>` and `vbrain restore <archive> <destination>` give
   the vault a real backup procedure, and the documentation now states it.
   "Copy the directory" was the whole story until now, and nothing said so. The
