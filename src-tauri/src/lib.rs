@@ -6248,7 +6248,10 @@ mod tests {
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         kept.sort();
-        assert_eq!(kept, vec!["4.note.enc".to_string(), "5.note.enc".to_string()]);
+        assert_eq!(
+            kept,
+            vec!["4.note.enc".to_string(), "5.note.enc".to_string()]
+        );
         // The live note is untouched: retention prunes history, not the object.
         assert_eq!(load_note(&session, &id).unwrap().body, "revision 6");
 
