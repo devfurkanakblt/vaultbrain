@@ -94,11 +94,15 @@ Each phase must ship a usable vertical slice and keep older vaults readable.
         re-key leaves behind. Rotating `attachmentId` renames every attachment
         directory and rewrites every canvas object, canvas history revision
         and index reference that names one, and every peer must run it at the
-        same time or their attachment IDs diverge.
+        same time or their attachment IDs diverge. `syncChange` has to move
+        with it — a change ID is referenced as a `parent` by every descendant,
+        so rotating one rewrites the rest of the DAG — and the oracle stays
+        open until both do.
   - [ ] A deliberate lock-break path. Nothing in the CLI can reclaim a vault
         lock on purpose; a crashed `vbrain rekey` holds it for up to 15
         minutes (`REKEY_STALE_MS`), and until it expires or a person deletes
-        `.sbrain.lock` by hand, every other command refuses to run.
+        `.sbrain.lock` by hand, every command that touches the vault refuses to
+        run. `lock` and `keychain-status` are unaffected; neither takes the lock.
   - [ ] Recovery slot, so one forgotten passphrase or one damaged `keyring.json` is not
         the permanent loss of every note. The format already carries a slot list and
         reserves this slot; nothing writes one yet, and the keyring concentrated into
