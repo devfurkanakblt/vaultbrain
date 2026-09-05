@@ -2075,7 +2075,6 @@ program
   .description("replace the vault keyset and re-encrypt every object under it")
   .option("--keep-passphrase", "rotate the keys but keep wrapping them under the current passphrase")
   .option("--recovery-kit <file>", "offline recovery kit to advance alongside this re-key")
-  .option("--recovery-code <code>", "recovery code for --recovery-kit (prompted if omitted)")
   .action(async (opts) => {
     const dir = program.opts().vault;
     const keepPassphrase = Boolean(opts.keepPassphrase);
@@ -2135,7 +2134,11 @@ program
     const recovery = recoveryKit
       ? {
           kitPath: recoveryKit,
-          code: process.env.VBRAIN_RECOVERY_CODE ?? opts.recoveryCode ?? (await readSecret("Recovery code: ")),
+          // Read like every other secret this CLI takes: the environment for
+          // automation, otherwise a masked prompt. Never an argument — a value
+          // passed on the command line survives in shell history and in the
+          // process list, and this one opens the vault on its own.
+          code: process.env.VBRAIN_RECOVERY_CODE ?? (await readSecret("Recovery code: ")),
         }
       : undefined;
 
