@@ -1243,6 +1243,96 @@ test("a re-key re-seals a sync change under the new envelope key without moving 
 // interrupted re-key whose keyring was already replaced must be finished, not
 // restaged, and the run that finishes it must say so rather than claim a
 // fresh rotation it did not perform.
+// The design requires the staged set to match the enumerated set exactly:
+// `planRekey` runs once, before the re-encryption, and `commitRekey` only ever
+// checks the other direction — that every journaled path was staged. A file a
+// racing writer lands in between is in neither the journal nor the staged
+// tree, so without the re-check the run reports success and leaves that one
+// object sealed under the keyset `keyring.json` no longer names: unreadable,
+// and fatal to every future re-key, which aborts on it during staging.
+//
+// Kills the mutation "drop the assertPlanUnchanged call": without it this run
+// returns a clean report and the vault is permanently un-re-keyable.
+test("a file that appears while the re-key stages refuses the commit instead of surviving under the discarded keyset", () => {
+  const { dir } = seedVault();
+  const oldKeys = openVaultKeys(dir, PASSPHRASE);
+  const items = planRekey(dir);
+  const racer = { path: "racer.kv.enc", kind: "kv", identity: "racer" };
+  const racerBytes = encryptItem(racer, oldKeys, Buffer.from('{"entries":{}}'));
+  const racerPath = path.join(dir, racer.path);
+  forgetVaultKeys();
+
+  const before = hashVault(dir);
+  const realWriteFileSync = fs.writeFileSync;
+  let writes = 0;
+  try {
+    // `withVaultLock` writes its own record first, then writeFileAtomic
+    // (src/fs-safe.ts) issues exactly one writeFileSync per staged artifact.
+    // So the last staged write is call number `items.length + 1` — after the
+    // walk that planned the run, and before the commit that would bless it.
+    fs.writeFileSync = (destination, data, options) => {
+      const result = realWriteFileSync(destination, data, options);
+      writes += 1;
+      if (writes === items.length + 1) realWriteFileSync(racerPath, racerBytes);
+      return result;
+    };
+
+    assert.throws(() => rekeyVault(dir, PASSPHRASE, NEW_PASSPHRASE), /racer\.kv\.enc/u);
+  } finally {
+    fs.writeFileSync = realWriteFileSync;
+  }
+
+  assert.equal(writes, items.length + 1, "the racing file must land only after the whole tree is staged");
+
+  // Nothing live moved, nothing was committed, and the old passphrase still
+  // opens the vault — the racer is the only new file, and it is still sealed
+  // under the keyset that is still in force.
+  fs.rmSync(racerPath);
+  assertVaultUnchanged(dir, before);
+  forgetVaultKeys();
+  assert.ok(openVaultKeys(dir, PASSPHRASE), "a refused commit must leave the old passphrase working");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// The mirror direction: a file the walk enumerated that is gone by the time
+// the tree is staged is just as much a mismatch, and is named the same way.
+test("a file that disappears while the re-key stages also refuses the commit", () => {
+  const { dir } = seedVault();
+  const items = planRekey(dir);
+  const victim = items.find((item) => item.kind === "kv" && item.path !== "grants.enc");
+  assert.ok(victim, "the seeded vault must hold a key-value file to remove");
+  const victimPath = path.join(dir, victim.path);
+  const victimBytes = fs.readFileSync(victimPath);
+
+  const realWriteFileSync = fs.writeFileSync;
+  let writes = 0;
+  try {
+    fs.writeFileSync = (destination, data, options) => {
+      const result = realWriteFileSync(destination, data, options);
+      writes += 1;
+      // The lock's own record is write 1, so the last staged artifact is
+      // write `items.length + 1`.
+      if (writes === items.length + 1) fs.rmSync(victimPath);
+      return result;
+    };
+
+    assert.throws(
+      () => rekeyVault(dir, PASSPHRASE, NEW_PASSPHRASE),
+      (error) => error.message.includes(victim.path) && /disappeared after it was planned/u.test(error.message),
+    );
+  } finally {
+    fs.writeFileSync = realWriteFileSync;
+  }
+
+  fs.writeFileSync(victimPath, victimBytes);
+  assert.equal(fs.existsSync(stagingRoot(dir)), false, "a refused commit must leave no staging tree behind");
+  forgetVaultKeys();
+  assert.ok(openVaultKeys(dir, PASSPHRASE), "a refused commit must leave the old passphrase working");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("a re-key finishes an interrupted one instead of starting over", () => {
   const { dir } = seedVault();
   const { journal, keyring } = preparedRekey(dir);

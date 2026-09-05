@@ -57,11 +57,14 @@ function readRecord(lockPath: string): LockRecord | undefined {
 function isStale(record: LockRecord | undefined, staleMs: number): boolean {
   if (!record) return true; // unreadable or truncated: a crash artefact, not a live holder
   const age = Date.now() - Date.parse(record.acquiredAt);
-  // The holder's own window wins when it is longer: it knows how long its
-  // operation runs, and reclaiming it early is what corrupts the vault. A
-  // record from an older build carries no window and falls back to ours.
+  // The holder's own window wins outright, longer or shorter: it is the only
+  // party that knows how long its operation runs. Reclaiming it early is what
+  // corrupts the vault; holding to an acquirer's longer window instead only
+  // wedges the vault, so a 15-minute re-key would wait out a crashed
+  // 30-second writer for a quarter of an hour. A record from an older build
+  // carries no window and falls back to ours.
   const declared = typeof record.staleMs === "number" && Number.isFinite(record.staleMs) && record.staleMs > 0 ? record.staleMs : 0;
-  const window = Math.max(declared, staleMs);
+  const window = declared || staleMs;
   return !Number.isFinite(age) || age > window;
 }
 

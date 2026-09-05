@@ -182,7 +182,12 @@ function walkDocuments(current: string, prefix: string, items: RekeyItem[]): voi
       walkDocuments(full, relative, items);
       continue;
     }
-    if (!entry.isFile()) continue;
+    // Fail closed like every other unclassifiable entry: a symlink to an
+    // `.enc` file would otherwise be skipped silently and survive under the
+    // keyset this run discards, unreadable and un-re-keyable afterwards.
+    if (!entry.isFile()) {
+      throw new Error(`Refusing to re-key: documents/${relative} is not a regular file.`);
+    }
     const item = classifyDocument(relative);
     if (item) items.push(item);
   }
@@ -307,6 +312,24 @@ export function stagedTree(vaultDir: string): string {
 }
 
 /**
+ * A cipher failure carries no context of its own — `Unsupported state or
+ * unable to authenticate data` is all AES-GCM says — so an operator reading
+ * a refused re-key cannot tell which of thousands of objects is damaged.
+ * Every crypto call the staging loop makes runs through here so the refusal
+ * names the file. Only the crypto: the reads and writes around it raise
+ * system errors that already carry a path and a `code`, and those must reach
+ * the caller exactly as they were thrown.
+ */
+function withItemPath<T>(item: RekeyItem, run: () => T): T {
+  try {
+    return run();
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Refusing to re-key: ${item.path} could not be processed: ${detail}`, { cause: error });
+  }
+}
+
+/**
  * Re-encrypts every item into the shadow tree and proves each staged file
  * opens under the new keyset to the same plaintext the live file holds under
  * the old one. Nothing live is touched, so any failure here — a wrong
@@ -341,16 +364,18 @@ export function stageRekey(vaultDir: string, oldKeys: KeySet, newKeys: KeySet, i
     let plaintext: Buffer | undefined;
     let verified: Buffer | undefined;
     try {
-      plaintext = decryptItem(item, oldKeys, fs.readFileSync(live));
+      const liveBytes = fs.readFileSync(live);
+      plaintext = withItemPath(item, () => decryptItem(item, oldKeys, liveBytes));
       const rewritten = encryptItem(item, newKeys, plaintext);
       fs.mkdirSync(path.dirname(staged), { recursive: true, mode: 0o700 });
       writeFileAtomic(staged, rewritten, { mode: 0o600 });
 
       // Read back from disk rather than trusting the buffer in hand: this is
-      // what catches a truncated or partially flushed write before the
-      // commit, and it is what proves the staged file — not just the
+      // what catches a staged file that does not decrypt to the plaintext it
+      // was built from, and it is what proves the staged file — not just the
       // in-memory value that produced it — opens under the new keyset.
-      verified = decryptItem(item, newKeys, fs.readFileSync(staged));
+      const stagedBytes = fs.readFileSync(staged);
+      verified = withItemPath(item, () => decryptItem(item, newKeys, stagedBytes));
       if (!verified.equals(plaintext)) {
         throw new Error(`The re-keyed copy of ${item.path} does not carry its plaintext.`);
       }
@@ -434,6 +459,36 @@ export function installStaged(vaultDir: string, journal: RekeyJournal): void {
     fs.mkdirSync(path.dirname(live), { recursive: true, mode: 0o700 });
     fs.renameSync(staged, live);
   }
+}
+
+/**
+ * The staged set has to match the enumerated set exactly, in both directions.
+ * `planRekey` runs once, before the re-encryption, and `commitRekey` checks
+ * only that every journaled path was staged. Nothing else would notice a file
+ * a racing writer added — or one the first walk missed — between the two: it
+ * is not in the journal, so it is never installed, and after the commit it is
+ * the one object left sealed under a keyset `keyring.json` no longer names.
+ * That is not merely an unreadable file; every later `rekeyVault` aborts on it
+ * during staging, so the vault can never be re-keyed again.
+ *
+ * Re-walking costs one directory scan next to the re-encryption that just ran,
+ * and refusing here is free: nothing live has been touched yet, and the next
+ * run stages from scratch.
+ */
+export function assertPlanUnchanged(vaultDir: string, items: RekeyItem[]): void {
+  const planned = new Set(items.map((item) => item.path));
+  const present = new Set(planRekey(vaultDir).map((item) => item.path));
+  const appeared = [...present].filter((relative) => !planned.has(relative)).sort();
+  const vanished = [...planned].filter((relative) => !present.has(relative)).sort();
+  if (appeared.length === 0 && vanished.length === 0) return;
+
+  const detail = [
+    appeared.length > 0 ? `appeared after it was planned: ${appeared.join(", ")}` : "",
+    vanished.length > 0 ? `disappeared after it was planned: ${vanished.join(", ")}` : "",
+  ].filter(Boolean).join("; ");
+  throw new Error(
+    `Refusing to commit the re-key: the vault changed while it was being staged — ${detail}.`,
+  );
 }
 
 /**
@@ -578,7 +633,7 @@ export function rekeyVault(
   // property this command exists for.
   if (!keepPassphrase && newPassphrase === currentPassphrase && !options.allowSamePassphrase) {
     throw new Error(
-      "The new passphrase is the same as the current one, so a leaked passphrase would still open the vault. Pass --keep-passphrase (or --allow-same-passphrase) to rotate the keyset without changing it.",
+      "The new passphrase is the same as the current one, so a leaked passphrase would still open the vault. Pass --keep-passphrase to rotate the keyset without changing it.",
     );
   }
   const wrapPassphrase = keepPassphrase ? currentPassphrase : newPassphrase;
@@ -633,6 +688,7 @@ export function rekeyVault(
 
         const items = planRekey(vaultDir);
         stageRekey(vaultDir, oldKeys, newKeys, items);
+        assertPlanUnchanged(vaultDir, items);
 
         const slot: KeyringSlot = wrapKeySet(newKeys, wrapPassphrase, DEFAULT_SCRYPT_N);
         commitRekey(
