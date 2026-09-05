@@ -31,6 +31,8 @@ Everything this document describes is implemented in:
 
 - `src/format-version.ts` — the version constant, the artifact/version matrix,
   every fixed AEAD domain-separation string.
+- `src/keyring.ts` — the vault keyring: the wrapped keyset every other key
+  comes from, its slot format and its scrypt bounds.
 - `src/crypto.ts` — the top-level vault envelope (`*.kv.enc`).
 - `src/document-crypto.ts` — the document vault's key-derivation manifest and
   the per-object encrypted payload shape.
@@ -66,6 +68,20 @@ Concretely:
   strict subset of `reads`, which is how a version is retired from _new_
   writes without breaking _old_ readers (see the `encryptedEnvelope` entry,
   which still reads version `0` but only ever writes version `1`).
+
+**One carve-out, stated rather than assumed.** `documentManifest` version 2 is
+in this format at 1.0, even though the policy above reserves artifact version
+bumps for 2.0. It is not a second generation of the manifest: a version 2
+manifest is a *tombstone* — the two fields `{"version": 2, "keyring": true}`
+and nothing else — carrying no KDF, no salt and no verifier. It exists so that a
+build predating the keyring refuses a keyring vault instead of mistaking it
+for an empty legacy one and writing notes under a key of its own. The rule the
+2.0 requirement protects — that a 1.x change must never make an existing vault
+silently misread — is what the tombstone enforces rather than breaks: an older
+build fails closed on it, a version 1 manifest is still read exactly as before,
+and `vbrain migrate` is the migration path between them. A future artifact
+version that carried real data under a bumped number would still be a 2.0
+event.
 
 There is no manual, periodic, or automatic rotation schedule for anything in
 this document. The one place content keys change — sync epoch rotation — is
@@ -146,8 +162,15 @@ precision, a non-UTC offset, etc.) is rejected, not normalized.
 
 ## 4. Key derivation
 
-Two independent scrypt call sites exist, with different accepted ranges. Both
-use `crypto.scryptSync` with a 32-byte output (`KEY_LEN` / `KEY_LENGTH`) and
+A vault written by this build derives **one** key from the passphrase: the
+keyring slot key, which unwraps the keyset every other key is read from
+(Section 5, `vaultKeyring`). The two call sites below are what a reader must
+still accept, because a vault created before the keyring existed derives its
+keys directly and is never rewritten by being opened.
+
+So there are three scrypt call sites in total, with different accepted ranges.
+All use `crypto.scryptSync` with a 32-byte output (`KEY_LEN` / `KEY_LENGTH`).
+The keyring uses `maxmem: 256 * 1024 * 1024`; the two legacy sites use
 `maxmem: 128 * 1024 * 1024`.
 
 **Top-level vault envelope** (`src/crypto.ts`, guards every `*.kv.enc` file).
@@ -193,7 +216,22 @@ So a header cannot be rewritten — to claim a different (weaker) `N`/`r`/`p`,
 or a different declared cipher or version — without the GCM authentication tag
 check failing on decrypt. `ALGO` is `"aes-256-gcm"`.
 
+**Keyring slot** (`src/keyring.ts`, `keyring.json`). The current path, and the
+only one a new vault takes. This build writes `N = 2^17` (`DEFAULT_SCRYPT_N`),
+`r = 8`, `p = 1`, and accepts, per slot, the same range as the key-value
+envelope: `N` a power of two with `2^14 <= N <= 2^20`, `r` in `1..32`, `p` in
+`1..16`, `salt` 16 to 64 decoded bytes (`validateKdf`). Unlike the two sites
+below, the parameters are per-vault data rather than a constant compiled into
+the build, which is what lets `vbrain passphrase change` raise the cost of an
+existing vault. The memory ceiling is deliberately *not* derived from the
+declared parameters — `N = 2^20` with `r = 32` is individually in range and
+jointly implies a multi-gigabyte allocation, so a fixed ceiling makes an
+out-of-policy cost fail fast instead of letting the file dictate its own
+budget.
+
 **Document vault manifest** (`src/document-crypto.ts`, `documents/manifest.json`).
+The legacy path: read for a vault created before the keyring, never taken by a
+vault that has one.
 This is a narrower, closed set rather than a range: a manifest's `kdf.N` must
 be exactly `2^15` or `2^16` (`SUPPORTED_SCRYPT_N = new Set([2 ** 15, 2 ** 16])`);
 new manifests are always written with `N = 2^16`. `r` and `p` are not
@@ -211,6 +249,64 @@ surfaces indirectly, as an HMAC verifier mismatch.
 One subsection per entry in `FORMAT_COMPATIBILITY` (`src/format-version.ts`),
 in the order that constant declares them. `reads` is every version this build
 accepts; `writes` is every version this build newly produces (Section 2).
+
+### `vaultKeyring` — `keyring.json`
+
+`reads: [2]`, `writes: [2]`. Defined in `src/keyring.ts`. The root of the key
+hierarchy and the first file a reader opens: a plaintext JSON envelope holding
+one or more slots, each an AES-256-GCM wrap of the same keyset under a key
+scrypt-derived from one passphrase.
+
+```ts
+interface KeyringFile {
+  version: 2;              // KEYRING_VERSION
+  slots: KeyringSlot[];
+}
+
+interface KeyringSlot {
+  id: string;              // 36 chars matching /^[0-9a-f-]{36}$/
+  type: "passphrase";      // the only type this build accepts
+  label: string;           // <= 64 chars; "primary" for the slot a vault is created with
+  kdf: { name: "scrypt"; N: number; r: number; p: number; salt: string };
+  createdAt: string;       // any Date.parse-able timestamp
+  wrapped: { iv: string; authTag: string; ciphertext: string };
+}
+```
+
+`iv` is exactly 12 decoded bytes, `authTag` exactly 16, and `ciphertext` 16 to
+4096 (`validateSlot`). The KDF bounds are in Section 4.
+
+The associated data binds each slot's identity and declared cost to its
+ciphertext, so a header cannot be weakened and one slot's ciphertext cannot be
+moved under another slot's identity without the tag check failing:
+
+```ts
+// src/keyring.ts — slotAad
+Buffer.from(JSON.stringify({
+  context: AAD.keyringSlot,   // "secondbrain-vault:keyring-slot:v1"
+  version: KEYRING_VERSION,   // 2
+  id: slot.id,
+  type: slot.type,
+  kdf: { name, N, r, p, salt },
+}), "utf8")
+```
+
+The plaintext inside the wrap is the keyset, and the order of `KEY_NAMES` is
+part of the format:
+
+```ts
+{ version: 1, keys: { documents, kv, attachmentId, syncChange, syncEnvelope, audit } }
+```
+
+Each value is 32 decoded bytes. `version` here is the *keyset* version
+(`KEYSET_VERSION`), nested inside the wrap and independent of the file's
+`version`. Because these keys are random and wrapped rather than derived,
+changing the passphrase re-wraps one slot and rewrites nothing else — which is
+what keeps attachment content ids and sync change ids, both keyed HMACs and
+both permanent identities, byte-identical across a passphrase change.
+
+A vault created before the keyring has no `keyring.json` at all; see
+`documentManifest` below and Section 4.
 
 ### `encryptedEnvelope` — `*.kv.enc`
 
@@ -247,8 +343,10 @@ constant). Legacy (version 0) payloads carry no AAD.
 
 ### `documentManifest` — `documents/manifest.json`
 
-`reads: [1]`, `writes: [1]`. Defined in `src/document-crypto.ts`. Not AEAD
-data — a plaintext JSON file that records the KDF parameters and an HMAC
+`reads: [1, 2]`, `writes: [1, 2]`. Defined in `src/document-crypto.ts`, with
+version 2 written by `src/keyring.ts`. Not AEAD data.
+
+Version 1 is a plaintext JSON file recording the KDF parameters and an HMAC
 verifier used to confirm a passphrase before deriving the document-vault
 master key:
 
@@ -259,6 +357,26 @@ interface DocumentManifest {
   verifier: string; // lowercase hex, 64 chars (HMAC-SHA256)
 }
 ```
+
+Version 2 is the keyring tombstone, and is byte-identical whether the vault
+was created keyring-native or upgraded by `vbrain migrate`
+(`manifestTombstone()` is its single definition):
+
+```json
+{
+  "version": 2,
+  "keyring": true
+}
+```
+
+It carries no key material. A keyring vault never consults it to unlock —
+`openDocumentKey` returns from the keyring before reading it — and the one
+time it is read is to turn a missing or unreadable `keyring.json` into "this
+vault was upgraded to a keyring, but keyring.json is missing or unreadable"
+rather than a confusing manifest error. Its real audience is a build from
+before the keyring, which refuses any manifest whose version is not 1 and so
+fails closed instead of treating a keyring vault as an empty legacy one. See
+the carve-out in Section 2.
 
 "AAD" here is really the HMAC message, not AEAD associated data:
 `verifier = HMAC-SHA256(key, AAD.documentKeyCheck)` where

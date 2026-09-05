@@ -5,6 +5,13 @@ Versioning once the encrypted storage format reaches 1.0.
 
 ## Unreleased
 
+- Brought the frozen 1.0 format inventory in line with the keyring, which
+  Phase 7 had added without declaring: `keyring.json` is now a catalogue entry
+  with its slot format, AAD construction and keyset layout specified, the
+  keyring slot's domain-separation string lives with every other one in
+  `src/format-version.ts`, and the version 2 document manifest — the tombstone
+  that makes a pre-keyring build fail closed — is a stated carve-out in the
+  compatibility policy instead of an undeclared artifact version bump.
 - Renamed the command-line program and its environment variables from `sbrain`
   to `vbrain` and from `SBRAIN_*` to `VBRAIN_*`, which breaks existing scripts
   and MCP configurations. The advisory writer lock stays `.sbrain.lock` on

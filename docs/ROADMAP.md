@@ -101,12 +101,10 @@ about. Vault Brain stays local-first with optional self-hosted sync.
 - [x] Automated encrypted-backup plus relay catch-up recovery drill
 - [ ] External security audit and stable 1.0 format
   - [x] Stable 1.0 on-disk format with committed conformance fixtures
-  - [ ] Bring the frozen format inventory back in line with the keyring
-    (Phase 7): `keyring.json` has no `FORMAT_COMPATIBILITY` entry and no
-    artifact-catalogue subsection, and `documents/manifest.json` is declared
-    `writes: [1]` while a keyring-native vault writes the version 2 tombstone.
-    Needs a decision first: an explicit 1.x carve-out for the tombstone, or a
-    format version bump. Disclosed in `docs/AUDIT-SCOPE.md` §2.
+  - [x] Frozen format inventory covers the keyring: `keyring.json` is in
+    `FORMAT_COMPATIBILITY` and the artifact catalogue, and the version 2
+    manifest tombstone is a stated 1.x carve-out rather than an undeclared
+    version bump
   - [ ] External security audit (readiness package in `docs/AUDIT-SCOPE.md`)
 
 ## Phase 7 — Key wrapping, passphrase change and re-key

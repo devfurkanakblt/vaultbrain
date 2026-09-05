@@ -76,25 +76,24 @@ test vector that pins the TypeScript and Rust readers to the same wire format.
 `vbrain rekey` — fresh data keys after a passphrase leak — is designed but not
 built; see `docs/ROADMAP.md` Phase 7.4.
 
-**A known gap in the frozen format, and the largest one in this package.**
-`docs/FORMAT-1.0.md` and `FORMAT_COMPATIBILITY` (`src/format-version.ts`) were
-frozen before the keyring existed, and Phase 7 did not update either. Two
-specific divergences, both verifiable in a minute and neither hidden:
+**One position in the frozen format the reviewer should test rather than
+accept.** `docs/FORMAT-1.0.md` and `FORMAT_COMPATIBILITY`
+(`src/format-version.ts`) were frozen before the keyring existed. They now
+describe it: `keyring.json` is `vaultKeyring` in the catalogue with its slot
+format, AAD construction and keyset layout written out, and
+`documents/manifest.json` is `reads: [1, 2], writes: [1, 2]`.
 
-- `keyring.json` — the root of the key hierarchy, and the first file both
-  cores read — has no entry in `FORMAT_COMPATIBILITY` and no subsection in the
-  artifact catalogue. Its slot format (scrypt `N`/`r`/`p`, salt, wrapped
-  keyset, the nested keyset version) is specified only by `src/keyring.ts`,
-  `src-tauri/src/lib.rs` and the cross-core vector.
-- `documents/manifest.json` is declared `reads: [1], writes: [1]`, but a
-  keyring-native vault writes `{ "version": 2, "keyring": true }` as a
-  tombstone (`src/keyring.ts`) and this build reads it
-  (`src/document-crypto.ts`). Under the §2 compatibility policy an artifact
-  version bump is a 2.0 event, so either the freeze needs an explicit carve-out
-  for the tombstone or the format version itself needs revisiting. This is an
-  open question for the maintainer, not a resolved position, and the reviewer
-  should treat the two implementations and the cross-core vector — not this
-  document — as the authority on the keyring's wire format.
+The second of those is a judgement call, and it is stated as a carve-out in
+`docs/FORMAT-1.0.md` §2 rather than buried. The compatibility policy reserves
+artifact version bumps for a 2.0 format, and manifest version 2 is a bump by
+the letter of it. The argument for keeping it inside 1.0 is that version 2 is
+a tombstone rather than a generation of the manifest: it holds no key
+material, a keyring vault never unlocks through it, a version 1 manifest is
+read exactly as before, `vbrain migrate` is the migration path, and a build
+predating the keyring fails closed on it instead of misreading the vault —
+which is the outcome the 2.0 rule exists to guarantee. A reviewer who thinks
+that reasoning stretches the policy past breaking should say so; the
+maintainer would rather hear it now than defend it later.
 
 ## 3. Trust boundaries
 
