@@ -5,6 +5,21 @@ Versioning once the encrypted storage format reaches 1.0.
 
 ## Unreleased
 
+- `vbrain backup <archive>` and `vbrain restore <archive> <destination>` give
+  the vault a real backup procedure, and the documentation now states it.
+  "Copy the directory" was the whole story until now, and nothing said so. The
+  archive is one self-contained file: a readable preamble carrying the vault's
+  keyring, a sealed file list, and every file sealed under a key derived from
+  the vault's permanent audit key and bound to its index and path. It opens
+  with the vault passphrase and nothing else. `backup` reads its own output
+  back through the restore path before reporting success; `restore
+  --verify-only` checks a stored archive and writes nothing; a restore stages
+  the whole verified vault and moves it into place only once every entry has
+  checked out, and refuses a destination that already holds files. A host
+  storing the archive sees its size and the keyring header — not how many notes
+  the vault holds, their paths, or how many revisions each one has. The
+  recovery drill now restores from this artifact instead of `fs.cpSync`.
+
 - `vbrain export <destination>` writes the whole vault out as plain Markdown
   with frontmatter, JSON Canvas boards and an assets folder of attachments —
   the same shape `docs import-obsidian` reads, so export and import describe
