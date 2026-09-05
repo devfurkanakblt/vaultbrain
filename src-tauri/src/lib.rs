@@ -33,6 +33,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 type HmacSha256 = Hmac<Sha256>;
+mod audit;
 mod keyring;
 const INDEX_AAD: &str = "secondbrain-vault:document-index:v1";
 const DERIVED_LAYOUT: u8 = 5;
@@ -114,7 +115,17 @@ struct PluginInstanceAuthorization {
 
 /// The `documents` key and the `attachmentId` key, in that order: everything
 /// the Rust core takes from a vault's keyset, and everything a session holds.
-type SessionKeys = (Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>);
+/// The `documents` key, the `attachmentId` key, and the `audit` key when the
+/// vault has one. A legacy vault derives its chain key from `audit.meta.json`
+/// and the passphrase, and the session deliberately does not keep the
+/// passphrase past unlock, so there is nothing to derive it from later; such a
+/// vault is `None` here and the application appends no audit entries until
+/// `vbrain migrate` gives it a keyring.
+type SessionKeys = (
+    Zeroizing<[u8; 32]>,
+    Zeroizing<[u8; 32]>,
+    Option<Zeroizing<[u8; 32]>>,
+);
 
 struct VaultSession {
     vault_dir: PathBuf,
@@ -125,6 +136,8 @@ struct VaultSession {
     /// are HMACs under it and every reference already written uses them. Equal
     /// to `key` on a legacy vault, which is what the legacy format means.
     attachment_id_key: Zeroizing<[u8; 32]>,
+    /// The `audit` key, absent on a legacy vault. See `SessionKeys`.
+    audit_key: Option<Zeroizing<[u8; 32]>>,
     index: DocumentIndex,
 }
 
@@ -1173,6 +1186,29 @@ fn with_vault_write<T>(
     operation(session)
 }
 
+/// Record one desktop write in the passphrase-authenticated chain.
+///
+/// Callers are already inside `with_vault_write`, so the lock is held and
+/// `append_locked` must not take it again. A legacy vault has no chain key the
+/// session can reach, and appends nothing rather than starting a second chain
+/// under a key of its own — that is what `vbrain migrate` is for.
+fn audit_write(session: &VaultSession, file: &str, key: &str) -> Result<(), String> {
+    let Some(audit_key) = session.audit_key.as_ref() else {
+        return Ok(());
+    };
+    audit::append_locked(
+        &session.vault_dir,
+        audit::AuditRecord {
+            actor: "desktop-write",
+            file: file.to_string(),
+            key: key.to_string(),
+            outcome: None,
+        },
+        audit_key.as_ref(),
+        now(),
+    )
+}
+
 fn save_index(session: &mut VaultSession) -> Result<(), String> {
     session.index.version = 2;
     session.index.derived = DERIVED_LAYOUT;
@@ -1499,6 +1535,7 @@ fn store_note(
     refresh_canvases_for_note_change(session, &note.id, &identity_labels)?;
     save_index(session)?;
     end_journal(session)?;
+    audit_write(session, "documents", &note.id)?;
     Ok(note)
 }
 
@@ -1523,7 +1560,11 @@ fn open_vault_keys(
 ) -> Result<SessionKeys, String> {
     if let Some(file) = keyring::read(vault_dir)? {
         let keys = keyring::unwrap_keyring(&file, passphrase)?;
-        return Ok((keys.documents.clone(), keys.attachment_id.clone()));
+        return Ok((
+            keys.documents.clone(),
+            keys.attachment_id.clone(),
+            Some(keys.audit.clone()),
+        ));
     }
 
     let manifest_path = root_dir.join("manifest.json");
@@ -1559,7 +1600,7 @@ fn open_vault_keys(
             return Err("wrong passphrase or damaged manifest".into());
         }
         let attachment_id_key = key.clone();
-        return Ok((key, attachment_id_key));
+        return Ok((key, attachment_id_key, None));
     }
 
     if vault_holds_legacy_material(vault_dir) {
@@ -1581,7 +1622,7 @@ fn open_vault_keys(
             &serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?,
         )?;
         let attachment_id_key = key.clone();
-        return Ok((key, attachment_id_key));
+        return Ok((key, attachment_id_key, None));
     }
 
     let keys = keyring::random_key_set();
@@ -1598,7 +1639,11 @@ fn open_vault_keys(
     // keyring on disk unwraps before one object is encrypted under it.
     let written = keyring::read(vault_dir)?.ok_or("failed to create a vault keyring")?;
     let opened = keyring::unwrap_keyring(&written, passphrase)?;
-    Ok((opened.documents.clone(), opened.attachment_id.clone()))
+    Ok((
+        opened.documents.clone(),
+        opened.attachment_id.clone(),
+        Some(opened.audit.clone()),
+    ))
 }
 
 /// The legacy markers `detectVaultFormat` in `src/keyring.ts` looks for, minus
@@ -1631,7 +1676,7 @@ fn open_session(vault_path: &str, passphrase: &str) -> Result<VaultSession, Stri
     reject_symlink(&root_dir)?;
     fs::create_dir_all(&root_dir).map_err(|error| error.to_string())?;
 
-    let (key, attachment_id_key) = open_vault_keys(&vault_dir, &root_dir, passphrase)?;
+    let (key, attachment_id_key, audit_key) = open_vault_keys(&vault_dir, &root_dir, passphrase)?;
 
     let index_path = root_dir.join("index.enc");
     let index_existed = index_path.exists();
@@ -1640,6 +1685,7 @@ fn open_session(vault_path: &str, passphrase: &str) -> Result<VaultSession, Stri
         root_dir,
         key,
         attachment_id_key,
+        audit_key,
         index: DocumentIndex::empty(),
     };
     refresh_session_index(&mut session)?;
@@ -1808,6 +1854,7 @@ fn load_saved_views(session: &VaultSession) -> Result<Vec<SavedView>, String> {
 }
 
 fn write_saved_views(session: &VaultSession, views: &[SavedView]) -> Result<(), String> {
+    audit_write(session, "saved-views", "saved-views")?;
     let file = SavedViewFile {
         version: 1,
         views: views.to_vec(),
@@ -2066,6 +2113,7 @@ fn remove_note_in(session: &mut VaultSession, reference: &str) -> Result<NoteSum
     refresh_canvases_for_note_change(session, &id, &identity_labels)?;
     save_index(session)?;
     end_journal(session)?;
+    audit_write(session, "documents", &id)?;
     Ok(NoteSummary::from(&note))
 }
 
@@ -2479,6 +2527,7 @@ fn load_plugin_policy(session: &VaultSession) -> Result<PluginSecurityPolicy, St
 }
 
 fn save_plugin_policy(session: &VaultSession, policy: &PluginSecurityPolicy) -> Result<(), String> {
+    audit_write(session, "plugin-policy", "plugin-policy")?;
     let mut normalized = policy.clone();
     normalized.version = 1;
     normalized.revoked_signers.sort();
@@ -2742,6 +2791,7 @@ fn begin_plugin_journal(session: &VaultSession, id: &str) -> Result<(), String> 
 }
 
 fn write_plugin(session: &mut VaultSession, plugin: &PluginPackage) -> Result<(), String> {
+    audit_write(session, "plugins", &plugin.id)?;
     let payload = encrypt(
         &serde_json::to_vec(plugin).map_err(|error| error.to_string())?,
         session.key.as_ref(),
@@ -2911,6 +2961,7 @@ fn write_plugin_storage(
     id: &str,
     data: &HashMap<String, String>,
 ) -> Result<(), String> {
+    audit_write(session, "plugin-store", id)?;
     let serialized = serde_json::to_vec(data).map_err(|error| error.to_string())?;
     if serialized.len() > MAX_PLUGIN_STORAGE_BYTES {
         return Err(format!(
@@ -2953,6 +3004,7 @@ fn load_workspace(session: &VaultSession) -> Result<WorkspaceState, String> {
 }
 
 fn write_workspace(session: &VaultSession, state: &WorkspaceState) -> Result<(), String> {
+    audit_write(session, "workspace", "workspace")?;
     let payload = encrypt(
         &serde_json::to_vec(state).map_err(|error| error.to_string())?,
         session.key.as_ref(),
@@ -4654,6 +4706,7 @@ fn put_canvas(session: &mut VaultSession, input: CanvasInput) -> Result<CanvasDo
     store_canvas_index(session, &canvases)?;
     save_index(session)?;
     end_journal(session)?;
+    audit_write(session, "documents", &canvas.id)?;
     Ok(canvas)
 }
 
@@ -4727,6 +4780,7 @@ fn delete_canvas(reference: String, state: State<'_, AppState>) -> Result<Canvas
         store_canvas_index(session, &canvases)?;
         save_index(session)?;
         end_journal(session)?;
+        audit_write(session, "documents", &id)?;
         Ok(canvas)
     })
 }
@@ -4895,6 +4949,7 @@ fn put_attachment(
         &manifest_path,
         &serde_json::to_vec(&payload).map_err(|error| error.to_string())?,
     )?;
+    audit_write(session, "documents", &info.id)?;
     Ok(info)
 }
 
@@ -4957,6 +5012,7 @@ fn remove_attachment(session: &VaultSession, id: &str) -> Result<AttachmentInfo,
     let info = read_attachment_manifest(session, id)?;
     fs::remove_dir_all(attachment_dir(&session.root_dir, id)?)
         .map_err(|error| error.to_string())?;
+    audit_write(session, "documents", id)?;
     Ok(info)
 }
 
@@ -5324,6 +5380,202 @@ fn count_applied_objects(session: &VaultSession) -> Result<usize, String> {
     Ok(state.objects.len())
 }
 
+/// What the vault's keyring holds, without unwrapping any of it.
+///
+/// Slot headers are not secret and this needs no passphrase, but it still
+/// requires an unlocked session: the application has no vault to describe
+/// before one is chosen and opened, and there is no reason to widen what a
+/// locked window can read.
+#[tauri::command(async)]
+fn keyring_status(state: State<'_, AppState>) -> Result<keyring::KeyringStatus, String> {
+    let guard = state
+        .session
+        .lock()
+        .map_err(|_| "vault session lock poisoned")?;
+    let session = guard.as_ref().ok_or("vault is locked")?;
+    keyring::status(&session.vault_dir, vault_format(&session.vault_dir))
+}
+
+/// Re-wrap the vault keyset under a new passphrase.
+///
+/// Nothing is re-encrypted: attachment identities, sync change ids and the
+/// audit chain all survive, because only the wrapping layer moves. It is also
+/// the key-derivation upgrade path, since every rewritten slot is written at
+/// the build's current cost.
+///
+/// The session's keys are unchanged by design — the keyset is the same keyset
+/// — so the window stays unlocked and no note has to be reloaded.
+#[tauri::command(async)]
+fn change_vault_passphrase(
+    current: String,
+    next: String,
+    state: State<'_, AppState>,
+) -> Result<keyring::PassphraseChangeReport, String> {
+    let guard = state
+        .session
+        .lock()
+        .map_err(|_| "vault session lock poisoned")?;
+    let session = guard.as_ref().ok_or("vault is locked")?;
+    if vault_format(&session.vault_dir) != "keyring" {
+        return Err(
+            "this vault is not in the keyring format yet; run 'vbrain migrate' first".into(),
+        );
+    }
+
+    let _write = VaultWriteGuard::acquire(&session.vault_dir)?;
+    let operation = format!("passphrase-change:{}", Uuid::new_v4());
+    let audit_key = session.audit_key.clone();
+
+    // The pending entry goes in first, under the key the vault already has, so
+    // an attempt that fails partway is still on the record.
+    if let Some(key) = audit_key.as_ref() {
+        audit::append_locked(
+            &session.vault_dir,
+            audit::AuditRecord {
+                actor: "desktop-keyring",
+                file: "keyring".into(),
+                key: operation.clone(),
+                outcome: Some("pending"),
+            },
+            key.as_ref(),
+            now(),
+        )?;
+    }
+
+    match keyring::change_passphrase_locked(&session.vault_dir, &current, &next) {
+        Ok((report, chain_key)) => {
+            audit::append_locked(
+                &session.vault_dir,
+                audit::AuditRecord {
+                    actor: "desktop-keyring",
+                    file: "keyring".into(),
+                    key: operation,
+                    outcome: Some("allowed"),
+                },
+                chain_key.as_ref(),
+                now(),
+            )?;
+            Ok(report)
+        }
+        Err(error) => {
+            if let Some(key) = audit_key.as_ref() {
+                audit::append_locked(
+                    &session.vault_dir,
+                    audit::AuditRecord {
+                        actor: "desktop-keyring",
+                        file: "keyring".into(),
+                        key: operation,
+                        outcome: Some("denied"),
+                    },
+                    key.as_ref(),
+                    now(),
+                )?;
+            }
+            Err(error)
+        }
+    }
+}
+
+/// Write a recovery kit for this vault, and add its slot to the keyring.
+///
+/// Without a kit, the keyring holds the only wrapped copies of the data keys,
+/// so one forgotten passphrase or one damaged `keyring.json` is the permanent
+/// loss of every note. The passphrase is asked for again rather than taken
+/// from the session: this adds a second way into the vault, and that should
+/// cost the person doing it a deliberate act.
+///
+/// The kit's destination is chosen through the native save dialog, and the
+/// core refuses a path inside the vault it recovers.
+#[tauri::command(async)]
+fn create_recovery_kit(
+    passphrase: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<keyring::RecoveryKitReport>, String> {
+    let guard = state
+        .session
+        .lock()
+        .map_err(|_| "vault session lock poisoned")?;
+    let session = guard.as_ref().ok_or("vault is locked")?;
+    if vault_format(&session.vault_dir) != "keyring" {
+        return Err(
+            "this vault is not in the keyring format yet; run 'vbrain migrate' first".into(),
+        );
+    }
+
+    let chosen = app
+        .dialog()
+        .file()
+        .set_title("Save the recovery kit outside this vault")
+        .set_file_name("vaultbrain-recovery-kit.json")
+        .blocking_save_file();
+    let Some(chosen) = chosen else {
+        return Ok(None);
+    };
+    let output = chosen.into_path().map_err(|error| error.to_string())?;
+
+    let _write = VaultWriteGuard::acquire(&session.vault_dir)?;
+    let operation = format!("recovery-create:{}", Uuid::new_v4());
+    let audit_key = session.audit_key.clone();
+    if let Some(key) = audit_key.as_ref() {
+        audit::append_locked(
+            &session.vault_dir,
+            audit::AuditRecord {
+                actor: "desktop-keyring",
+                file: "keyring".into(),
+                key: operation.clone(),
+                outcome: Some("pending"),
+            },
+            key.as_ref(),
+            now(),
+        )?;
+    }
+
+    match keyring::create_recovery_kit_locked(&session.vault_dir, &passphrase, &output) {
+        Ok((report, chain_key)) => {
+            audit::append_locked(
+                &session.vault_dir,
+                audit::AuditRecord {
+                    actor: "desktop-keyring",
+                    file: "keyring".into(),
+                    key: operation,
+                    outcome: Some("allowed"),
+                },
+                chain_key.as_ref(),
+                now(),
+            )?;
+            Ok(Some(report))
+        }
+        Err(error) => {
+            if let Some(key) = audit_key.as_ref() {
+                audit::append_locked(
+                    &session.vault_dir,
+                    audit::AuditRecord {
+                        actor: "desktop-keyring",
+                        file: "keyring".into(),
+                        key: operation,
+                        outcome: Some("denied"),
+                    },
+                    key.as_ref(),
+                    now(),
+                )?;
+            }
+            Err(error)
+        }
+    }
+}
+
+/// The three states `detectVaultFormat` distinguishes in `src/keyring.ts`.
+fn vault_format(vault_dir: &Path) -> &'static str {
+    if keyring::keyring_path(vault_dir).exists() {
+        return "keyring";
+    }
+    if vault_holds_legacy_material(vault_dir) {
+        return "legacy";
+    }
+    "empty"
+}
+
 #[tauri::command(async)]
 fn sync_status(state: State<'_, AppState>) -> Result<SyncStatus, String> {
     let guard = state
@@ -5471,6 +5723,9 @@ pub fn run() {
             read_attachment,
             list_attachments,
             delete_attachment,
+            change_vault_passphrase,
+            create_recovery_kit,
+            keyring_status,
             sync_status,
             sync_verify_registry,
         ])
@@ -5667,6 +5922,54 @@ mod tests {
         assert!(VaultWriteGuard::acquire(&path).is_err());
         fs::remove_file(&lock_path).unwrap();
         fs::remove_dir_all(path).unwrap();
+    }
+
+    /// Before this, every edit made in the desktop application was invisible to
+    /// the passphrase-authenticated chain, because only the command-line tool
+    /// ever wrote to it.
+    #[test]
+    fn a_desktop_note_write_lands_in_the_audit_chain() {
+        let path = temporary_vault("desktop-audit");
+        let path_text = path.to_string_lossy().into_owned();
+        let mut session = open_session(&path_text, "audit chain passphrase").unwrap();
+        let audit_key = session
+            .audit_key
+            .clone()
+            .expect("a keyring vault has a chain key");
+
+        let note = seeded_note("Inbox/Audited.md", "Audited", "# Body");
+        store_note(&mut session, note.clone(), None).unwrap();
+        remove_note_in(&mut session, &note.id).unwrap();
+
+        let entries = audit::read(&session.vault_dir).unwrap();
+        assert_eq!(entries.len(), 2, "a write and a delete are two entries");
+        let mut previous = audit::GENESIS_HASH.to_string();
+        for entry in &entries {
+            assert_eq!(entry.file, "documents");
+            assert_eq!(entry.key, note.id);
+            assert_eq!(entry.prev_hash.as_deref(), Some(previous.as_str()));
+            assert_eq!(
+                entry.hash.as_deref(),
+                Some(
+                    audit::entry_hash(entry, &previous, audit_key.as_ref())
+                        .unwrap()
+                        .as_str()
+                ),
+            );
+            previous = entry.hash.clone().unwrap();
+        }
+
+        // The head has to describe the chain that is actually on disk.
+        let head: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(session.vault_dir.join("audit.head.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(head["signedEntries"], 2);
+        assert_eq!(head["lastHash"], previous);
+        assert_eq!(
+            head["mac"],
+            audit::head_mac(2, &previous, audit_key.as_ref()).unwrap()
+        );
     }
 
     #[test]

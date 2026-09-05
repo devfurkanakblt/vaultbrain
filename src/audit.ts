@@ -164,6 +164,26 @@ function signedPayload(entry: Omit<AuditEntry, "hash"> & { prevHash: string }): 
   });
 }
 
+/**
+ * The two hash constructions, exported so a cross-core vector can pin them.
+ * Both are pure: they read nothing and write nothing, and the caller already
+ * holds the key and the data. `test/fixtures/audit-vector.json` is what keeps
+ * the TypeScript and Rust cores from drifting on either one.
+ */
+export function auditEntryHash(
+  entry: Omit<AuditEntry, "hash"> & { prevHash: string },
+  key: Buffer,
+): string {
+  return calculateHash(entry, key);
+}
+
+export function auditHeadMac(
+  head: { version: 1; signedEntries: number; lastHash: string },
+  key: Buffer,
+): string {
+  return headMac(head, key);
+}
+
 function calculateHash(
   entry: Omit<AuditEntry, "hash"> & { prevHash: string },
   key: Buffer

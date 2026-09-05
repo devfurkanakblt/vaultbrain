@@ -1,0 +1,50 @@
+{
+  "note": "Deterministic cross-core audit vector. Both cores must produce these hashes for these entries under this key, and this mac for this head. Dummy key material; never a real vault.",
+  "key": "BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY=",
+  "genesisHash": "GENESIS",
+  "entries": [
+    {
+      "timestamp": "2026-09-05T08:00:00.000Z",
+      "actor": "cli-direct-write",
+      "file": "documents",
+      "key": "note-1",
+      "prevHash": "GENESIS",
+      "hash": "0d5a55139bf8ca17790cc3fedd5c07770e99a958f26dbdf0b5d2e2f3ce0d6c93"
+    },
+    {
+      "timestamp": "2026-09-05T08:00:01.000Z",
+      "actor": "mcp-agent",
+      "file": "health",
+      "key": "BLOOD_TYPE",
+      "agent": "reader",
+      "grant": "g-1",
+      "redaction": "partial",
+      "outcome": "allowed",
+      "prevHash": "0d5a55139bf8ca17790cc3fedd5c07770e99a958f26dbdf0b5d2e2f3ce0d6c93",
+      "hash": "bfafa4df64f38218271edef0cfffb3584e4083981fe45e189429850085d3d7b8"
+    },
+    {
+      "timestamp": "2026-09-05T08:00:02.000Z",
+      "actor": "cli-keyring",
+      "file": "keyring",
+      "key": "passphrase-change:11111111-1111-4111-8111-111111111111",
+      "outcome": "pending",
+      "prevHash": "bfafa4df64f38218271edef0cfffb3584e4083981fe45e189429850085d3d7b8",
+      "hash": "455f0a4b60d7f4a745ca43636ae07b61e45c64946086b94fd47f0c50bce675c8"
+    },
+    {
+      "timestamp": "2026-09-05T08:00:03.000Z",
+      "actor": "cli-direct",
+      "file": "notlar",
+      "key": "ünïcode ✓ \"quoted\" \\ back",
+      "prevHash": "455f0a4b60d7f4a745ca43636ae07b61e45c64946086b94fd47f0c50bce675c8",
+      "hash": "9b20d1f2cb170d3eb600906697bd4c704c645941ef51aef49f9d3700b022bc25"
+    }
+  ],
+  "head": {
+    "version": 1,
+    "signedEntries": 4,
+    "lastHash": "9b20d1f2cb170d3eb600906697bd4c704c645941ef51aef49f9d3700b022bc25",
+    "mac": "fb59003dce7a5d3c87e56e539e7c2f560ad3653117a2d52b23f9bfb31e243c55"
+  }
+}

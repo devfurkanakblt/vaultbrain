@@ -26,6 +26,7 @@ import {
   PanelRightOpen,
   Paperclip,
   Puzzle,
+  KeyRound,
   RefreshCw,
   Search,
   ShieldCheck,
@@ -52,18 +53,19 @@ import type { PluginPanel, PluginRuntimeState, RegisteredCommand } from "./plugi
 import { PropertyTable } from "./PropertyTable";
 import { QuickSwitcher } from "./QuickSwitcher";
 import { clearOwnedClipboard, copyWithExpiry } from "./secure-clipboard";
+import { KeyringStatus } from "./KeyringStatus";
 import { SyncStatus } from "./SyncStatus";
 import { ThemeEditor } from "./ThemeEditor";
 import { WorkspacesDialog } from "./Workspaces";
 import { applyTheme, clearTheme, DEFAULT_THEME, loadTheme, saveTheme, type ThemeSettings } from "./theme";
 import { useVirtualWindow } from "./virtual";
-import type { AttachmentInfo, Backlink, Bookmark, CanvasSummary, DeletedNote, KnowledgeGraph as GraphData, NoteDocument, NoteSummary, PluginSecurityPolicy, PluginSummary, PropertyRow, SavedView, SaveState, SearchHit, SyncStatusData, UnlinkedMention, NoticeTone, Notify, VaultInfo, WorkspaceLayout, WorkspaceState } from "./types";
+import type { AttachmentInfo, Backlink, Bookmark, CanvasSummary, DeletedNote, KnowledgeGraph as GraphData, NoteDocument, NoteSummary, PluginSecurityPolicy, PluginSummary, PropertyRow, SavedView, SaveState, SearchHit, KeyringStatusData, SyncStatusData, UnlinkedMention, NoticeTone, Notify, VaultInfo, WorkspaceLayout, WorkspaceState } from "./types";
 
 const MarkdownEditor = lazy(() => import("./Editor").then((module) => ({ default: module.MarkdownEditor })));
 const MarkdownPreview = lazy(() => import("./Preview"));
 
 type ViewMode = "write" | "read";
-type WorkspaceView = "notes" | "graph" | "properties" | "canvas" | "files" | "plugins" | "sync";
+type WorkspaceView = "notes" | "graph" | "properties" | "canvas" | "files" | "plugins" | "sync" | "keys";
 type LockReason = "manual" | "inactivity";
 /**
  * A message and how it should read. Success and failure shared one green tick
@@ -306,6 +308,7 @@ export function App() {
   const [reveal, setReveal] = useState<{ line: number; token: number }>();
   const revealToken = useRef(0);
   const documentBody = useRef<HTMLDivElement>(null);
+  const [keyringStatus, setKeyringStatus] = useState<KeyringStatusData | null>(null);
   const [syncStatus, setSyncStatus] = useState<SyncStatusData | null>(null);
   const [syncRegistryVerified, setSyncRegistryVerified] = useState<boolean | null>(null);
   const [vaultMenuOpen, setVaultMenuOpen] = useState(false);
@@ -416,6 +419,15 @@ export function App() {
     setBookmarks(workspace.bookmarks);
     setLayouts(workspace.layouts);
     if (listed[0]) await openNote(listed[0].id);
+    // Read the keyring on every unlock, so a vault with no second way in says
+    // so before it holds anything worth losing. Slot headers only; no unwrap.
+    try {
+      setKeyringStatus(await vaultBridge.keyringStatus());
+    } catch {
+      // A vault whose keyring cannot be described still opens; the Keys panel
+      // is where that gets explained, not a failed unlock.
+      setKeyringStatus(null);
+    }
   }
 
   const openNote = useCallback(async (reference: string) => {
@@ -504,7 +516,7 @@ export function App() {
     pluginHost.current?.stopAll();
     setPlugins([]); setPluginStates([]); setPluginCommands([]); setPluginPanels([]);
     setWorkspaceView("notes"); setGraph({ nodes: [], edges: [] }); setPropertyRows([]); setSavedViews([]);
-    setCanvases([]); setAttachments([]); setSyncStatus(null); setSyncRegistryVerified(null);
+    setCanvases([]); setAttachments([]); setSyncStatus(null); setSyncRegistryVerified(null); setKeyringStatus(null);
     setLockNotice(reason === "inactivity"
       ? `Locked automatically after ${idleMinutes} minute${idleMinutes === 1 ? "" : "s"} without activity. The clipboard was cleared too.`
       : "");
@@ -700,6 +712,7 @@ export function App() {
     }
     if (next === "canvas" || next === "files") await refreshAssets();
     if (next === "plugins") await refreshPlugins();
+    if (next === "keys") setKeyringStatus(await vaultBridge.keyringStatus());
     if (next === "sync") {
       const status = await vaultBridge.syncStatus();
       setSyncStatus(status);
@@ -869,6 +882,7 @@ export function App() {
     { icon: FolderKanban, label: "Open canvas workspace", action: () => void showWorkspace("canvas") },
     { icon: Paperclip, label: "Open attachment library", action: () => void showWorkspace("files") },
     { icon: RefreshCw, label: "View sync status", action: () => void showWorkspace("sync") },
+    { icon: KeyRound, label: "View the vault keyring", action: () => void showWorkspace("keys") },
     { icon: BookOpen, label: mode === "write" ? "Switch to reading view" : "Switch to writing view", keys: "⌘ E", action: () => setMode(mode === "write" ? "read" : "write") },
     { icon: rightOpen ? PanelRightClose : PanelRightOpen, label: rightOpen ? "Hide the context panel" : "Show the context panel", action: () => setRightOpen((value) => !value) },
     { icon: LayoutGrid, label: "Workspaces and saved layouts", action: () => setWorkspacesOpen(true) },
@@ -931,6 +945,13 @@ export function App() {
           <button className={workspaceView === "files" ? "active" : ""} onClick={() => void showWorkspace("files")}><Paperclip size={14} /><span>Files</span></button>
           <button className={workspaceView === "plugins" ? "active" : ""} onClick={() => void showWorkspace("plugins")}><Puzzle size={14} /><span>Plugins</span></button>
           <button className={workspaceView === "sync" ? "active" : ""} onClick={() => void showWorkspace("sync")}><RefreshCw size={14} /><span>Sync</span></button>
+          <button
+            className={workspaceView === "keys" ? "active" : ""}
+            onClick={() => void showWorkspace("keys")}
+            title={keyringStatus && !keyringStatus.recoveryConfigured ? "This vault has no recovery kit" : undefined}
+          ><KeyRound size={14} /><span>Keys</span>{keyringStatus && !keyringStatus.recoveryConfigured
+            ? <span className="attention-dot" aria-label="This vault has no recovery kit" />
+            : null}</button>
         </div>
         <button className="quick-find" onClick={() => setSearchOpen(true)}><Search size={15} /><span>Find anything…</span><kbd>⇧⌘F</kbd></button>
         {bookmarks.length > 0 && <div className="bookmark-block">
@@ -1069,6 +1090,13 @@ export function App() {
         onRestricted={setRestrictedPlugins}
         onRevoke={revokePluginSigner}
         onRestore={restorePluginSigner}
+        onNotice={report}
+      />
+      : workspaceView === "keys" ? <KeyringStatus
+        status={keyringStatus}
+        onChangePassphrase={(current, next) => vaultBridge.changeVaultPassphrase(current, next)}
+        onCreateRecoveryKit={(passphrase) => vaultBridge.createRecoveryKit(passphrase)}
+        onChanged={async () => setKeyringStatus(await vaultBridge.keyringStatus())}
         onNotice={report}
       />
       : workspaceView === "sync" ? (syncStatus?.enrolled

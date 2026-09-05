@@ -12,6 +12,24 @@ Versioning once the encrypted storage format reaches 1.0.
   one. `documents`, `kv` and `syncEnvelope` rotate; `attachmentId`,
   `syncChange` and `audit` are pinned, so attachment identities, sync change
   IDs and the audit chain survive.
+- The desktop application can now manage the keys that decide whether a vault
+  survives. It shows what the keyring holds — every slot with its label,
+  creation time and key-derivation cost — changes the passphrase, and writes a
+  recovery kit. Until now all three existed only in the command line, so for
+  anyone who only opens the application "I forgot my passphrase" still meant
+  the permanent loss of every note. A vault with no recovery kit now says so on
+  unlock rather than waiting to be asked. Recovery restore and re-key stay in
+  the CLI on purpose, and the application names the exact commands: a restore
+  is wanted precisely when the application cannot open the vault at all.
+- Every change made in the desktop application now appends to the
+  passphrase-authenticated audit chain. It never did: `audit.log` was written
+  only by the command line, so notes, canvases, attachments and plugins edited
+  in the application were absent from the chain entirely. A committed
+  cross-core vector pins the entry and head constructions so the two cores
+  cannot drift. A legacy vault appends nothing, because its chain key is
+  derived from the passphrase and the session does not keep one; `vbrain
+  migrate` is the way out.
+
 - A sync change's identity no longer depends on a key a re-key rotates. An
   epoch 1 change used to be sealed under the bare documents key, which made its
   id depend on that key; rotating it would have renamed every change in the

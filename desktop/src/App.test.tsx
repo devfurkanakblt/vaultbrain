@@ -18,6 +18,7 @@ const sampleNote: NoteDocument = {
 };
 
 const bridgeMock = vi.hoisted(() => ({
+  keyringStatus: vi.fn(),
   pickVaultDirectory: vi.fn(),
   unlock: vi.fn(),
   lock: vi.fn(),
@@ -891,5 +892,51 @@ describe("desktop workspace", () => {
     expect(within(editor).getAllByText(/· AA$/u).length).toBeGreaterThan(0);
     fireEvent.change(within(editor).getByLabelText("Ink hex"), { target: { value: "#e9e6dc" } });
     expect(await within(editor).findByText(/below AA$/u)).toBeInTheDocument();
+  });
+});
+
+describe("recovery kit discoverability", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    bridgeMock.unlock.mockResolvedValue({ name: "personal", path: "./vault/personal", noteCount: 1 });
+    bridgeMock.listNotes.mockResolvedValue([{ ...sampleNote }]);
+    bridgeMock.getNote.mockResolvedValue({ ...sampleNote });
+    bridgeMock.backlinks.mockResolvedValue([]);
+    bridgeMock.unlinkedMentions.mockResolvedValue([]);
+    bridgeMock.workspaceState.mockResolvedValue({ version: 1, bookmarks: [], layouts: [] });
+    bridgeMock.keyringStatus.mockResolvedValue({
+      format: "keyring",
+      version: 2,
+      recommendedScryptN: 131072,
+      recoveryConfigured: false,
+      slots: [],
+    });
+  });
+
+  /**
+   * The Keys panel says what to do about a missing recovery kit, but only to
+   * someone who goes looking. A vault with no second way in has to say so
+   * before it holds anything worth losing, so unlocking reads the keyring and
+   * marks the nav item.
+   */
+  it("marks the Keys tab when the unlocked vault has no recovery kit", async () => {
+    await unlockWorkspace();
+    const keys = await screen.findByRole("button", { name: /^Keys/ });
+    await waitFor(() => expect(keys.querySelector(".attention-dot")).toBeTruthy());
+    expect(keys.getAttribute("title")).toMatch(/no recovery kit/i);
+  });
+
+  it("leaves the tab unmarked once a recovery kit exists", async () => {
+    bridgeMock.keyringStatus.mockResolvedValue({
+      format: "keyring",
+      version: 2,
+      recommendedScryptN: 131072,
+      recoveryConfigured: true,
+      slots: [],
+    });
+    await unlockWorkspace();
+    const keys = await screen.findByRole("button", { name: /^Keys/ });
+    await waitFor(() => expect(bridgeMock.keyringStatus).toHaveBeenCalled());
+    expect(keys.querySelector(".attention-dot")).toBeNull();
   });
 });

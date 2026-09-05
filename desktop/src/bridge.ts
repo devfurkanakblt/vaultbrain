@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AttachmentContent, AttachmentInfo, Backlink, Bookmark, CanvasDocument, CanvasInput, CanvasSummary, DailyNote, DeletedNote, KnowledgeGraph, NoteDocument, NoteSummary, PluginCallContext, PluginPackage, PluginSecurityPolicy, PluginSummary, PropertyRow, RevisionInfo, SavedView, SearchHit, SyncStatusData, UnlinkedMention, VaultInfo, WorkspaceState } from "./types";
+import type { AttachmentContent, AttachmentInfo, Backlink, Bookmark, CanvasDocument, CanvasInput, CanvasSummary, DailyNote, DeletedNote, KeyringStatusData, KnowledgeGraph, PassphraseChangeReport, RecoveryKitReport, NoteDocument, NoteSummary, PluginCallContext, PluginPackage, PluginSecurityPolicy, PluginSummary, PropertyRow, RevisionInfo, SavedView, SearchHit, SyncStatusData, UnlinkedMention, VaultInfo, WorkspaceState } from "./types";
 
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -55,6 +55,24 @@ let demoPluginPolicy: PluginSecurityPolicy = { version: 1, restrictedMode: false
 const demoPluginInstances = new Map<string, { pluginId: string; revision: number }>();
 let demoWorkspace: WorkspaceState = { version: 1, bookmarks: [], layouts: [] };
 /** Demo mode has no on-disk sync store, so it always reports not enrolled. */
+/** Demo mode shows a vault at the current cost with no recovery slot yet. */
+const demoKeyringStatus: KeyringStatusData = {
+  format: "keyring",
+  version: 2,
+  recommendedScryptN: 131072,
+  recoveryConfigured: false,
+  slots: [
+    {
+      id: "00000000-0000-4000-8000-000000000001",
+      type: "passphrase",
+      label: "primary",
+      createdAt: "2026-09-01T09:00:00.000Z",
+      recovery: false,
+      kdf: { name: "scrypt", N: 32768, r: 8, p: 1, cost: "below-default" },
+    },
+  ],
+};
+
 const demoSyncStatus: SyncStatusData = {
   enrolled: false,
   authorityFingerprint: "",
@@ -703,6 +721,34 @@ export const vaultBridge = {
   async syncVerifyRegistry(): Promise<boolean> {
     if (isTauri) return call<boolean>("sync_verify_registry");
     return demoSyncStatus.enrolled;
+  },
+  /**
+   * Slot headers only. Creating a recovery kit, changing the passphrase and
+   * re-keying are separate commands; this one unwraps nothing.
+   */
+  async keyringStatus(): Promise<KeyringStatusData> {
+    if (isTauri) return call<KeyringStatusData>("keyring_status");
+    return structuredClone(demoKeyringStatus);
+  },
+  /**
+   * Re-wraps the keyset under a new passphrase. Re-encrypts nothing, so the
+   * session stays valid and no note has to be reloaded.
+   */
+  /**
+   * Writes a recovery kit through the native save dialog. Resolves to null
+   * when the dialog is dismissed, which is a cancellation and not a failure.
+   */
+  async createRecoveryKit(passphrase: string): Promise<RecoveryKitReport | null> {
+    if (isTauri) return call<RecoveryKitReport | null>("create_recovery_kit", { passphrase });
+    return {
+      slotId: "00000000-0000-4000-8000-00000000000f",
+      kitPath: "/demo/vaultbrain-recovery-kit.json",
+      recoveryCode: "vbr1_ZGVtby1vbmx5LW5ldmVyLWEtcmVhbC1yZWNvdmVyeS1jb2Rl_00000000",
+    };
+  },
+  async changeVaultPassphrase(current: string, next: string): Promise<PassphraseChangeReport> {
+    if (isTauri) return call<PassphraseChangeReport>("change_vault_passphrase", { current, next });
+    return { slotsRewritten: 1, slotsPreserved: 0, previousN: 32768, newN: 131072 };
   },
 };
 
