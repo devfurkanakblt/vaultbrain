@@ -21,7 +21,7 @@
 - **Canonical JSON** is the existing RFC 8785-compatible `canonicalSyncJson`. Canonical base64 means `Buffer.from(v, "base64").toString("base64") === v`.
 - **Rotation is triggered only by revocation.** No manual rotate command is added.
 - **Rotation is forward-only** and must be documented in those words: a revoked device keeps every epoch key it already held and can still read pre-revocation changes.
-- **Honesty rule for docs:** nothing that did not happen may be marked as having happened. The external audit and mobile clients stay unchecked on the roadmap.
+- **Honesty rule for docs:** nothing that did not happen may be marked as having happened. The external audit stays unchecked on the roadmap.
 - **Quality gate:** `npm run quality` (lint, format:check, typecheck, test, desktop:test, desktop:build) must pass before the final commit of each part. Rust tasks additionally run `npm run quality:rust`.
 - **Tests import compiled output** from `../dist/`, so every test run is `npm run build && node --test <file>`.
 
@@ -1688,7 +1688,7 @@ In `sync devices revoke`, report the rotation:
 
 - [ ] **Step 4: Update the honesty notes**
 
-In `README.md`, in the "Encrypted sync protocol" section, replace the sentence listing deferred work — currently "larger blob transport, epoch content-key rotation, independently witnessed freshness and mobile clients remain Phase 6 work" — with:
+In `README.md`, in the "Encrypted sync protocol" section, replace the sentence listing deferred work — currently "larger blob transport, epoch content-key rotation and independently witnessed freshness remain Phase 6 work" — with:
 
 ```markdown
 Revoking a device rotates the content key: the registry advances to a new epoch,
@@ -1698,8 +1698,8 @@ keeps the epoch keys it already held and can still decrypt every change written
 before the rotation; what it loses is everything written afterwards, including
 whatever the relay accumulates from then on. Recovering historical plaintext
 still only takes the passphrase and an encrypted vault backup — the passphrase
-remains the security boundary. Larger blob transport, independently witnessed
-freshness and mobile clients remain Phase 6 work.
+remains the security boundary. Larger blob transport and independently
+witnessed freshness remain Phase 6 work.
 ```
 
 Add the same forward-only caveat as a bullet in the README "Threat model / honesty notes" list.
@@ -2413,7 +2413,7 @@ Create `docs/AUDIT-SCOPE.md` with these sections:
 6. **The two-implementation problem**, as a first-class scope item. The TypeScript core and the 6531-line Rust core read the same format through independently written code. Ask the auditor to check them against each other, and point at `docs/FORMAT-1.0.md` and the `test/fixtures/` vaults as the material for doing it.
 7. **Already-closed findings.** Link `docs/SECURITY-AUDIT-2026-09-02.md` and `docs/SECURITY-REMEDIATION-2026-09-03.md`, and state which of their items this work closed — specifically the epoch-rotation item from finding 163.
 8. **Questions for the auditor.** Concrete and answerable: Does epoch rotation actually exclude a revoked device that retains the passphrase, given wraps travel inside a registry encrypted under the master key? Is the change-ID HMAC construction sound as a relay-opaque identifier across an epoch boundary? Can a hostile registry or envelope cause unbounded work before validation? Do the two implementations agree on every conformance fixture?
-9. **Out of scope.** iOS and Android clients (unstarted), the plugin ecosystem's third-party packages, and the relay's hosting environment.
+9. **Out of scope.** The plugin ecosystem's third-party packages and the relay's hosting environment.
 10. **Reproducing the build and running the evidence.** `npm ci`, `npm run quality`, `npm run quality:rust`, `npm run benchmark`, `npm run recovery:drill`, and `node --test test/format-conformance.test.mjs`.
 
 - [ ] **Step 2: Update the security policy**
@@ -2429,10 +2429,9 @@ In `docs/ROADMAP.md`, under Phase 6, make exactly these changes and no others:
   - [x] Random per-epoch content keys wrapped to each active device's X25519 key
   - [x] Automatic rotation on owner-signed device revocation
   - [x] Forward-only: a revoked device retains pre-rotation read access
-- [ ] Desktop multi-device release, then iOS/Android clients
+- [ ] Desktop multi-device release
   - [x] Read-only desktop sync status; mutation remains CLI-only
   - [ ] Desktop-driven enrollment, revocation and relay exchange
-  - [ ] iOS/Android clients
 - [ ] External security audit and stable 1.0 format
   - [x] Stable 1.0 on-disk format with committed conformance fixtures
   - [ ] External security audit (readiness package in `docs/AUDIT-SCOPE.md`)
@@ -2442,7 +2441,7 @@ The two unchecked parents stay unchecked. Do not mark a parent complete because 
 
 - [ ] **Step 4: Update the README roadmap paragraph and verify every claim**
 
-Rewrite the README "Roadmap" paragraph to say what is now true: Phase 6 has the change log, device enrollment and revocation with automatic epoch rotation, freshness checkpoints, the opaque relay, the recovery drill, a frozen 1.0 on-disk format, and read-only desktop sync status. Desktop-driven sync mutation, mobile clients and the independent audit remain open.
+Rewrite the README "Roadmap" paragraph to say what is now true: Phase 6 has the change log, device enrollment and revocation with automatic epoch rotation, freshness checkpoints, the opaque relay, the recovery drill, a frozen 1.0 on-disk format, and read-only desktop sync status. Desktop-driven sync mutation and the independent audit remain open.
 
 Then verify, one claim at a time, that each sentence you wrote is backed by code that exists:
 

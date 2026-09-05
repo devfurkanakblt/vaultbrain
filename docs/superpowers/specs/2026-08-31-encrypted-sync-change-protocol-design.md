@@ -158,5 +158,5 @@ version, so synchronized attachments are limited to the space available in an
 - epoch content keys, rotation and independently witnessed freshness;
 - relay API, authentication, quotas and self-hosting;
 - checkpoint/compaction rules for large histories;
-- Rust/mobile implementations and cross-language fixtures;
+- Rust implementations and cross-language fixtures;
 - external cryptographic review before stable 1.0.

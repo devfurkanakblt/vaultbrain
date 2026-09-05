@@ -1,25 +1,25 @@
-# Phase 6 — Encrypted Sync, Multi-Device, and Mobile Implementation Plan
+# Phase 6 — Encrypted Sync and Multi-Device Implementation Plan
 
 > **For Codex:** REQUIRED SUB-SKILLS: use `subagent-driven-development` to
 > execute this plan task-by-task, `test-driven-development` for every behavior
 > change, and `verification-before-completion` at each phase gate.
 
 **Goal:** Deliver recoverable encrypted sync, portable vault state, authenticated
-multi-device membership, one untrusted relay artifact, desktop parity, a narrow
-iOS/Android client, and the evidence required for an audited 1.0 format freeze.
+multi-device membership, one untrusted relay artifact, desktop parity, and the
+evidence required for an audited 1.0 format freeze.
 
 **Architecture:** Preserve the protocol-v1 TypeScript API while separating its
 protocol, snapshot, log, transaction, and engine responsibilities. Add a
 recoverable local transaction and apply-receipt model before widening object
 coverage. Introduce manifest-v2 wrapped keys and signed membership epochs, then
 an opaque Axum relay and a shared Rust protocol crate. Expose only narrow Tauri
-commands and reuse the common React UI on mobile.
+commands and reuse the common React UI in the desktop shell.
 
 **Tech stack:** TypeScript/Node.js, Vitest, Rust stable, Cargo, Tauri v2, React,
 Axum, SQLite, PostgreSQL adapter, object-store adapter, Docker/Compose.
 
 **Design authority:**
-`docs/superpowers/specs/2026-08-31-phase-6-sync-mobile-design.md`
+`docs/superpowers/specs/2026-08-31-phase-6-sync-multi-device-design.md`
 
 ## Global constraints
 
@@ -58,7 +58,7 @@ Axum, SQLite, PostgreSQL adapter, object-store adapter, Docker/Compose.
 - Create: `test/fixtures/sync-v1/golden.json`
 - Create: `test/fixtures/sync-v1/adversarial.json`
 - Create: `test/sync-protocol.test.mjs`
-- Modify: `docs/superpowers/specs/2026-08-31-phase-6-sync-mobile-design.md`
+- Modify: `docs/superpowers/specs/2026-08-31-phase-6-sync-multi-device-design.md`
 
 **Steps:**
 
@@ -540,72 +540,9 @@ Axum, SQLite, PostgreSQL adapter, object-store adapter, Docker/Compose.
 3. Run the full TypeScript/Rust/relay/desktop/benchmark gate. Do not mark desktop
    sync released until the real two-device drill passes. Commit evidence/docs.
 
-## Phase 6F — iOS and Android
+## Phase 6F — Audit, recovery drill, and 1.0
 
-### Task 21: Build the common narrow mobile UI
-
-**Files:**
-
-- Modify: `desktop/src/App.tsx` and routing/layout modules
-- Create: `desktop/src/mobile/`
-- Modify: `desktop/src/bridge.ts`
-- Create: `desktop/src/mobile/*.test.tsx`
-- Modify: `src-tauri/tauri.conf.json`
-
-**Steps:**
-
-1. Add viewport/platform tests for offline note list/read/write, search,
-   attachment viewing, sync status, conflict resolution, and device management.
-2. Reuse common React/Tauri contracts with a mobile shell; explicitly omit
-   canvas editing and plugin runtime/routes/capabilities.
-3. Preserve accessible keyboard/touch behavior and wipe decrypted state on
-   background lock.
-4. Run common UI/desktop tests and mobile-target configuration checks; commit.
-
-### Task 22: Add suspension-safe Android and iOS native behavior
-
-**Files:**
-
-- Modify: `src-tauri/src/sync.rs`
-- Create/modify: generated Android project integration files
-- Create/modify: generated iOS project integration files
-- Create: `src-tauri/tests/mobile_transactions.rs`
-- Create: `.github/workflows/android.yml`
-- Create: `.github/workflows/ios.yml`
-
-**Steps:**
-
-1. In separate platform worktrees/runners, add failing tests that suspend/kill at
-   every local and remote transaction phase and verify exactly-once recovery.
-2. Keep device keys in native secure storage and deny Stronghold/key commands to
-   webview capabilities.
-3. Implement bounded background retry and platform-specific atomic file replace
-   and directory durability behavior.
-4. Run Android builds/tests. Run iOS builds/tests on macOS/Xcode; if signing or a
-   macOS runner is unavailable, record the exact external blocker and do not
-   claim the iOS gate. Commit platform code and CI separately as appropriate.
-
-### Task 23: Pass cross-device mobile E2E
-
-**Files:**
-
-- Create: `test/e2e/mobile-cross-device/`
-- Create: `docs/drills/mobile-cross-device.md`
-- Modify: `docs/ROADMAP.md`
-
-**Steps:**
-
-1. Exercise desktop↔Android, desktop↔iOS, and Android↔iOS offline edit,
-   reconnect, conflict, attachment resume, device removal, rotation, locked
-   staging, suspension, and recovery flows.
-2. Capture redacted device/build evidence and ensure no key/capability appears in
-   UI, logs, screenshots, crash reports, or relay records.
-3. Run all platform and common gates. Close mobile roadmap entries only for
-   platforms with actual passing runner/device evidence; commit.
-
-## Phase 6G — Audit, recovery drill, and 1.0
-
-### Task 24: Prove legacy migration and disaster recovery
+### Task 21: Prove legacy migration and disaster recovery
 
 **Files:**
 
@@ -626,7 +563,7 @@ Axum, SQLite, PostgreSQL adapter, object-store adapter, Docker/Compose.
    write, or plaintext leakage as a release-blocking failure. Commit fixtures,
    fixes, and evidence.
 
-### Task 25: Assemble and remediate the independent audit package
+### Task 22: Assemble and remediate the independent audit package
 
 **Files:**
 
@@ -651,7 +588,7 @@ Axum, SQLite, PostgreSQL adapter, object-store adapter, Docker/Compose.
 4. External audit contracting and verdict are human/external coordination;
    record the blocker precisely rather than manufacturing approval.
 
-### Task 26: Freeze the 1.0 format only after all gates
+### Task 23: Freeze the 1.0 format only after all gates
 
 **Files:**
 
@@ -668,7 +605,7 @@ Axum, SQLite, PostgreSQL adapter, object-store adapter, Docker/Compose.
 
 1. Confirm every prior phase gate, real platform drill, and external remediation
    retest is complete with no critical/high findings.
-2. Re-run lint, format, typecheck, all TypeScript/desktop/mobile/Rust/relay tests
+2. Re-run lint, format, typecheck, all TypeScript/desktop/Rust/relay tests
    and builds, package/image checks, migration/recovery drills, fuzz smoke runs,
    and performance budgets from a clean checkout.
 3. Only then set package/Tauri/relay/crate versions to `1.0.0`, freeze documented

@@ -330,12 +330,12 @@ findings once fixes have shipped.
 
 ## 10. Out of scope
 
-- **iOS and Android clients.** Out of scope for the product, not merely
-  unbuilt. Per `docs/ROADMAP.md` mobile clients are no longer planned: a phone
-  client would make a hosted relay and a third-party app store part of the
-  product, and would put the passphrase — per §5 the only real security
-  boundary — on a device the owner does not fully control. Sync is
-  desktop-to-desktop. There is no mobile code to review and none is coming.
+- **Any non-desktop client.** Vault Brain is a desktop product and sync is
+  desktop-to-desktop. A phone client would make a hosted relay and a
+  third-party app store part of the product, and would put the passphrase —
+  per §5 the only real security boundary — on a device the owner does not
+  fully control, so the product does not have one and no work is planned
+  toward one. There is no non-desktop code to review.
 - **The plugin ecosystem's third-party packages.** `src/plugin-signatures.ts`
   and the plugin sandbox are in scope; any specific third-party plugin's own
   logic is not.

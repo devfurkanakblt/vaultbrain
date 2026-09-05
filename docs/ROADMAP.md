@@ -70,10 +70,9 @@ Each phase must ship a usable vertical slice and keep older vaults readable.
 
 ## Phase 6 — Encrypted sync (desktop multi-device)
 
-iOS/Android clients are out of scope. A phone client would make a hosted relay
-and a third-party app store part of the product, and would put the passphrase —
-the vault's only real security boundary — on a device this project cannot reason
-about. Vault Brain stays local-first with optional self-hosted sync.
+Sync is desktop-to-desktop. Vault Brain stays local-first: the passphrase — the
+vault's only real security boundary — never leaves a machine the owner controls,
+and no hosted service is ever required.
 
 - [x] Immutable encrypted change protocol and conflict resolution
   - [x] Content-addressed encrypted envelopes, device chains, causal DAG validation and deterministic conflict inspection

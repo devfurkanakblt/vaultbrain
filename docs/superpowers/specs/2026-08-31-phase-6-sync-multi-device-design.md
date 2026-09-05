@@ -1,4 +1,4 @@
-# Phase 6 — Encrypted Sync, Multi-Device, and Mobile Design
+# Phase 6 — Encrypted Sync and Multi-Device Design
 
 Date: 2026-08-31  
 Status: Approved for staged implementation  
@@ -8,7 +8,7 @@ Compatibility baseline: repository `c46fdcd`, protocol-v1 foundation `e5ce271`
 
 Phase 6 turns the existing relay-independent TypeScript sync foundation into a
 recoverable, authenticated, multi-device system and then carries the same
-security boundary through desktop and a deliberately narrow mobile client.
+security boundary through the desktop application.
 Delivery is incremental. Every slice remains useful on its own, continues to
 open legacy vaults and protocol-v1 objects, and must pass its acceptance gate
 before the roadmap can describe it as complete.
@@ -26,9 +26,6 @@ plan decomposes it into test-first tasks and review checkpoints.
 - The official hosted relay and the self-hosted relay use the same open binary,
   wire protocol, and compatibility suite. Hosted account and billing control
   planes are outside Phase 6.
-- Mobile v1 supports offline note read/write, search, attachment viewing,
-  synchronization, conflict resolution, and device management. Canvas editing
-  and plugin execution are excluded from the first mobile release.
 - A new device is enrolled by an existing trusted device with a ten-minute,
   one-use QR/code invitation. A checksum-protected 24-word recovery kit covers
   loss of all enrolled devices and is never uploaded to the relay.
@@ -251,7 +248,7 @@ equivocation; the relay is not trusted to claim completeness. Docker image,
 Compose example, migrations, backup/restore instructions, and compatibility
 tests all exercise the same artifact.
 
-## Desktop and mobile boundaries
+## Desktop boundaries
 
 Tauri and the relay share a Rust `sync-protocol` crate. Desktop IPC exposes only
 bounded status, device management, manual sync, conflict queue/resolution,
@@ -261,12 +258,6 @@ relay capabilities, recovery secrets, or raw encrypted/decrypted envelopes.
 While locked, a client may stage only size-limited opaque objects. Authentication,
 decryption, semantic admission, and live apply occur after unlock. Stronghold
 or platform keystore commands are not granted to the webview.
-
-Mobile transactions tolerate suspension at every durable phase. Android and
-iOS implement platform-appropriate atomic replace/fsync behavior and background
-retry limits. iOS builds/releases require macOS, Xcode, and external signing
-coordination; Android release signing likewise remains an external release
-credential.
 
 ## Release and security gates
 

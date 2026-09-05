@@ -18,7 +18,6 @@ and states plainly what the fourth cannot be.
 | Stable 1.0 format | Complete: frozen spec, version surface, conformance vectors |
 | Desktop multi-device | Read-only sync status in the Rust core and desktop UI |
 | External security audit | An auditor-ready package; the audit itself is third-party work |
-| iOS/Android clients | Out of scope; remains open on the roadmap |
 
 Two constraints apply throughout. Older vaults must stay readable: every format
 change is additive and versioned, and no existing artifact is rewritten in
@@ -304,7 +303,7 @@ medical, financial or identity data.
 **`docs/ROADMAP.md` and `README.md`** are updated to reflect exactly what is
 done and what is not. Epoch rotation and the stable 1.0 format become checked.
 The desktop item is recorded as read-only status shipped with mutation still
-CLI-only, and mobile clients unstarted. The external audit stays unchecked with
+CLI-only. The external audit stays unchecked with
 a note that the readiness package exists. Nothing that did not happen is marked
 as having happened.
 

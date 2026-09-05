@@ -694,9 +694,9 @@ content-addressed transport for attachment blobs of any size the vault
 accepts. Desktop-driven sync mutation (enrollment, revocation, relay
 push/pull from the app) and the independent security audit remain open — see
 [`docs/AUDIT-SCOPE.md`](docs/AUDIT-SCOPE.md) for the audit readiness package.
-iOS/Android clients are out of scope: Vault Brain stays local-first with
-optional self-hosted sync rather than putting the passphrase, and a hosted
-relay dependency, on a phone.
+Sync is desktop-to-desktop: Vault Brain stays local-first with optional
+self-hosted sync, so the passphrase never leaves a machine the owner controls
+and no hosted service is ever required.
 
 Phase 7 replaced the passphrase-derived content key with a wrapped keyring, so
 `vbrain passphrase change` re-wraps the keyset without re-encrypting a single
