@@ -1224,6 +1224,161 @@ fn save_index(session: &mut VaultSession) -> Result<(), String> {
     )
 }
 
+/// The retention policy's domain-separation string, shared with
+/// `src/format-version.ts`. The policy lives in `documents/retention.enc`.
+const RETENTION_AAD: &str = "secondbrain-vault:retention-policy:v1";
+
+/// How much archived history the vault keeps. Absent file, or both bounds
+/// unset, means every revision is kept — the default a vault starts with.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RetentionPolicy {
+    version: u8,
+    #[serde(default)]
+    keep_revisions: Option<u64>,
+    #[serde(default)]
+    keep_days: Option<u64>,
+}
+
+impl RetentionPolicy {
+    fn bounded(&self) -> bool {
+        self.keep_revisions.is_some() || self.keep_days.is_some()
+    }
+}
+
+/// Reads the policy on each archived revision rather than caching it.
+///
+/// It is one small file and one AES-GCM open per note or canvas write, which
+/// are user-paced in a desktop application; a cache would have to be
+/// invalidated from the command line's writes as well, and a stale cache here
+/// means quietly keeping history the vault was told to drop.
+fn read_retention(session: &VaultSession) -> Result<Option<RetentionPolicy>, String> {
+    let path = session.root_dir.join("retention.enc");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let payload: EncryptedPayload =
+        serde_json::from_slice(&read_limited(&path, 64 * 1024, "retention policy")?)
+            .map_err(|error| error.to_string())?;
+    let policy: RetentionPolicy =
+        serde_json::from_slice(&decrypt(&payload, session.key.as_ref(), RETENTION_AAD)?)
+            .map_err(|error| error.to_string())?;
+    if policy.version != 1 {
+        return Err(format!(
+            "this vault's retention policy is version {}; this build understands 1",
+            policy.version
+        ));
+    }
+    Ok(Some(policy))
+}
+
+/// Drops the archived revisions of one object that the policy does not keep.
+///
+/// Mirrors `applyRetention` in `src/documents.ts`: `keepRevisions` needs only
+/// the filenames, and `keepDays` reads each revision's own `updatedAt`, so a
+/// vault with no age bound never decrypts anything here. A revision this build
+/// cannot open is left alone — deleting what we cannot read is not a retention
+/// decision.
+fn apply_retention(session: &VaultSession, id: &str, suffix: &str) -> Result<(), String> {
+    let Some(policy) = read_retention(session)? else {
+        return Ok(());
+    };
+    if !policy.bounded() {
+        return Ok(());
+    }
+
+    let directory = note_history_dir(session, id)?;
+    if !directory.is_dir() {
+        return Ok(());
+    }
+    let ending = format!(".{suffix}.enc");
+    let mut revisions: Vec<u64> = Vec::new();
+    for entry in fs::read_dir(&directory).map_err(|error| error.to_string())? {
+        let name = entry.map_err(|error| error.to_string())?.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(number) = name.strip_suffix(&ending) else {
+            continue;
+        };
+        if let Ok(revision) = number.parse::<u64>() {
+            revisions.push(revision);
+        }
+    }
+    revisions.sort_unstable();
+    if revisions.is_empty() {
+        return Ok(());
+    }
+
+    let mut doomed: Vec<u64> = Vec::new();
+    if let Some(keep) = policy.keep_revisions {
+        let keep = keep as usize;
+        if revisions.len() > keep {
+            doomed.extend(&revisions[..revisions.len() - keep]);
+        }
+    }
+    if let Some(days) = policy.keep_days {
+        let cutoff = Utc::now() - chrono::Duration::days(days as i64);
+        for revision in &revisions {
+            if doomed.contains(revision) {
+                continue;
+            }
+            let path = directory.join(format!("{revision}{ending}"));
+            let Ok(updated_at) = revision_updated_at(session, id, *revision, suffix, &path) else {
+                continue;
+            };
+            if updated_at < cutoff {
+                doomed.push(*revision);
+            }
+        }
+    }
+    if doomed.is_empty() {
+        return Ok(());
+    }
+
+    for revision in doomed {
+        let path = directory.join(format!("{revision}{ending}"));
+        reject_symlink(&path)?;
+        if path.exists() {
+            fs::remove_file(&path).map_err(|error| error.to_string())?;
+        }
+    }
+    if fs::read_dir(&directory)
+        .map_err(|error| error.to_string())?
+        .next()
+        .is_none()
+    {
+        fs::remove_dir(&directory).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+/// One archived revision's own timestamp, whichever kind of object it is.
+fn revision_updated_at(
+    session: &VaultSession,
+    id: &str,
+    revision: u64,
+    suffix: &str,
+    path: &Path,
+) -> Result<DateTime<Utc>, String> {
+    let payload: EncryptedPayload =
+        serde_json::from_slice(&read_limited(path, 40 * 1024 * 1024, "archived revision")?)
+            .map_err(|error| error.to_string())?;
+    let aad = if suffix == "canvas" {
+        canvas_history_aad(id, revision)
+    } else {
+        history_aad(id, revision)
+    };
+    let value: serde_json::Value =
+        serde_json::from_slice(&decrypt(&payload, session.key.as_ref(), &aad)?)
+            .map_err(|error| error.to_string())?;
+    let updated_at = value
+        .get("updatedAt")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("archived revision has no timestamp")?;
+    DateTime::parse_from_rfc3339(updated_at)
+        .map(|stamp| stamp.with_timezone(&Utc))
+        .map_err(|error| error.to_string())
+}
+
 fn archive_note(session: &VaultSession, note: &NoteDocument) -> Result<(), String> {
     let path = session
         .root_dir
@@ -1241,7 +1396,8 @@ fn archive_note(session: &VaultSession, note: &NoteDocument) -> Result<(), Strin
     write_atomic(
         &path,
         &serde_json::to_vec(&payload).map_err(|error| error.to_string())?,
-    )
+    )?;
+    apply_retention(session, &note.id, "note")
 }
 
 fn analyze_markdown(body: &str) -> Result<(Vec<WikiLink>, Vec<Heading>), String> {
@@ -4612,7 +4768,8 @@ fn archive_canvas(session: &VaultSession, canvas: &CanvasDocument) -> Result<(),
     write_atomic(
         &path,
         &serde_json::to_vec(&payload).map_err(|error| error.to_string())?,
-    )
+    )?;
+    apply_retention(session, &canvas.id, "canvas")
 }
 
 fn begin_canvas_journal(session: &VaultSession, id: &str) -> Result<(), String> {
@@ -6035,6 +6192,101 @@ mod tests {
             first.index.notes[&original.id].note.body,
             "# Written elsewhere"
         );
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    /// The retention policy is written by the command line and honoured here.
+    /// If the desktop ignored it, a vault told to keep two revisions would keep
+    /// every revision made in the application and no one would find out until
+    /// the history they asked to be gone was still there.
+    #[test]
+    fn the_desktop_honours_the_retention_policy_the_vault_carries() {
+        let path = temporary_vault("retention");
+        let path_text = path.to_string_lossy().into_owned();
+        let mut session = open_session(&path_text, "test passphrase").unwrap();
+        let id = Uuid::new_v4().to_string();
+
+        let policy = serde_json::json!({ "version": 1, "keepRevisions": 2, "keepDays": null });
+        let payload = encrypt(
+            &serde_json::to_vec(&policy).unwrap(),
+            session.key.as_ref(),
+            RETENTION_AAD,
+        )
+        .unwrap();
+        write_atomic(
+            &session.root_dir.join("retention.enc"),
+            &serde_json::to_vec(&payload).unwrap(),
+        )
+        .unwrap();
+
+        let mut note = NoteDocument {
+            version: 1,
+            id: id.clone(),
+            path: "Journal.md".into(),
+            title: "Journal".into(),
+            body: "revision 1".into(),
+            aliases: vec![],
+            tags: vec![],
+            properties: empty_object(),
+            created_at: now(),
+            updated_at: now(),
+            revision: 1,
+            frontmatter_source: None,
+        };
+        store_note(&mut session, note.clone(), None).unwrap();
+        for revision in 2..=6u64 {
+            let previous = note.clone();
+            note.body = format!("revision {revision}");
+            note.revision = revision;
+            note.updated_at = now();
+            store_note(&mut session, note.clone(), Some(previous)).unwrap();
+        }
+
+        let history = session.root_dir.join("history").join(&id);
+        let mut kept: Vec<String> = fs::read_dir(&history)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        kept.sort();
+        assert_eq!(kept, vec!["4.note.enc".to_string(), "5.note.enc".to_string()]);
+        // The live note is untouched: retention prunes history, not the object.
+        assert_eq!(load_note(&session, &id).unwrap().body, "revision 6");
+
+        drop(session);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn a_vault_with_no_retention_policy_keeps_every_revision() {
+        let path = temporary_vault("retention-default");
+        let path_text = path.to_string_lossy().into_owned();
+        let mut session = open_session(&path_text, "test passphrase").unwrap();
+        let id = Uuid::new_v4().to_string();
+        let mut note = NoteDocument {
+            version: 1,
+            id: id.clone(),
+            path: "Journal.md".into(),
+            title: "Journal".into(),
+            body: "revision 1".into(),
+            aliases: vec![],
+            tags: vec![],
+            properties: empty_object(),
+            created_at: now(),
+            updated_at: now(),
+            revision: 1,
+            frontmatter_source: None,
+        };
+        store_note(&mut session, note.clone(), None).unwrap();
+        for revision in 2..=4u64 {
+            let previous = note.clone();
+            note.revision = revision;
+            note.updated_at = now();
+            store_note(&mut session, note.clone(), Some(previous)).unwrap();
+        }
+
+        let history = session.root_dir.join("history").join(&id);
+        assert_eq!(fs::read_dir(&history).unwrap().count(), 3);
+        drop(session);
         fs::remove_dir_all(path).unwrap();
     }
 
