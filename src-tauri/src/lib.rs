@@ -5396,6 +5396,86 @@ fn keyring_status(state: State<'_, AppState>) -> Result<keyring::KeyringStatus, 
     keyring::status(&session.vault_dir, vault_format(&session.vault_dir))
 }
 
+/// Re-wrap the vault keyset under a new passphrase.
+///
+/// Nothing is re-encrypted: attachment identities, sync change ids and the
+/// audit chain all survive, because only the wrapping layer moves. It is also
+/// the key-derivation upgrade path, since every rewritten slot is written at
+/// the build's current cost.
+///
+/// The session's keys are unchanged by design — the keyset is the same keyset
+/// — so the window stays unlocked and no note has to be reloaded.
+#[tauri::command(async)]
+fn change_vault_passphrase(
+    current: String,
+    next: String,
+    state: State<'_, AppState>,
+) -> Result<keyring::PassphraseChangeReport, String> {
+    let guard = state
+        .session
+        .lock()
+        .map_err(|_| "vault session lock poisoned")?;
+    let session = guard.as_ref().ok_or("vault is locked")?;
+    if vault_format(&session.vault_dir) != "keyring" {
+        return Err(
+            "this vault is not in the keyring format yet; run 'vbrain migrate' first".into(),
+        );
+    }
+
+    let _write = VaultWriteGuard::acquire(&session.vault_dir)?;
+    let operation = format!("passphrase-change:{}", Uuid::new_v4());
+    let audit_key = session.audit_key.clone();
+
+    // The pending entry goes in first, under the key the vault already has, so
+    // an attempt that fails partway is still on the record.
+    if let Some(key) = audit_key.as_ref() {
+        audit::append_locked(
+            &session.vault_dir,
+            audit::AuditRecord {
+                actor: "desktop-keyring",
+                file: "keyring".into(),
+                key: operation.clone(),
+                outcome: Some("pending"),
+            },
+            key.as_ref(),
+            now(),
+        )?;
+    }
+
+    match keyring::change_passphrase_locked(&session.vault_dir, &current, &next) {
+        Ok((report, chain_key)) => {
+            audit::append_locked(
+                &session.vault_dir,
+                audit::AuditRecord {
+                    actor: "desktop-keyring",
+                    file: "keyring".into(),
+                    key: operation,
+                    outcome: Some("allowed"),
+                },
+                chain_key.as_ref(),
+                now(),
+            )?;
+            Ok(report)
+        }
+        Err(error) => {
+            if let Some(key) = audit_key.as_ref() {
+                audit::append_locked(
+                    &session.vault_dir,
+                    audit::AuditRecord {
+                        actor: "desktop-keyring",
+                        file: "keyring".into(),
+                        key: operation,
+                        outcome: Some("denied"),
+                    },
+                    key.as_ref(),
+                    now(),
+                )?;
+            }
+            Err(error)
+        }
+    }
+}
+
 /// The three states `detectVaultFormat` distinguishes in `src/keyring.ts`.
 fn vault_format(vault_dir: &Path) -> &'static str {
     if keyring::keyring_path(vault_dir).exists() {
@@ -5554,6 +5634,7 @@ pub fn run() {
             read_attachment,
             list_attachments,
             delete_attachment,
+            change_vault_passphrase,
             keyring_status,
             sync_status,
             sync_verify_registry,

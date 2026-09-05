@@ -291,6 +291,13 @@ export interface KeyringStatusSlot {
   kdf: { name: string; N: number; r: number; p: number; cost: KeyringCostStatus };
 }
 
+export interface PassphraseChangeReport {
+  slotsRewritten: number;
+  slotsPreserved: number;
+  previousN: number;
+  newN: number;
+}
+
 export interface KeyringStatusData {
   format: string;
   version: number | null;

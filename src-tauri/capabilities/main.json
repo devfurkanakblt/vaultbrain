@@ -55,6 +55,7 @@
     "allow-read-attachment",
     "allow-list-attachments",
     "allow-delete-attachment",
+    "allow-change-vault-passphrase",
     "allow-keyring-status",
     "allow-sync-status",
     "allow-sync-verify-registry"

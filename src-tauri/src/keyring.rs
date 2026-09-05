@@ -407,6 +407,158 @@ pub(crate) fn wrap_key_set(
     Ok(slot)
 }
 
+/// NIST SP 800-63B's floor for a user-chosen secret, and the same floor
+/// `MIN_PASSPHRASE_LENGTH` enforces in `src/keyring-passphrase.ts`. It applies
+/// to the new passphrase only: an existing vault whose passphrase is shorter
+/// still opens, because refusing it would lock its owner out rather than
+/// protect them.
+pub(crate) const MIN_PASSPHRASE_LENGTH: usize = 12;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PassphraseChangeReport {
+    /// Slots re-wrapped under the new passphrase.
+    pub(crate) slots_rewritten: usize,
+    /// Slots the current passphrase could not open, carried across untouched.
+    pub(crate) slots_preserved: usize,
+    /// The cost of the first slot that opened, before the change.
+    pub(crate) previous_n: u32,
+    /// The cost every rewritten slot now carries.
+    pub(crate) new_n: u32,
+}
+
+fn same_key_set(left: &KeySet, right: &KeySet) -> bool {
+    let mut difference = 0u8;
+    for (a, b) in [
+        (&left.documents, &right.documents),
+        (&left.kv, &right.kv),
+        (&left.attachment_id, &right.attachment_id),
+        (&left.sync_change, &right.sync_change),
+        (&left.sync_envelope, &right.sync_envelope),
+        (&left.audit, &right.audit),
+    ] {
+        for (x, y) in a.iter().zip(b.iter()) {
+            difference |= x ^ y;
+        }
+    }
+    difference == 0
+}
+
+/// Re-wraps the vault keyset under a new passphrase.
+///
+/// Nothing under `documents/`, no attachment, no sync change and no audit
+/// entry is read or rewritten: only the wrapping layer changes, so attachment
+/// identities, sync change ids and the audit chain all survive untouched.
+/// Because every rewritten slot is written at the current default cost with a
+/// fresh salt, this is also how a vault created at a lower cost raises its work
+/// factor.
+///
+/// A slot the current passphrase cannot open — the recovery slot — is carried
+/// across byte for byte rather than discarded, which is what keeps a recovery
+/// kit valid across a passphrase change.
+///
+/// The caller must already hold the vault write lock.
+pub(crate) fn change_passphrase_locked(
+    vault_dir: &Path,
+    current: &str,
+    new: &str,
+) -> Result<(PassphraseChangeReport, Zeroizing<[u8; KEY_LENGTH]>), String> {
+    if current.is_empty() {
+        return Err("a non-empty vault passphrase is required".into());
+    }
+    if new.chars().count() < MIN_PASSPHRASE_LENGTH {
+        return Err(format!(
+            "the new passphrase must be at least {MIN_PASSPHRASE_LENGTH} characters"
+        ));
+    }
+    if new == current {
+        return Err("the new passphrase is the same as the current one".into());
+    }
+
+    let file = read(vault_dir)?.ok_or("this vault has no keyring to change")?;
+    let mut opened: Option<KeySet> = None;
+    let mut previous_n = 0u32;
+    let mut preserved = 0usize;
+    let mut slots: Vec<KeyringSlot> = Vec::with_capacity(file.slots.len());
+    let mut rewritten_indexes: Vec<usize> = Vec::new();
+
+    for slot in &file.slots {
+        match unwrap_slot(slot, current) {
+            Err(_) => {
+                // Not this passphrase's slot. Preserving it is what keeps a
+                // recovery slot alive across a passphrase change.
+                slots.push(slot.clone());
+                preserved += 1;
+            }
+            Ok(keys) => {
+                match opened.as_ref() {
+                    None => {
+                        previous_n = slot.kdf.n;
+                        opened = Some(keys);
+                    }
+                    Some(first) => {
+                        if !same_key_set(&keys, first) {
+                            return Err(
+                                "a second slot this passphrase opens carries a different keyset; refusing to write the keyring"
+                                    .into(),
+                            );
+                        }
+                    }
+                }
+                let carried = opened.as_ref().expect("a keyset is open");
+                rewritten_indexes.push(slots.len());
+                slots.push(wrap_key_set(carried, new, DEFAULT_SCRYPT_LOG_N)?);
+            }
+        }
+    }
+
+    let opened = opened.ok_or("wrong passphrase, or the keyring is damaged")?;
+
+    // Prove every freshly wrapped slot unwraps back to the same keyset under
+    // the new passphrase before anything touches disk. A refusal here must
+    // leave keyring.json byte-identical to what it was.
+    for index in &rewritten_indexes {
+        let check = unwrap_slot(&slots[*index], new)?;
+        if !same_key_set(&check, &opened) {
+            return Err(
+                "a re-wrapped slot does not carry the vault's keyset; refusing to write the keyring"
+                    .into(),
+            );
+        }
+    }
+
+    write(
+        vault_dir,
+        &KeyringFile {
+            version: KEYRING_VERSION,
+            slots,
+        },
+    )?;
+
+    // Prove the file actually on disk opens under the passphrase the user was
+    // just given, and carries the same keyset, before reporting success. This
+    // catches a bad write that the pre-write check above cannot, since that
+    // check never touches disk.
+    let written = read(vault_dir)?.ok_or("the new keyring could not be read back")?;
+    let verified = unwrap_keyring(&written, new)?;
+    if !same_key_set(&verified, &opened) {
+        return Err(
+            "the keyring written to disk does not carry the vault's keyset; the vault may be corrupted"
+                .into(),
+        );
+    }
+
+    Ok((
+        PassphraseChangeReport {
+            slots_rewritten: rewritten_indexes.len(),
+            slots_preserved: preserved,
+            previous_n,
+            new_n: default_scrypt_n(),
+        },
+        opened.audit.clone(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,6 +587,86 @@ mod tests {
     /// The same shape `readKeyringStatus` returns in `src/keyring-status.ts`,
     /// so the application and `vbrain keyring status` describe one vault the
     /// same way.
+    /// The property that makes a passphrase change safe to offer at all: it
+    /// moves the wrapping and nothing else, so every identity derived from the
+    /// keyset — attachment content addresses, sync change ids, the audit chain
+    /// — is the same afterwards.
+    #[test]
+    fn changing_the_passphrase_keeps_the_keyset_and_preserves_a_recovery_slot() {
+        let dir = std::env::temp_dir().join(format!("vbrain-passphrase-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let keys = random_key_set();
+        let before = keys.documents.clone();
+        let primary = wrap_key_set(&keys, "the original passphrase", 14).unwrap();
+        let mut recovery = wrap_key_set(&keys, "a recovery code that is long", 14).unwrap();
+        recovery.label = RECOVERY_LABEL.to_string();
+        let recovery_id = recovery.id.clone();
+        write(
+            &dir,
+            &KeyringFile {
+                version: KEYRING_VERSION,
+                slots: vec![primary, recovery],
+            },
+        )
+        .unwrap();
+
+        let (report, _chain) =
+            change_passphrase_locked(&dir, "the original passphrase", "a replacement passphrase")
+                .unwrap();
+        assert_eq!(report.slots_rewritten, 1);
+        assert_eq!(report.slots_preserved, 1, "the recovery slot must survive");
+        assert_eq!(report.previous_n, 1 << 14);
+        assert_eq!(
+            report.new_n,
+            1 << DEFAULT_SCRYPT_LOG_N,
+            "a change raises the cost"
+        );
+
+        let file = read(&dir).unwrap().unwrap();
+        let opened = unwrap_keyring(&file, "a replacement passphrase").unwrap();
+        assert_eq!(
+            opened.documents.as_ref(),
+            before.as_ref(),
+            "the keyset is the same keyset"
+        );
+        assert!(unwrap_keyring(&file, "the original passphrase").is_err());
+        // The recovery kit still opens the vault, unchanged.
+        let by_recovery = unwrap_keyring(&file, "a recovery code that is long").unwrap();
+        assert_eq!(by_recovery.documents.as_ref(), before.as_ref());
+        assert!(file.slots.iter().any(|slot| slot.id == recovery_id));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_passphrase_change_refuses_a_weak_or_unchanged_secret_and_a_wrong_current_one() {
+        let dir = std::env::temp_dir().join(format!("vbrain-passphrase-bad-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let keys = random_key_set();
+        write(
+            &dir,
+            &KeyringFile {
+                version: KEYRING_VERSION,
+                slots: vec![wrap_key_set(&keys, "the original passphrase", 14).unwrap()],
+            },
+        )
+        .unwrap();
+        let before = fs::read(keyring_path(&dir)).unwrap();
+
+        for (current, next) in [
+            ("the original passphrase", "short"),
+            ("the original passphrase", "the original passphrase"),
+            ("not the passphrase", "a replacement passphrase"),
+        ] {
+            assert!(change_passphrase_locked(&dir, current, next).is_err());
+            // Every refusal must leave the keyring byte-identical: a failed
+            // change that damaged the file would be far worse than no change.
+            assert_eq!(fs::read(keyring_path(&dir)).unwrap(), before);
+        }
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn status_reports_slot_headers_without_unwrapping_anything() {
         let dir = std::env::temp_dir().join(format!("vbrain-status-{}", Uuid::new_v4()));

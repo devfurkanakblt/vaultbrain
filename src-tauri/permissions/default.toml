@@ -248,6 +248,11 @@ description = "Allows removing one attachment and every chunk it owns from the u
 commands.allow = ["delete_attachment"]
 
 [[permission]]
+identifier = "allow-change-vault-passphrase"
+description = "Allows re-wrapping the vault keyset under a new passphrase after unlock. Re-encrypts no object: attachment identities, sync change ids and the audit chain all survive. Also the key-derivation cost upgrade path."
+commands.allow = ["change_vault_passphrase"]
+
+[[permission]]
 identifier = "allow-keyring-status"
 description = "Allows reading the vault keyring's slot headers after unlock: id, label, creation time and key-derivation cost. Unwraps nothing and needs no passphrase."
 commands.allow = ["keyring_status"]

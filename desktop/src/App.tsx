@@ -1077,7 +1077,12 @@ export function App() {
         onRestore={restorePluginSigner}
         onNotice={report}
       />
-      : workspaceView === "keys" ? <KeyringStatus status={keyringStatus} />
+      : workspaceView === "keys" ? <KeyringStatus
+        status={keyringStatus}
+        onChangePassphrase={(current, next) => vaultBridge.changeVaultPassphrase(current, next)}
+        onChanged={async () => setKeyringStatus(await vaultBridge.keyringStatus())}
+        onNotice={report}
+      />
       : workspaceView === "sync" ? (syncStatus?.enrolled
         ? <SyncStatus status={syncStatus} registryVerified={syncRegistryVerified} />
         : <div className="sync-empty">

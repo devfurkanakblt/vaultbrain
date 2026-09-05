@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AttachmentContent, AttachmentInfo, Backlink, Bookmark, CanvasDocument, CanvasInput, CanvasSummary, DailyNote, DeletedNote, KeyringStatusData, KnowledgeGraph, NoteDocument, NoteSummary, PluginCallContext, PluginPackage, PluginSecurityPolicy, PluginSummary, PropertyRow, RevisionInfo, SavedView, SearchHit, SyncStatusData, UnlinkedMention, VaultInfo, WorkspaceState } from "./types";
+import type { AttachmentContent, AttachmentInfo, Backlink, Bookmark, CanvasDocument, CanvasInput, CanvasSummary, DailyNote, DeletedNote, KeyringStatusData, KnowledgeGraph, PassphraseChangeReport, NoteDocument, NoteSummary, PluginCallContext, PluginPackage, PluginSecurityPolicy, PluginSummary, PropertyRow, RevisionInfo, SavedView, SearchHit, SyncStatusData, UnlinkedMention, VaultInfo, WorkspaceState } from "./types";
 
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -729,6 +729,14 @@ export const vaultBridge = {
   async keyringStatus(): Promise<KeyringStatusData> {
     if (isTauri) return call<KeyringStatusData>("keyring_status");
     return structuredClone(demoKeyringStatus);
+  },
+  /**
+   * Re-wraps the keyset under a new passphrase. Re-encrypts nothing, so the
+   * session stays valid and no note has to be reloaded.
+   */
+  async changeVaultPassphrase(current: string, next: string): Promise<PassphraseChangeReport> {
+    if (isTauri) return call<PassphraseChangeReport>("change_vault_passphrase", { current, next });
+    return { slotsRewritten: 1, slotsPreserved: 0, previousN: 32768, newN: 131072 };
   },
 };
 
