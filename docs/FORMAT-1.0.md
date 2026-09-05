@@ -448,13 +448,21 @@ must not carry `authorization` at all. The whole body is capped at 8 MiB
 (`MAX_CHANGE_BYTES`) of canonical-JSON UTF-8.
 
 A **version 3** body is validated, signed and verified exactly as a version 2
-body is: `authorization` is required, and `changeAuthorizationPayload` pins
-the literal `version: 2` inside the signed bytes for every authorized body,
-so the signature input is byte-identical for versions 2 and 3. The body
-version is still covered by the change `id`, which is an HMAC over the whole
-canonical body under a key the relay does not hold, so a transport cannot
-flip it undetected. Version 3 names the generation of the format in which an
-attachment change carries a *blob manifest* instead of base64 bytes.
+body is: `authorization` is required, and the `version` inside the signed
+bytes is the body's own, so relabelling a body between 2 and 3 invalidates its
+signature. The body version is covered a second time by the change `id`, an
+HMAC over the whole canonical body under a key the relay does not hold, so a
+transport cannot flip it undetected either way. Version 3 names the
+generation of the format in which an attachment change carries a *blob
+manifest* instead of base64 bytes.
+
+> **Compatibility.** `changeAuthorizationPayload` once pinned a literal
+> `version: 2` for every authorized body, which left a 2/3 relabelling
+> signature-valid and rested that guarantee on the change `id` alone. Version 2
+> signatures are unaffected by the correction -- their payload already carried a
+> 2 -- but any version 3 body signed under the old rule no longer verifies.
+> Version 3 was never released, so the only artefact affected was this
+> repository's own fixture.
 
 > **How a writer chooses a version.** An enrolled device stamps `3` on an
 > attachment change carrying a blob manifest and `2` on every other

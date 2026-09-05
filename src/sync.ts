@@ -537,10 +537,13 @@ export function validateSyncChangeBody(value: unknown): SyncChangeBody {
 
 function changeAuthorizationPayload(body: SyncChangeBody): Buffer {
   if (body.version === 1 || !body.authorization) {
-    throw new Error("Only version 2 sync changes have a device signature payload.");
+    throw new Error("Only authorized sync changes have a device signature payload.");
   }
   const payload = {
-    version: 2,
+    // The real version, so the signature binds the generation of the format the
+    // body claims to be. Pinning a literal here would leave a 2<->3 relabelling
+    // signature-valid, resting the whole guarantee on the change id alone.
+    version: body.version,
     deviceId: body.deviceId,
     sequence: body.sequence,
     previousDeviceChange: body.previousDeviceChange,

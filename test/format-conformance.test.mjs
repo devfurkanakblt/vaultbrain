@@ -12,6 +12,7 @@ import {
   SyncChangeLog,
   SyncDeviceManager,
   SyncedDocumentVault,
+  canonicalSyncJson,
   parseAttachmentSnapshot,
 } from "../dist/sync.js";
 
@@ -176,5 +177,49 @@ test("a second device reassembles the committed attachment from its staged blobs
     source.close();
     target.lock();
     fs.rmSync(targetDir, { recursive: true, force: true });
+  }
+});
+
+test("a device signature covers the change body version, not a pinned literal", () => {
+  const dir = path.join(BLOBS_FIXTURE, "source");
+  const log = new SyncChangeLog(dir, FIXTURE_PASSPHRASE);
+  const manager = new SyncDeviceManager(dir, FIXTURE_PASSPHRASE);
+  try {
+    const attachment = log.changes().find((change) => change.mutation.objectType === "attachment");
+    assert.equal(attachment.version, 3);
+
+    const record = manager
+      .state()
+      .body.devices.find((device) => device.certificate.deviceId === attachment.deviceId);
+    const publicKey = crypto.createPublicKey({
+      key: Buffer.from(record.certificate.publicKey, "base64"),
+      format: "der",
+      type: "spki",
+    });
+    const signature = Buffer.from(attachment.authorization.signature, "base64");
+    const payloadAt = (version) =>
+      Buffer.from(
+        canonicalSyncJson({
+          version,
+          deviceId: attachment.deviceId,
+          sequence: attachment.sequence,
+          previousDeviceChange: attachment.previousDeviceChange,
+          parents: attachment.parents,
+          createdAt: attachment.createdAt,
+          mutation: attachment.mutation,
+          authorization: { certificateSerial: attachment.authorization.certificateSerial },
+        }),
+        "utf8",
+      );
+
+    assert.equal(crypto.verify(null, payloadAt(3), publicKey, signature), true);
+
+    // Relabelling the body as version 2 must break the signature. While the
+    // payload pinned a literal 2, this verified, and the body version rested on
+    // the change id alone -- which only a holder of syncChangeKey can check.
+    assert.equal(crypto.verify(null, payloadAt(2), publicKey, signature), false);
+  } finally {
+    manager.close();
+    log.close();
   }
 });

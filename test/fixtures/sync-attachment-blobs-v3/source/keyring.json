@@ -2,7 +2,7 @@
   "version": 2,
   "slots": [
     {
-      "id": "e53876d1-30b7-40a3-b6d9-79e3d81f1e0f",
+      "id": "f97eac7d-93cb-42ad-9f60-e9bc6bab2923",
       "type": "passphrase",
       "label": "primary",
       "kdf": {
@@ -10,13 +10,13 @@
         "N": 131072,
         "r": 8,
         "p": 1,
-        "salt": "5DL4bvoZ+5Y8KBQneS1IHg=="
+        "salt": "DcwJ1Y7HaM2vyzveZtuexw=="
       },
-      "createdAt": "2026-09-05T00:50:04.961Z",
+      "createdAt": "2026-09-05T04:43:16.578Z",
       "wrapped": {
-        "iv": "mQzt/mDR/7Nbdjem",
-        "authTag": "EuigcAUPy8D2dFIOQzK3Qg==",
-        "ciphertext": "3pwxSuo2Oy94d7QbrouZkSXLyKl1xTBIUkY4p4oe9rnbv7zHrHj3VdrU1JAZBdzZ7KFfCP2BmF8qofOF2NgxvOPJFZEaC8z+uDN9WZGisSmbYvbQbO415pBmNhJyd1Ht2Fk1b9p8Dj2fdzPPuNtt7WRMUEPVHnKumN6o8dhDnODCRuIfihAeTyEJNkI8v21f0fQVbwmMIDt12w37F75mNlQ+ObawvVTLeBmf+6wRAS7CsO1UemNX7p8wCBRojhb48Agf/udilAru+q5ONcRuhp/wXdV6//UU1cD7gZCdHKRG3FyQ4lkOGtQVaGxFFpyTFZRxxCAdxbahKTxCI5sjSKmdv2OAt9A52TKivM03lMRBBhbVrKSl9pxPf6w6XgT4Xbrka7P0q4yXSxli4ljtcl2Z8wzlq3R5PLK5TfOUtlvL6up0OrqCjLlVpG8PBMsKAp/tvu118lESFREIX6jl3sfsBaZrQZysXPioO+qNStO9z8cN"
+        "iv": "zuakG6IFDDoUM7/j",
+        "authTag": "v3FvSEdjwXPs37iXU8axsw==",
+        "ciphertext": "pMj+S3BF+wRIqOuNZ0yUyZaXBwa2J2Aq+3eYZuCI/F4edYzbd6ki7oQPC5dKQGP8/wZreCP2bL4eTwjotHvusjLVkOJBjYLFoKeIslg97ESxSJPE1B6jE6y2aSjOnq8Rf+X00mUQFt/aCuU6KO8pr1GHjIfwlBsG0Jj8c8Y2u6yFUicv1Me9C05DThTOUvefO0UV5DUAen/spdiqXfrMewChVrxRcIuURP7qJqL28s/pzovrI8FnTQKsubf5X3PVRGcSfjKcY9p27/zLStPU6JOd2s1rEU+v0LQFYFEfHqaylS0diWhg/fJ/piZcE6bmcZSFFIeidz++SD/q0bzz3YZIgdGdGxxDd8qddmPZX8f/uk3kQYtVTmVjfKTfauS0cVkUsxUV1K94tQYtT/K9Tg/0JAZwyIXyTY7dh815bxoN6WZqDISoU0SZWzz+UstZDIQ2+6KaA24oDHz57Akfm6HM0p+jzYVKtT1/PmWDYoR+1p00"
       }
     }
   ]
