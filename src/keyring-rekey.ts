@@ -741,3 +741,29 @@ export function rekeyVault(
     { staleMs: REKEY_STALE_MS },
   );
 }
+
+/**
+ * Recovery on its own: finish an interrupted install or roll it back, and
+ * rotate nothing. `rekeyVault` runs `recoverRekey` itself as its safety net,
+ * but it needs a passphrase to reach it and the passphrase that ends a
+ * recovery is never the one the caller supplied — a finished install is
+ * sealed under whatever the crashed run chose, and a roll-back leaves the
+ * original in force. So the command reaches for this first, before it asks
+ * for anything it would only discard.
+ *
+ * Under the same lock and the same window a full re-key takes, because the
+ * install half of a recovery moves live files exactly as a commit does.
+ */
+export function resumeRekey(vaultDir: string): "none" | "rolled-back" | "finished" {
+  return withVaultLock(
+    vaultDir,
+    () => {
+      const outcome = recoverRekey(vaultDir);
+      // The install just replaced live objects under a keyset this process
+      // may still be caching from before the interruption.
+      if (outcome === "finished") forgetVaultKeys(vaultDir);
+      return outcome;
+    },
+    { staleMs: REKEY_STALE_MS },
+  );
+}

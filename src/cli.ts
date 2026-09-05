@@ -24,7 +24,7 @@ import {
 import { startMcpServer } from "./mcp-server.js";
 import { migrateToKeyring } from "./keyring-migrate.js";
 import { changeVaultPassphrase, MIN_PASSPHRASE_LENGTH } from "./keyring-passphrase.js";
-import { MALFORMED_JOURNAL_MESSAGE, journalPath, rekeyVault, stagingRoot } from "./keyring-rekey.js";
+import { MALFORMED_JOURNAL_MESSAGE, journalPath, rekeyVault, resumeRekey, stagingRoot } from "./keyring-rekey.js";
 import { detectVaultFormat } from "./keyring.js";
 import {
   addGrant,
@@ -1323,6 +1323,23 @@ async function readNewPassphrase(): Promise<string> {
   return first;
 }
 
+/**
+ * `readJournal` (via `recoverRekey`) and `stageRekey` both refuse a malformed
+ * journal rather than guess at it, which otherwise leaves the operator with
+ * nowhere to go: recovery refuses for the same reason a fresh re-key does.
+ * The one thing that actually clears it is exactly what recovery already does
+ * automatically for a staging area carrying no journal at all — discard it,
+ * since nothing live is ever touched before the journal is written.
+ */
+function reportMalformedJournal(vaultDir: string, error: unknown): void {
+  if (!(error instanceof Error) || error.message !== MALFORMED_JOURNAL_MESSAGE) return;
+  console.error(
+    `${error.message} This cannot be repaired automatically. Back up ${stagingRoot(vaultDir)} if you want a copy, ` +
+      `then delete that directory by hand — nothing live has been touched — and run 'vbrain rekey' again.`,
+  );
+  process.exit(1);
+}
+
 program
   .command("rekey")
   .description("replace the vault keyset and re-encrypt every object under it")
@@ -1330,6 +1347,42 @@ program
   .action(async (opts) => {
     const dir = program.opts().vault;
     const keepPassphrase = Boolean(opts.keepPassphrase);
+
+    // An interrupted run is settled first, and settling it asks for nothing.
+    // Recovery needs no passphrase, and the passphrase it leaves in force is
+    // never the one an operator would type here: a finished install is sealed
+    // under whatever the crashed run chose, and a roll-back leaves the
+    // original. Prompting first and then discarding the answer is how the one
+    // command that exists to race a leaked passphrase sends its operator away
+    // believing a rotation happened. So recovery reports what is actually in
+    // force and stops; rotating is a second, deliberate run.
+    if (fs.existsSync(journalPath(dir))) {
+      let outcome;
+      try {
+        outcome = resumeRekey(dir);
+      } catch (error) {
+        reportMalformedJournal(dir, error);
+        throw error;
+      }
+      if (outcome === "finished") {
+        console.log(`Finished an interrupted re-key of ${dir}.`);
+        console.log(
+          "The keyset that run created is now in force, and this vault opens only under the passphrase that run chose.",
+        );
+        console.log(
+          "If that passphrase is remembered in the OS credential store, it may be stale: run 'vbrain unlock --remember' to store the one now in force.",
+        );
+      } else if (outcome === "rolled-back") {
+        console.log(`Rolled back an interrupted re-key of ${dir}.`);
+        console.log("The keys and the passphrase from before that run are still the ones in force.");
+      } else {
+        console.log(`Cleared an abandoned re-key staging area under ${dir}; nothing live was touched.`);
+      }
+      console.log("Nothing was rotated by this command, and no new passphrase was asked for or set.");
+      console.log("Run 'vbrain rekey' again to actually rotate this vault's keys.");
+      return;
+    }
+
     // Never taken from the OS credential store, for the same reason
     // `passphrase change` does not: a stale or attacker-primed credential
     // must not be able to authorize a re-key on its own.
@@ -1346,25 +1399,19 @@ program
     try {
       report = rekeyVault(dir, current, next, { keepPassphrase });
     } catch (error) {
-      // `readJournal` (via `recoverRekey`) and `stageRekey` both refuse a
-      // malformed journal rather than guess at it, which otherwise leaves the
-      // operator with nowhere to go: recovery refuses for the same reason a
-      // fresh re-key does. The one thing that actually clears this is exactly
-      // what recovery already does automatically for a staging area that
-      // carries no journal at all — discard it, since nothing live is ever
-      // touched before the journal is written.
-      if (error instanceof Error && error.message === MALFORMED_JOURNAL_MESSAGE) {
-        console.error(
-          `${error.message} This cannot be repaired automatically. Back up ${stagingRoot(dir)} if you want a copy, ` +
-            `then delete that directory by hand — nothing live has been touched — and run 'vbrain rekey' again.`,
-        );
-        process.exit(1);
-      }
+      reportMalformedJournal(dir, error);
       throw error;
     }
 
+    // The block above settles any journal this command can see, so reaching
+    // here resumed means one appeared in between — another process crashed
+    // mid-re-key while this one was reading the passphrase. `rekeyVault`'s
+    // own safety net finished or discarded it and rotated nothing, and saying
+    // so is the same report the resume path gives.
     if (report.resumed) {
-      console.log(`Finished an interrupted re-key of ${dir}.`);
+      console.log(`Finished an interrupted re-key of ${dir} that started while this command was waiting.`);
+      console.log("Nothing was rotated by this command, and no new passphrase was applied.");
+      console.log("Run 'vbrain rekey' again to actually rotate this vault's keys.");
       return;
     }
 

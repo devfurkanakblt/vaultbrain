@@ -1595,6 +1595,66 @@ test("the rekey command itself is exempt from the journal guard and finishes an 
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+// The resume path must ask for nothing. `recoverRekey` needs no passphrase,
+// and the passphrase left in force afterwards is never the one the operator
+// would have typed: a finished install is sealed under whatever the crashed
+// run chose. Passing both passphrase variables through as empty means the
+// command exits 1 with "A passphrase is required." the moment it reaches any
+// prompt at all — which is exactly what kills the mutation "settle the
+// journal after the prompting instead of before it".
+test("the rekey command settles an interrupted run without asking for a passphrase, and says what is in force", () => {
+  const { dir } = seedVault();
+  const { journal, keyring } = preparedRekey(dir);
+  // A crash after the commit point: journal and new keyring both on disk,
+  // nothing installed yet.
+  fs.writeFileSync(journalPath(dir), `${JSON.stringify(journal)}
+`);
+  writeKeyring(dir, keyring);
+
+  const result = runCli(["--vault", dir, "rekey"], { VBRAIN_PASSPHRASE: "", VBRAIN_NEW_PASSPHRASE: "" });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Finished an interrupted re-key/u);
+  assert.match(result.stdout, /opens only under the passphrase that run chose/u);
+  assert.match(result.stdout, /Nothing was rotated by this command/u);
+  assert.match(result.stdout, /Run 'vbrain rekey' again to actually rotate/u);
+  assert.doesNotMatch(result.stderr, /A passphrase is required/u);
+  assert.equal(fs.existsSync(stagingRoot(dir)), false);
+
+  forgetVaultKeys();
+  assert.ok(openVaultKeys(dir, NEW_PASSPHRASE), "the interrupted re-key's passphrase must open the vault");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("the rekey command rolls an interrupted run back and says the original passphrase still stands", () => {
+  const { dir } = seedVault();
+  const { journal } = preparedRekey(dir);
+  const before = liveHashes(dir);
+  // A crash before the commit point: the journal is on disk but the keyring
+  // still names the old keyset, so the run is discarded, not finished.
+  fs.writeFileSync(journalPath(dir), `${JSON.stringify(journal)}
+`);
+
+  const result = runCli(["--vault", dir, "rekey"], { VBRAIN_PASSPHRASE: "", VBRAIN_NEW_PASSPHRASE: "" });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Rolled back an interrupted re-key/u);
+  assert.match(result.stdout, /keys and the passphrase from before that run are still the ones in force/u);
+  assert.match(result.stdout, /Nothing was rotated by this command/u);
+  assert.match(result.stdout, /Run 'vbrain rekey' again to actually rotate/u);
+  assert.equal(fs.existsSync(stagingRoot(dir)), false);
+
+  forgetVaultKeys();
+  assert.ok(openVaultKeys(dir, PASSPHRASE), "a rolled-back re-key must leave the original passphrase working");
+  const after = liveHashes(dir);
+  for (const [relative, hash] of Object.entries(before)) {
+    assert.equal(after[relative], hash, `${relative} must not have changed`);
+  }
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 // A malformed journal leaves both `readJournal` and `stageRekey` refusing,
 // which previously sent the operator toward `vbrain rekey` recovery that
 // itself refuses for the same reason — a dead end with no in-product exit.
