@@ -27,8 +27,9 @@ export interface FormatArtifact {
 export type FormatCompatibility = Readonly<Record<string, FormatArtifact>>;
 
 export const FORMAT_COMPATIBILITY: FormatCompatibility = {
+  vaultKeyring: { path: "keyring.json", reads: [2], writes: [2] },
   encryptedEnvelope: { path: "*.kv.enc", reads: [0, 1], writes: [1] },
-  documentManifest: { path: "documents/manifest.json", reads: [1], writes: [1] },
+  documentManifest: { path: "documents/manifest.json", reads: [1, 2], writes: [1, 2] },
   documentPayload: { path: "documents/objects/*.enc", reads: [1], writes: [1] },
   syncChangeEnvelope: { path: "documents/sync/changes/*.change.enc", reads: [1, 2, 3], writes: [1, 2, 3] },
   syncDeviceCertificate: { path: "documents/sync/devices.enc", reads: [1, 2], writes: [1, 2] },
@@ -43,6 +44,7 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
  * artifacts whose AAD includes an identifier.
  */
 export const AAD = {
+  keyringSlot: "secondbrain-vault:keyring-slot:v1",
   documentKeyCheck: "secondbrain-vault:document-key:v1",
   documentIndex: "secondbrain-vault:document-index:v1",
   pluginPolicy: "secondbrain-vault:plugin-policy:v1",

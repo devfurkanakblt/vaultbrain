@@ -46,6 +46,37 @@ test("the format version surface is frozen and complete", () => {
   // Blob transport added change body version 3 to the sync change entry.
   assert.deepEqual(FORMAT_COMPATIBILITY.syncChangeEnvelope.reads, [1, 2, 3]);
   assert.deepEqual(FORMAT_COMPATIBILITY.syncChangeEnvelope.writes, [1, 2, 3]);
+
+  // The keyring is the root of the key hierarchy, so it is in the inventory:
+  // a vault whose first file is undeclared is a vault the catalogue cannot
+  // describe. Its file version is 2, matching the vault format it belongs to.
+  assert.deepEqual(FORMAT_COMPATIBILITY.vaultKeyring.reads, [2]);
+  assert.deepEqual(FORMAT_COMPATIBILITY.vaultKeyring.writes, [2]);
+  assert.equal(FORMAT_COMPATIBILITY.vaultKeyring.path, "keyring.json");
+
+  // Version 2 of the document manifest is the keyring tombstone, not a second
+  // generation of the manifest: it carries no KDF and no verifier, and exists
+  // so a pre-keyring build refuses the vault instead of misreading it.
+  assert.deepEqual(FORMAT_COMPATIBILITY.documentManifest.reads, [1, 2]);
+  assert.deepEqual(FORMAT_COMPATIBILITY.documentManifest.writes, [1, 2]);
+});
+
+test("a keyring vault is on disk exactly as the catalogue describes it", () => {
+  const vault = path.join(FIXTURES, "keyring-v2");
+  const keyring = JSON.parse(fs.readFileSync(path.join(vault, "keyring.json"), "utf8"));
+  assert.equal(keyring.version, 2, "the keyring file version the inventory declares");
+  assert.ok(Array.isArray(keyring.slots) && keyring.slots.length > 0);
+
+  const [slot] = keyring.slots;
+  assert.equal(slot.type, "passphrase");
+  assert.equal(slot.kdf.name, "scrypt");
+  assert.ok((slot.kdf.N & (slot.kdf.N - 1)) === 0, "scrypt cost is a power of two");
+  assert.equal(Buffer.from(slot.wrapped.iv, "base64").length, 12);
+  assert.equal(Buffer.from(slot.wrapped.authTag, "base64").length, 16);
+
+  // The manifest beside it is the tombstone, carrying no key material at all.
+  const manifest = JSON.parse(fs.readFileSync(path.join(vault, "documents", "manifest.json"), "utf8"));
+  assert.deepEqual(manifest, { version: 2, keyring: true });
 });
 
 test("canonical base64 rejects non-canonical and wrong-length encodings", () => {

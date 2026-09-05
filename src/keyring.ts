@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { AAD } from "./format-version.js";
 import { assertNotSymlink, writeFileAtomic } from "./fs-safe.js";
 import { resolveInside } from "./safety.js";
 import { withVaultLock } from "./vault-lock.js";
@@ -13,7 +14,8 @@ export const DEFAULT_SCRYPT_N = 2 ** 17;
 const SCRYPT_R = 8;
 const SCRYPT_P = 1;
 const KEY_LENGTH = 32;
-const SLOT_AAD_CONTEXT = "secondbrain-vault:keyring-slot:v1";
+/** Declared in the frozen inventory with every other domain-separation string. */
+const SLOT_AAD_CONTEXT = AAD.keyringSlot;
 
 /** The order is part of the format: it is what `serializeKeySet` writes. */
 export const KEY_NAMES = ["documents", "kv", "attachmentId", "syncChange", "syncEnvelope", "audit"] as const;
