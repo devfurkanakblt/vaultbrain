@@ -311,6 +311,70 @@ you would any other migration log. The encrypted destination must be outside
 the source vault, preventing an import from recursively consuming its own
 output. Use `--include-hidden` only when hidden source content is intentional.
 
+The same shape comes back out. `vbrain export` writes every note as Markdown
+with frontmatter, every canvas as JSON Canvas, and every attachment into an
+assets folder beside them — the shape `import-obsidian` reads, so a vault can
+be exported and re-imported without losing note identity.
+
+```bash
+node dist/cli.js --vault ./vault/personal export ./plain-copy \
+  --report ./export-report.json
+```
+
+The export is plaintext: everything the vault encrypts is readable by anyone
+who can read that directory. It refuses a destination inside the vault, and
+refuses to merge into a directory that already holds files. Two things the
+vault permits that a filesystem does not — a note path such as `Q3: results.md`
+or `aux.md`, and two attachments sharing one filename — are renamed rather than
+dropped, and the report names every rename. The vault's audit chain records
+that an export happened and how much it carried, but not where it was written.
+
+### Backing up, and proving the backup works
+
+A backup is one file. It carries every encrypted object, the journals and the
+vault's `keyring.json`, so it opens with the vault passphrase and needs nothing
+else — no key file, no earlier copy, nothing from this machine.
+
+```bash
+node dist/cli.js --vault ./vault/personal backup ./backups/personal-2026-09-05.vbrainbackup
+node dist/cli.js restore ./backups/personal-2026-09-05.vbrainbackup ./restored --verify-only
+```
+
+The procedure:
+
+1. **Take the backup.** `vbrain backup <archive>` writes the archive and then
+   reads it back through the restore path before reporting success. It refuses
+   to overwrite an existing file, so each run names a new archive.
+2. **Move it somewhere that survives losing this machine.** A host that stores
+   the archive sees its total size and the keyring header — slot labels, key
+   derivation cost, creation dates — and nothing else. Not the number of notes,
+   not their paths, not how many revisions any of them has: the file list is
+   sealed with the contents. The passphrase is not in the archive, and no one
+   holding only the archive can open it.
+3. **Verify what you stored, where you stored it.** `vbrain restore <archive>
+   <destination> --verify-only` checks the seal over the header, the AEAD tag on
+   every entry and every entry's hash, and writes nothing. Run it against the
+   stored copy, not the one you just made: what you are testing is the storage.
+4. **Restore into a new directory.** `vbrain restore <archive> <destination>`
+   stages the whole verified vault beside the destination and moves it into
+   place only when every entry has checked out. It refuses a destination that
+   already holds files, so a restore cannot replace a vault that may still be
+   good.
+
+What a backup is not: an answer to a forgotten passphrase. Both the vault and
+its backups are wrapped by the same passphrase, so losing it loses all of them
+together. That is what the recovery kit is for — `vbrain keyring recovery
+create` — and the kit and the backup should not live in the same place. A
+backup answers a lost or corrupted vault; the kit answers a lost passphrase.
+
+A restored vault's audit chain ends where the backup was taken. Nothing that
+happened after it is in the archive, including the audit entry recording that
+the backup itself was made.
+
+`npm run recovery:drill` exercises this path end to end against a disposable
+vault: it takes an archive, restores from it, catches up from a relay and
+verifies an owner-signed checkpoint.
+
 ### Deleting, and bounding history
 
 `docs remove` archives the outgoing revision before it unlinks a note, so a
