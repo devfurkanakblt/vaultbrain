@@ -267,3 +267,41 @@ test("an epoch 1 change is identified by the permanent key, not the rotatable on
   // The documents key is no longer any part of a change's identity or sealing.
   assert.throws(() => openSyncChange(envelope, session.key));
 });
+
+test("sync change bodies sealed before a re-key still open during one", async () => {
+  const { SyncDeviceManager, SyncChangeLog } = await import("../dist/sync.js");
+  const vaultDir = temporaryVault("rekey-change-bodies");
+
+  const devices = new SyncDeviceManager(vaultDir, PASSPHRASE);
+  const registry = devices.initializeOwner("Owner laptop");
+  const deviceId = registry.body.devices[0].certificate.deviceId;
+  devices.close();
+
+  const log = new SyncChangeLog(vaultDir, PASSPHRASE);
+  const change = log.append(
+    deviceId,
+    {
+      objectType: "note",
+      objectId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      operation: "put",
+      baseRevision: null,
+      revision: 1,
+      value: { title: "Plan", body: "sealed under the outgoing key" },
+    },
+    "2026-09-05T08:00:00.000Z",
+  );
+  log.close();
+
+  stallMidRekey(vaultDir);
+
+  // The body key is derived per change id from syncEnvelope, so this passes
+  // only if the derivation itself falls back to the retiring key — and the id
+  // is unchanged because syncChange never rotates.
+  const during = new SyncChangeLog(vaultDir, PASSPHRASE);
+  const opened = during.changes();
+  assert.equal(opened.length, 1);
+  assert.equal(opened[0].id, change.id);
+  assert.equal(opened[0].mutation.value.body, "sealed under the outgoing key");
+  assert.equal(during.verify().heads.length, 1);
+  during.close();
+});
