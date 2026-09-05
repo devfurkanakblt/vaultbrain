@@ -235,3 +235,73 @@ test("the pre-rename SBRAIN_ environment names still work", () => {
     fs.rmSync(vaultDir, { recursive: true, force: true });
   }
 });
+
+test("vbrain export writes a plaintext copy, records it, and says what it is", () => {
+  const vaultDir = tempVault("export");
+  const outside = tempVault("export-out");
+  const destination = path.join(outside, "plain");
+  const env = { VBRAIN_PASSPHRASE: "cli-export-test-passphrase" };
+  const flags = ["--vault", vaultDir];
+
+  const source = path.join(outside, "Ada.md");
+  fs.writeFileSync(source, "---\ntitle: Ada\n---\n# Ada\n");
+  runCli([...flags, "docs", "import", "People/Ada.md", source], env);
+
+  const reportPath = path.join(outside, "export-report.json");
+  const output = runCli([...flags, "export", destination, "--report", reportPath], env);
+
+  assert.match(output, /Exported 1\/1 notes/u);
+  assert.match(output, /This copy is not encrypted/u);
+  assert.equal(fs.readFileSync(path.join(destination, "People", "Ada.md"), "utf8").includes("# Ada"), true);
+
+  const report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
+  assert.equal(report.ok, true);
+  assert.deepEqual(report.notes, { total: 1, written: 1 });
+
+  // The chain records that a plaintext copy was made, and not where it went.
+  const audit = fs.readFileSync(path.join(vaultDir, "audit.log"), "utf8");
+  assert.match(audit, /export:1:0:0/u);
+  assert.equal(audit.includes(destination), false);
+
+  // A second export into the same directory is refused rather than merged.
+  assert.throws(() => runCli([...flags, "export", destination], env), /not empty/u);
+
+  fs.rmSync(vaultDir, { recursive: true, force: true });
+  fs.rmSync(outside, { recursive: true, force: true });
+});
+
+test("vbrain backup and restore carry a vault to a new directory, and refuse a bad archive", () => {
+  const vaultDir = tempVault("backup");
+  const outside = tempVault("backup-out");
+  const archive = path.join(outside, "vault.vbrainbackup");
+  const env = { VBRAIN_PASSPHRASE: "cli-backup-test-passphrase" };
+  const flags = ["--vault", vaultDir];
+
+  const source = path.join(outside, "Ada.md");
+  fs.writeFileSync(source, "---\ntitle: Ada\n---\n# Ada\n");
+  runCli([...flags, "docs", "import", "People/Ada.md", source], env);
+
+  const made = runCli([...flags, "backup", archive], env);
+  assert.match(made, /Verified: the archive was read back/u);
+  assert.match(made, /the passphrase is not in it/u);
+  assert.match(fs.readFileSync(path.join(vaultDir, "audit.log"), "utf8"), /backup:\d+/u);
+
+  const checked = runCli(["restore", archive, path.join(outside, "unused"), "--verify-only"], env);
+  assert.match(checked, /Nothing was written/u);
+  assert.equal(fs.existsSync(path.join(outside, "unused")), false);
+
+  const destination = path.join(outside, "restored");
+  assert.match(runCli(["restore", archive, destination], env), /Restored \d+ files/u);
+  const listed = runCli(["--vault", destination, "docs", "list"], env);
+  assert.match(listed, /People\/Ada\.md/u);
+
+  // A restore that cannot open the archive leaves the destination alone.
+  assert.throws(
+    () => runCli(["restore", archive, path.join(outside, "wrong")], { VBRAIN_PASSPHRASE: "not-it" }),
+    /Unable to unlock/u,
+  );
+  assert.equal(fs.existsSync(path.join(outside, "wrong")), false);
+
+  fs.rmSync(vaultDir, { recursive: true, force: true });
+  fs.rmSync(outside, { recursive: true, force: true });
+});

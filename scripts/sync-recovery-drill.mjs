@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { createBackup, restoreBackup } from "../dist/backup.js";
 import { startSyncRelay, SyncRelayClient } from "../dist/sync-relay.js";
 import { SyncChangeLog, SyncDeviceManager } from "../dist/sync.js";
 
@@ -11,7 +12,7 @@ const token = process.env.VBRAIN_RELAY_TOKEN ?? process.env.SBRAIN_RELAY_TOKEN ?
 const deviceId = "11111111-1111-4111-8111-111111111111";
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "secondbrain-sync-recovery-drill-"));
 const sourceDir = path.join(root, "source");
-const backupDir = path.join(root, "offline-backup");
+const backupArchive = path.join(root, "offline-backup.vbrainbackup");
 const recoveredDir = path.join(root, "recovered");
 const relayDir = path.join(root, "relay");
 
@@ -41,7 +42,10 @@ try {
   sourceLog = undefined;
   sourceManager.close();
   sourceManager = undefined;
-  fs.cpSync(sourceDir, backupDir, { recursive: true });
+  // The drill restores from the artifact the documented procedure produces.
+  // A directory copy would prove less: it cannot be verified, and it carries
+  // whatever half-written state the source directory happened to hold.
+  const backupReport = createBackup(sourceDir, backupArchive, passphrase);
 
   sourceManager = new SyncDeviceManager(sourceDir, passphrase);
   sourceLog = new SyncChangeLog(sourceDir, passphrase);
@@ -56,7 +60,8 @@ try {
   await sourceClient.uploadArtifact("registry", sourceManager.exportRegistry());
   await sourceClient.uploadArtifact("checkpoint", sourceManager.exportCheckpoint());
 
-  fs.cpSync(backupDir, recoveredDir, { recursive: true });
+  const restoreReport = restoreBackup(backupArchive, recoveredDir, passphrase);
+  assert.equal(restoreReport.files, backupReport.files);
   recoveredManager = new SyncDeviceManager(recoveredDir, passphrase);
   recoveredLog = new SyncChangeLog(recoveredDir, passphrase);
   const recoveredClient = new SyncRelayClient(relay.url, token, vaultId);
@@ -80,7 +85,8 @@ try {
     JSON.stringify(
       {
         ok: true,
-        restoredFrom: "offline encrypted vault backup",
+        restoredFrom: "vbrain backup archive",
+        backedUpFiles: backupReport.files,
         relayCatchup: imported,
         verifiedCheckpoint: verified.id,
         verifiedChanges: verified.body.changeCount,

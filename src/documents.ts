@@ -1403,7 +1403,11 @@ export class DocumentVault {
     return this.putCanvas({ path: canvasPath, nodes, edges: parsed.edges });
   }
 
-  exportCanvas(reference: string, assetsDir = DEFAULT_ASSETS_DIR): string {
+  exportCanvas(
+    reference: string,
+    assetsDir = DEFAULT_ASSETS_DIR,
+    exportedAssetPaths?: ReadonlyMap<string, string>
+  ): string {
     const safeAssetsDir = assetsDir.trim().replace(/\\/gu, "/");
     const assetParts = safeAssetsDir.split("/");
     if (
@@ -1414,7 +1418,7 @@ export class DocumentVault {
     ) {
       throw new Error("Canvas export assets directory must be a relative path label.");
     }
-    return serializeJsonCanvas(this.getCanvas(reference), safeAssetsDir);
+    return serializeJsonCanvas(this.getCanvas(reference), safeAssetsDir, exportedAssetPaths);
   }
 
   private loadPluginById(id: string): PluginPackage {

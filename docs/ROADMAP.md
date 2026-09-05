@@ -210,19 +210,19 @@ so a graphical path to it would mostly be unreachable when it is needed.
 ## Phase 9 — Getting the data out, and back
 
 A local-first product that cannot hand back a plain copy of its contents is
-lock-in by another name. Export is one note or one canvas at a time. Backup is
-"copy the directory": the recovery drill does exactly that with `fs.cpSync`,
-and no command or documented procedure says so to a user.
+lock-in by another name. Export was one note or one canvas at a time. Backup was
+"copy the directory": the recovery drill did exactly that with `fs.cpSync`, and
+no command or documented procedure said so to a user.
 
-- [ ] `vbrain export`: the whole vault as a folder of Markdown with
+- [x] `vbrain export`: the whole vault as a folder of Markdown with
       frontmatter, attachments beside the notes that reference them, and
       canvases as JSON Canvas. The Obsidian importer already reads that shape,
       so export and import would describe one format rather than two.
-- [ ] `vbrain backup` and `vbrain restore`: a verified, self-contained
+- [x] `vbrain backup` and `vbrain restore`: a verified, self-contained
       encrypted copy carrying the key-derivation metadata a restore needs, and
       a restore that refuses a backup it cannot open rather than replacing a
       working vault with one.
-- [ ] A stated backup procedure in the documentation, and a drill that restores
+- [x] A stated backup procedure in the documentation, and a drill that restores
       from that artifact rather than from a directory copy.
 
 ## Phase 10 — Deletion that deletes, and history that ends

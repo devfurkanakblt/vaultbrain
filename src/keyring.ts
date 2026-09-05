@@ -370,11 +370,13 @@ export function keyringPath(vaultDir: string): string {
   return resolveInside(vaultDir, KEYRING_FILENAME);
 }
 
-export function readKeyring(vaultDir: string): KeyringFile | null {
-  const filePath = keyringPath(vaultDir);
-  if (!fs.existsSync(filePath)) return null;
-  assertNotSymlink(filePath);
-  const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as KeyringFile;
+/**
+ * Validates a keyring from its serialized text rather than from a vault
+ * directory, so a keyring carried inside another artifact — a backup archive,
+ * a recovery kit — is checked by exactly the code that checks the vault's own.
+ */
+export function parseKeyring(text: string): KeyringFile {
+  const parsed = JSON.parse(text) as KeyringFile;
   if (parsed?.version !== KEYRING_VERSION) {
     throw new Error(
       `This vault keyring uses version ${String(parsed?.version)}; this build understands ${KEYRING_VERSION}. Upgrade Vault Brain to open it.`,
@@ -384,6 +386,13 @@ export function readKeyring(vaultDir: string): KeyringFile | null {
     throw new Error("Vault keyring has no usable slots.");
   }
   return { version: KEYRING_VERSION, slots: parsed.slots.map(validateSlot) };
+}
+
+export function readKeyring(vaultDir: string): KeyringFile | null {
+  const filePath = keyringPath(vaultDir);
+  if (!fs.existsSync(filePath)) return null;
+  assertNotSymlink(filePath);
+  return parseKeyring(fs.readFileSync(filePath, "utf8"));
 }
 
 export function writeKeyring(vaultDir: string, file: KeyringFile): void {
