@@ -327,6 +327,14 @@ alongside the new ones and is written as version 2
 }
 ```
 
+A keyset may also carry `legacyChangeIdentity`, an optional 32-byte key at
+either version. It holds the `documents` key a completed re-key replaced, and
+it exists for one purpose: recomputing the ids of sync changes an older build
+derived from that key, so a re-key can move their bodies to the new envelope
+key without renaming them. It decrypts nothing, and it grants nobody anything
+an owner of the superseded passphrase did not already hold. It is absent on a
+vault that has never been re-keyed.
+
 `retiring` holds exactly `ROTATABLE_KEY_NAMES` — the three keys `vbrain rekey`
 replaces — and nothing else. `attachmentId`, `syncChange` and `audit` never
 appear there because they are never rotated: every content address, change id

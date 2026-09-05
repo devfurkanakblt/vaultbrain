@@ -42,6 +42,12 @@ export interface DocumentKeySession {
   syncEnvelopeKey: Buffer;
   /** `readKeys` for the sync envelope key. Its first entry is `syncEnvelopeKey`. */
   syncEnvelopeReadKeys: readonly Buffer[];
+  /**
+   * The documents key a completed re-key replaced. Recomputes the ids of sync
+   * changes an older build derived from it, and nothing else. Null on a vault
+   * that has never been re-keyed, and on every legacy vault.
+   */
+  legacyChangeIdentityKey: Buffer | null;
   /** The legacy manifest, or null when the keys came from the vault keyring. */
   manifest: DocumentManifest | null;
 }
@@ -66,7 +72,7 @@ export function openDocumentKey(vaultDir: string, passphrase: string): DocumentK
 
   const vaultKeys = openOrCreateVaultKeySet(vaultDir, passphrase);
   if (vaultKeys) {
-    const { keys, retiring } = vaultKeys;
+    const { keys, retiring, legacyChangeIdentity } = vaultKeys;
     return {
       rootDir,
       key: keys.documents,
@@ -77,6 +83,7 @@ export function openDocumentKey(vaultDir: string, passphrase: string): DocumentK
       syncEnvelopeReadKeys: retiring
         ? [keys.syncEnvelope, retiring.syncEnvelope]
         : [keys.syncEnvelope],
+      legacyChangeIdentityKey: legacyChangeIdentity,
       manifest: null,
     };
   }
@@ -113,6 +120,7 @@ export function openDocumentKey(vaultDir: string, passphrase: string): DocumentK
       syncChangeKey: Buffer.from(key),
       syncEnvelopeKey,
       syncEnvelopeReadKeys: [syncEnvelopeKey],
+      legacyChangeIdentityKey: null,
       manifest,
     };
   } else {
@@ -137,6 +145,7 @@ export function openDocumentKey(vaultDir: string, passphrase: string): DocumentK
     syncChangeKey: Buffer.from(key),
     syncEnvelopeKey,
     syncEnvelopeReadKeys: [syncEnvelopeKey],
+    legacyChangeIdentityKey: null,
     manifest,
   };
 }

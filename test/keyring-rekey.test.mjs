@@ -336,3 +336,77 @@ test("blob addressing is derived from a key a re-key never rotates", async () =>
     return deriveBlobKey(session.syncChangeKey);
   }
 });
+
+test("a change whose id predates the identity split survives being re-sealed", async () => {
+  const { openDocumentKey } = await import("../dist/document-crypto.js");
+  const { openSyncChange, resealSyncChange, sealSyncChange } = await import("../dist/sync.js");
+  const vaultDir = temporaryVault("rekey-legacy-id");
+  writeKeyring(vaultDir, {
+    version: 2,
+    slots: [wrapKeySet(randomKeySet(), PASSPHRASE, LOW_COST_N)],
+  });
+  forgetVaultKeys(vaultDir);
+  const session = openDocumentKey(vaultDir, PASSPHRASE);
+  const body = {
+    version: 1,
+    deviceId: "11111111-1111-4111-8111-111111111111",
+    sequence: 1,
+    previousDeviceChange: null,
+    parents: [],
+    createdAt: "2026-09-05T08:00:00.000Z",
+    mutation: {
+      objectType: "note",
+      objectId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      operation: "put",
+      baseRevision: null,
+      revision: 1,
+      value: { title: "Plan", body: "sealed by an older build" },
+    },
+  };
+
+  // The shape an older build wrote: the bare documents key is both the
+  // identity key and the body key.
+  const legacy = sealSyncChange(body, session.key);
+  const legacyIdentity = Buffer.from(session.key);
+
+  // What a re-key does to it: the body moves to the envelope key, the id
+  // stays exactly where the DAG expects it.
+  const resealed = resealSyncChange(legacy, session.key, session.syncEnvelopeKey);
+  assert.equal(resealed.id, legacy.id);
+  assert.notEqual(resealed.payload.ciphertext, legacy.payload.ciphertext);
+
+  const withoutLegacy = {
+    syncChangeKey: session.syncChangeKey,
+    syncEnvelopeKey: session.syncEnvelopeKey,
+  };
+  assert.throws(
+    () => openSyncChange(resealed, withoutLegacy),
+    /ID does not match/u,
+    "without the legacy identity key a re-sealed change must be refused, not silently renamed",
+  );
+
+  const opened = openSyncChange(resealed, { ...withoutLegacy, legacyIdentityKey: legacyIdentity });
+  assert.equal(opened.id, legacy.id);
+  assert.equal(opened.mutation.value.body, "sealed by an older build");
+});
+
+test("the legacy identity key survives a keyring round trip", () => {
+  const vaultDir = temporaryVault("rekey-legacy-slot");
+  const keys = randomKeySet();
+  const legacy = crypto.randomBytes(32);
+  writeKeyring(vaultDir, {
+    version: 2,
+    slots: [wrapKeySet(keys, PASSPHRASE, LOW_COST_N, null, legacy)],
+  });
+  forgetVaultKeys(vaultDir);
+  const opened = openVaultKeySet(vaultDir, PASSPHRASE);
+  assert.ok(opened.legacyChangeIdentity.equals(legacy));
+  assert.equal(opened.retiring, null);
+
+  writeKeyring(vaultDir, {
+    version: 2,
+    slots: [wrapKeySet(keys, PASSPHRASE, LOW_COST_N)],
+  });
+  forgetVaultKeys(vaultDir);
+  assert.equal(openVaultKeySet(vaultDir, PASSPHRASE).legacyChangeIdentity, null);
+});

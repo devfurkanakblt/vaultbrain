@@ -125,6 +125,12 @@ export interface SyncChangeKeys {
   retiringSyncEnvelopeKey?: Buffer;
   /** Optional pre-keyring key used only while reading already-written changes. */
   legacyKey?: Buffer;
+  /**
+   * Recomputes the id of a change written before the identity key was
+   * separated from the documents key. Never decrypts anything; it exists only
+   * so a re-key can re-seal such a change's body without renaming it.
+   */
+  legacyIdentityKey?: Buffer;
 }
 
 export type SyncChangeKeyMaterial = Buffer | SyncChangeKeys;
@@ -1337,6 +1343,7 @@ export class SyncDeviceManager {
       syncEnvelopeKey: this.session.syncEnvelopeKey,
       retiringSyncEnvelopeKey: this.session.syncEnvelopeReadKeys[1],
       legacyKey: this.session.key,
+      legacyIdentityKey: this.session.legacyChangeIdentityKey ?? undefined,
     };
   }
 
@@ -1798,7 +1805,8 @@ export function openSyncChange(
     }
     material = key;
   }
-  const { syncChangeKey, syncEnvelopeKey, retiringSyncEnvelopeKey, legacyKey } = splitSyncKeys(material);
+  const { syncChangeKey, syncEnvelopeKey, retiringSyncEnvelopeKey, legacyKey, legacyIdentityKey } =
+    splitSyncKeys(material);
   // Ordered: the key in force, then the outgoing key of an unfinished re-key,
   // then the pre-keyring key that opens changes written before migration. Only
   // the last of those changes how the change's identity is recomputed.
@@ -1831,17 +1839,53 @@ export function openSyncChange(
   const body = validateSyncChangeBody(JSON.parse(plaintext));
   const identityKey = usedLegacyKey ? encryptionKey : syncChangeKey;
   const modernId = changeId(body, identityKey, Buffer.isBuffer(material) || usedLegacyKey ? epoch : 1);
-  const legacyId =
-    epoch > 1 && !Buffer.isBuffer(material)
-      ? changeId(body, syncEnvelopeKey, epoch)
-      : modernId;
-  const actual = Buffer.from(modernId === envelope.id ? modernId : legacyId, "hex");
+  // Candidates, in the order they became possible. `legacyIdentityKey` covers
+  // a change a re-key re-sealed under the new envelope key but whose id an
+  // older build had derived from the documents key that re-key replaced.
+  const candidateIds = [modernId];
+  if (epoch > 1 && !Buffer.isBuffer(material)) candidateIds.push(changeId(body, syncEnvelopeKey, epoch));
+  if (legacyIdentityKey && !usedLegacyKey) candidateIds.push(changeId(body, legacyIdentityKey, epoch));
+  const matched = candidateIds.find((candidate) => candidate === envelope.id) ?? modernId;
+  const actual = Buffer.from(matched, "hex");
   const expected = Buffer.from(envelope.id, "hex");
   if (!crypto.timingSafeEqual(actual, expected)) throw new Error("Sync change ID does not match its content.");
   if (plaintext !== canonicalSyncJson(body as unknown as SyncJson)) {
     throw new Error("Sync change plaintext is not canonically encoded.");
   }
   return { id: envelope.id, ...body };
+}
+
+/**
+ * Re-encrypts an epoch 1 change body under a new envelope key, leaving its id
+ * untouched. This is what `vbrain rekey` applies to the change log.
+ *
+ * The id is not recomputed, and it must not be: it is what the causal DAG,
+ * the applied cursor and every pinned checkpoint reference. Opening first is
+ * deliberate — it validates the id against the body and the body against its
+ * canonical encoding, so a re-seal cannot launder a tampered change into one
+ * that verifies under the new key.
+ *
+ * Epoch 2 and above are refused. Their bodies are sealed under an epoch key,
+ * which a re-key does not rotate; only the file holding that epoch key is
+ * rewritten.
+ */
+export function resealSyncChange(
+  value: unknown,
+  from: SyncChangeKeyMaterial | SyncEpochKeyResolver,
+  toSyncEnvelopeKey: Buffer,
+): EncryptedSyncChange {
+  const envelope = validateEnvelope(value);
+  if (envelope.version !== 1) {
+    throw new Error("Only an epoch 1 sync change is re-sealed; later epochs keep their epoch key.");
+  }
+  const { id, ...body } = openSyncChange(envelope, from);
+  const canonical = canonicalSyncJson(body as unknown as SyncJson);
+  const envelopeKey = changeEncryptionKey(toSyncEnvelopeKey, id, 1);
+  try {
+    return { version: 1, id, payload: encryptDocument(canonical, envelopeKey, syncChangeAad(id)) };
+  } finally {
+    envelopeKey.fill(0);
+  }
 }
 
 function objectKey(change: SyncChange): string {
@@ -2281,6 +2325,7 @@ export class SyncChangeLog {
           syncEnvelopeKey: this.session.syncEnvelopeKey,
           retiringSyncEnvelopeKey: this.session.syncEnvelopeReadKeys[1],
           legacyKey: vaultKey,
+          legacyIdentityKey: this.session.legacyChangeIdentityKey ?? undefined,
         };
       }
       const key = readEpochKey(rootDir, vaultKey, epoch);

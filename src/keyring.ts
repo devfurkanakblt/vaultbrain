@@ -48,6 +48,14 @@ export type RetiringKeys = { [K in RotatableKeyName]: Buffer };
 export interface VaultKeySet {
   keys: KeySet;
   retiring: RetiringKeys | null;
+  /**
+   * The documents key a completed re-key replaced, kept for one purpose only:
+   * recomputing the ids of sync changes an older build wrote, which derived
+   * them from that key. It decrypts nothing — a re-key re-seals every body
+   * under the new envelope key — and it grants no reader anything an owner of
+   * the old passphrase did not already have. Null unless a re-key has run.
+   */
+  legacyChangeIdentity: Buffer | null;
 }
 
 export interface SlotKdf {
@@ -170,13 +178,25 @@ function slotAad(slot: Omit<KeyringSlot, "wrapped">): Buffer {
   );
 }
 
-function serializeKeySet(keys: KeySet, retiring: RetiringKeys | null): string {
+function serializeKeySet(
+  keys: KeySet,
+  retiring: RetiringKeys | null,
+  legacyChangeIdentity: Buffer | null,
+): string {
   const encoded: Record<string, string> = {};
   for (const name of KEY_NAMES) encoded[name] = keys[name].toString("base64");
-  if (!retiring) return JSON.stringify({ version: KEYSET_VERSION, keys: encoded });
+  const legacy = legacyChangeIdentity
+    ? { legacyChangeIdentity: legacyChangeIdentity.toString("base64") }
+    : {};
+  if (!retiring) return JSON.stringify({ version: KEYSET_VERSION, keys: encoded, ...legacy });
   const outgoing: Record<string, string> = {};
   for (const name of ROTATABLE_KEY_NAMES) outgoing[name] = retiring[name].toString("base64");
-  return JSON.stringify({ version: RETIRING_KEYSET_VERSION, keys: encoded, retiring: outgoing });
+  return JSON.stringify({
+    version: RETIRING_KEYSET_VERSION,
+    keys: encoded,
+    retiring: outgoing,
+    ...legacy,
+  });
 }
 
 function parseKeySet(plaintext: string): VaultKeySet {
@@ -184,6 +204,7 @@ function parseKeySet(plaintext: string): VaultKeySet {
     version?: number;
     keys?: Record<string, unknown>;
     retiring?: Record<string, unknown>;
+    legacyChangeIdentity?: unknown;
   };
   const version = parsed?.version;
   if (version !== KEYSET_VERSION && version !== RETIRING_KEYSET_VERSION) {
@@ -193,6 +214,10 @@ function parseKeySet(plaintext: string): VaultKeySet {
   for (const name of KEY_NAMES) {
     keys[name] = base64Bytes(parsed.keys?.[name], KEY_LENGTH, KEY_LENGTH, `${name} key`);
   }
+  const legacyChangeIdentity =
+    parsed.legacyChangeIdentity === undefined
+      ? null
+      : base64Bytes(parsed.legacyChangeIdentity, KEY_LENGTH, KEY_LENGTH, "legacy change identity key");
   if (version === KEYSET_VERSION) {
     // Refused rather than ignored: a reader that silently dropped retiring
     // keys it was not expecting would report success and then fail to open
@@ -201,13 +226,13 @@ function parseKeySet(plaintext: string): VaultKeySet {
       zeroKeySet(keys);
       throw new Error("A version 1 vault keyset must not carry retiring keys.");
     }
-    return { keys, retiring: null };
+    return { keys, retiring: null, legacyChangeIdentity };
   }
   const retiring = {} as RetiringKeys;
   for (const name of ROTATABLE_KEY_NAMES) {
     retiring[name] = base64Bytes(parsed.retiring?.[name], KEY_LENGTH, KEY_LENGTH, `retiring ${name} key`);
   }
-  return { keys, retiring };
+  return { keys, retiring, legacyChangeIdentity };
 }
 
 export function copyRetiringKeys(retiring: RetiringKeys): RetiringKeys {
@@ -241,6 +266,7 @@ export function wrapKeySet(
   passphrase: string,
   N: number = DEFAULT_SCRYPT_N,
   retiring: RetiringKeys | null = null,
+  legacyChangeIdentity: Buffer | null = null,
 ): KeyringSlot {
   if (!passphrase) throw new Error("A non-empty vault passphrase is required.");
   const header = {
@@ -256,7 +282,7 @@ export function wrapKeySet(
     const cipher = crypto.createCipheriv("aes-256-gcm", derived, iv);
     cipher.setAAD(slotAad(header));
     const ciphertext = Buffer.concat([
-      cipher.update(serializeKeySet(keys, retiring), "utf8"),
+      cipher.update(serializeKeySet(keys, retiring, legacyChangeIdentity), "utf8"),
       cipher.final(),
     ]);
     return {
@@ -390,12 +416,16 @@ function copyVaultKeySet(opened: VaultKeySet): VaultKeySet {
   return {
     keys: copyKeySet(opened.keys),
     retiring: opened.retiring ? copyRetiringKeys(opened.retiring) : null,
+    legacyChangeIdentity: opened.legacyChangeIdentity
+      ? Buffer.from(opened.legacyChangeIdentity)
+      : null,
   };
 }
 
 function zeroVaultKeySet(opened: VaultKeySet): void {
   zeroKeySet(opened.keys);
   if (opened.retiring) zeroRetiringKeys(opened.retiring);
+  opened.legacyChangeIdentity?.fill(0);
 }
 
 function cacheId(vaultDir: string, passphrase: string, file: KeyringFile): string {
