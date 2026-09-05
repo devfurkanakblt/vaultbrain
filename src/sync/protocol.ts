@@ -32,7 +32,7 @@ export interface SyncMutation {
 }
 
 export interface SyncChangeBody {
-  version: 1;
+  version: 1 | 2;
   deviceId: string;
   sequence: number;
   previousDeviceChange: string | null;
@@ -42,8 +42,9 @@ export interface SyncChangeBody {
 }
 
 export interface EncryptedSyncChange {
-  version: 1;
+  version: 1 | 2;
   id: string;
+  epoch?: number;
   payload: DocumentPayload;
 }
 

@@ -2892,30 +2892,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "secondbrain-vault-desktop"
-version = "0.2.0"
-dependencies = [
- "aes-gcm",
- "base64 0.22.1",
- "chrono",
- "ed25519-dalek",
- "hmac",
- "libc",
- "rand",
- "regex",
- "scrypt",
- "serde",
- "serde_json",
- "sha2",
- "tauri",
- "tauri-build",
- "unicode-normalization",
- "uuid",
- "windows-sys 0.61.2",
- "zeroize",
-]
-
-[[package]]
 name = "selectors"
 version = "0.36.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4146,6 +4122,7 @@ dependencies = [
  "chrono",
  "ed25519-dalek",
  "hmac",
+ "libc",
  "rand",
  "regex",
  "scrypt",

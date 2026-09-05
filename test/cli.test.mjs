@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -40,5 +41,136 @@ test("sbrain format prints the frozen version matrix", () => {
     reads: [0, 1],
     writes: [1],
   });
-  assert.deepEqual(output.artifacts.syncChangeEnvelope.reads, [1, 2]);
+  assert.deepEqual(output.artifacts.syncChangeEnvelope.reads, [1, 2, 3]);
+});
+
+/**
+ * A second device that shares this vault's key material and enrollment
+ * authority. Copying before any content is written is the CLI equivalent of
+ * the whole-vault copy the sync library tests use: two independent directories
+ * that can nonetheless open each other's envelopes.
+ */
+function cloneVault(sourceDir, label) {
+  const targetDir = tempVault(label);
+  fs.rmSync(targetDir, { recursive: true, force: true });
+  fs.cpSync(sourceDir, targetDir, { recursive: true });
+  return targetDir;
+}
+
+function tempFile(label, bytes) {
+  const file = path.join(os.tmpdir(), `vbrain-cli-${label}-${crypto.randomUUID()}.bin`);
+  const body = crypto.randomBytes(bytes);
+  fs.writeFileSync(file, body);
+  return { file, body };
+}
+
+/**
+ * A relay in its own process. `runCli` is synchronous, so a relay hosted in
+ * this process could never answer the request the CLI under test makes.
+ */
+function startRelayProcess(storageDir, env) {
+  const child = spawn(
+    process.execPath,
+    ["dist/cli.js", "--experimental-trusted-sync", "sync", "relay", "serve", storageDir, "--port", "0"],
+    { env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "inherit"] },
+  );
+  const stop = () =>
+    new Promise((done) => {
+      child.once("exit", () => done());
+      child.kill();
+    });
+  return new Promise((resolve, reject) => {
+    let buffered = "";
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (part) => {
+      buffered += part;
+      const match = /listening at (http:\/\/\S+?)\.\s/u.exec(buffered);
+      if (match) resolve({ url: match[1], stop });
+    });
+    child.once("error", reject);
+    child.once("exit", (code) => reject(new Error(`The relay process exited with ${code}.`)));
+  });
+}
+
+/** `Stored name (id, size bytes, chunks chunks).` */
+function attachmentIdOf(output) {
+  const match = /\(([0-9a-f]{64}), /u.exec(output);
+  assert.ok(match, `attach did not print an attachment id: ${output}`);
+  return match[1];
+}
+
+test("sync export --bundle carries attachment blobs to another vault without a relay", () => {
+  const env = { SBRAIN_PASSPHRASE: "cli-bundle-test-passphrase" };
+  const sourceDir = tempVault("bundle-source");
+  const source = ["--vault", sourceDir, "--experimental-trusted-sync"];
+  runCli([...source, "sync", "devices", "init", "Owner laptop", "--device-id", DEVICE_A], env);
+
+  const targetDir = cloneVault(sourceDir, "bundle-target");
+  const target = ["--vault", targetDir, "--experimental-trusted-sync"];
+
+  const { file, body } = tempFile("bundle", 3 * 1024 * 1024 + 3);
+  const attachmentId = attachmentIdOf(
+    runCli([...source, "--sync-device", DEVICE_A, "docs", "attach", file], env),
+  );
+
+  const bundle = path.join(os.tmpdir(), `vbrain-cli-bundle-${crypto.randomUUID()}`);
+  const exported = runCli([...source, "sync", "export", "--bundle", bundle], env);
+  assert.match(exported, /1 envelope\(s\) and 4 blob\(s\)/u);
+  assert.ok(fs.existsSync(path.join(bundle, "changes.json")));
+  assert.ok(fs.readdirSync(path.join(bundle, "blobs")).length >= 4);
+
+  const imported = runCli([...target, "sync", "import", bundle], env);
+  assert.match(imported, /Staged 4 attachment blob\(s\)\./u);
+  assert.match(imported, /Imported 1; already present 0\./u);
+
+  const status = runCli([...target, "sync", "blobs", "status"], env);
+  assert.match(status, new RegExp(`${attachmentId} 4 present, 0 missing`, "u"));
+
+  runCli([...target, "sync", "apply", "attachment", attachmentId], env);
+  const restored = path.join(os.tmpdir(), `vbrain-cli-restored-${crypto.randomUUID()}.bin`);
+  runCli([...target, "docs", "attachment-get", attachmentId, restored], env);
+  assert.ok(fs.readFileSync(restored).equals(body), "the bundle carried every attachment byte");
+
+  for (const scrap of [sourceDir, targetDir, bundle]) fs.rmSync(scrap, { recursive: true, force: true });
+  for (const scrap of [file, restored]) fs.rmSync(scrap, { force: true });
+});
+
+test("relay push and pull move blobs, and blobs prune and fetch reclaim and restore them", async () => {
+  const token = "cli-relay-blob-token-with-at-least-32-bytes";
+  const env = { SBRAIN_PASSPHRASE: "cli-relay-blob-passphrase", SBRAIN_RELAY_TOKEN: token };
+  const storageDir = tempVault("relay-storage");
+  const relay = await startRelayProcess(storageDir, env);
+  const scraps = [storageDir];
+  try {
+    const sourceDir = tempVault("relay-source");
+    const source = ["--vault", sourceDir, "--experimental-trusted-sync"];
+    runCli([...source, "sync", "devices", "init", "Owner laptop", "--device-id", DEVICE_A], env);
+    const targetDir = cloneVault(sourceDir, "relay-target");
+    const target = ["--vault", targetDir, "--experimental-trusted-sync"];
+    const { file, body } = tempFile("relay", 1024 * 1024 + 7);
+    const restored = path.join(os.tmpdir(), `vbrain-cli-relay-restored-${crypto.randomUUID()}.bin`);
+    scraps.push(sourceDir, targetDir, file, restored);
+    const attachmentId = attachmentIdOf(
+      runCli([...source, "--sync-device", DEVICE_A, "docs", "attach", file], env),
+    );
+
+    runCli([...source, "sync", "relay", "push", relay.url], env);
+    const pulled = JSON.parse(runCli([...target, "sync", "relay", "pull", relay.url], env));
+    assert.deepEqual(pulled.blobs, { fetched: 2, skipped: 0 }, "pull stages the blobs its changes reference");
+    assert.match(runCli([...target, "sync", "blobs", "status"], env), /2 present, 0 missing/u);
+    runCli([...target, "sync", "apply", "attachment", attachmentId], env);
+    runCli([...target, "docs", "attachment-get", attachmentId, restored], env);
+    assert.ok(fs.readFileSync(restored).equals(body), "the relay carried every attachment byte");
+
+    const pruned = runCli([...source, "sync", "blobs", "prune", relay.url], env);
+    assert.match(pruned, /Pruned 2 staged blob\(s\); kept 0 the relay does not hold\./u);
+    assert.match(runCli([...source, "sync", "blobs", "status"], env), /0 present, 2 missing/u);
+
+    const fetched = runCli([...source, "sync", "blobs", "fetch", relay.url], env);
+    assert.match(fetched, /Fetched 2 blob\(s\); 0 already present\./u);
+    assert.match(runCli([...source, "sync", "blobs", "status"], env), /2 present, 0 missing/u);
+  } finally {
+    await relay.stop();
+    for (const scrap of scraps) fs.rmSync(scrap, { recursive: true, force: true });
+  }
 });

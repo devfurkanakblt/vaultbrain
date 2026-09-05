@@ -30,7 +30,7 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
   encryptedEnvelope: { path: "*.kv.enc", reads: [0, 1], writes: [1] },
   documentManifest: { path: "documents/manifest.json", reads: [1], writes: [1] },
   documentPayload: { path: "documents/objects/*.enc", reads: [1], writes: [1] },
-  syncChangeEnvelope: { path: "documents/sync/changes/*.change.enc", reads: [1, 2], writes: [1, 2] },
+  syncChangeEnvelope: { path: "documents/sync/changes/*.change.enc", reads: [1, 2, 3], writes: [1, 2, 3] },
   syncDeviceCertificate: { path: "documents/sync/devices.enc", reads: [1, 2], writes: [1, 2] },
   syncDeviceRegistry: { path: "documents/sync/devices.enc", reads: [1, 2], writes: [1, 2] },
   syncEnrollmentRequest: { path: "(transferred)", reads: [1, 2], writes: [1, 2] },

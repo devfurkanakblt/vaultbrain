@@ -20,27 +20,40 @@ so is being considered.
 Line counts below were measured directly against this branch with
 `wc -l src/*.ts` and `wc -l src-tauri/src/lib.rs`; they are not estimates.
 
-TypeScript core (`src/*.ts`, 11,351 lines total across the directory).
+TypeScript core (`src/*.ts`, 13,869 lines, plus `src/sync/*.ts`, 1,484).
 The modules most load-bearing for the security properties this review is
 about:
 
 | File | Lines | Role |
 |---|---:|---|
-| `src/crypto.ts` | 178 | Top-level vault envelope (`*.kv.enc`): key derivation, AEAD seal/open. |
-| `src/document-crypto.ts` | 124 | Document-vault key-derivation manifest and per-object encrypted payload shape. |
-| `src/sync.ts` | 2,565 | Change envelopes, device certificates/registry, freshness checkpoints, canonical JSON/base64, apply logic. |
+| `src/crypto.ts` | 239 | Top-level vault envelope (`*.kv.enc`): key derivation, AEAD seal/open. |
+| `src/document-crypto.ts` | 164 | Document-vault key-derivation manifest and per-object encrypted payload shape. |
+| `src/sync.ts` | 3,393 | Change envelopes, device certificates/registry, freshness checkpoints, canonical JSON/base64, attachment snapshot validation, apply logic. |
 | `src/sync-epoch.ts` | 187 | Epoch key hierarchy and per-device X25519 wrap construction. |
-| `src/sync-relay.ts` | 418 | Relay HTTP client/server: opaque storage, bearer auth, containment checks. |
-| `src/grants.ts` | 424 | Per-agent grant policy and redaction. |
+| `src/sync-relay.ts` | 603 | Relay HTTP client/server: opaque storage, bearer auth, containment checks, blob upload/download. |
+| `src/sync-blobs.ts` | 104 | Attachment blob sealing, SHA-256 blob identity and the staged blob store. |
+| `src/grants.ts` | 432 | Per-agent grant policy and redaction. |
 | `src/plugin-signatures.ts` | 131 | Plugin manifest/package signature verification. |
 
-Rust desktop core: `src-tauri/src/lib.rs`, 7,036 lines. A second, independent
+Rust desktop core: `src-tauri/src/lib.rs`, 7,245 lines. A second, independent
 implementation of vault unlock, document read/write, and (as of this branch)
 read-only sync status (`sync_status`, `sync_verify_registry`) against the same
 on-disk format as the TypeScript core.
 
 The relay: `src/sync-relay.ts` (client and server share this file) plus
 `docs/SYNC-RELAY.md` for the deployment/operations side.
+
+The attachment blob path, new since the last revision of this document and
+the newest code in the review: `src/sync-blobs.ts` (chunk sealing, the
+unkeyed SHA-256 blob identity, the staged store under
+`documents/sync/blobs/`), the `blobs` collection in `src/sync-relay.ts`
+(hash-verified immutable writes, no list route, 2 MiB per object, quota
+accounting shared with changes), and the fail-closed apply path in
+`src/sync.ts` (`assertRemoteChangeIsStaged`, `attachmentFromSnapshot`) that
+must never materialize a partial attachment or leave a receipt behind when
+it refuses. `docs/FORMAT-1.0.md` specifies the manifest body and the blob
+identity; `test/fixtures/sync-attachment-blobs-v3/` is the committed
+evidence.
 
 ## 3. Trust boundaries
 
@@ -114,16 +127,25 @@ weaknesses is worse than no scope document:
   unlock --remember` can hand the passphrase to macOS Keychain or libsecret
   on Linux, but this project's test suite runs on and validates only the
   Windows DPAPI path.
-- **Attachments larger than 6,242,304 bytes cannot sync at all.** A
-  synchronized attachment travels as a snapshot inside a single change
-  envelope, and an envelope is capped at 8 MiB (`MAX_CHANGE_BYTES`,
-  `src/sync.ts`); after base64 expansion and envelope overhead that leaves
-  `MAX_SYNC_ATTACHMENT_BYTES` = 6,242,304 raw bytes. Larger files are
-  accepted into the vault and then refused by the sync layer with an explicit
-  "until blob transport is available" error. This is a product gap rather
-  than a vulnerability, but it bounds the review: there is no chunked or
-  resumable blob path to look at, and any reasoning about relay storage or
-  denial-of-service limits may assume every stored object is at most 8 MiB.
+- **Attachment bytes now travel outside the change envelope, and the relay
+  keeps them forever.** The former ceiling — `MAX_SYNC_ATTACHMENT_BYTES` =
+  6,242,304 raw bytes, imposed because a whole attachment had to fit base64
+  encoded inside one 8 MiB change — no longer applies: nothing in the sync
+  path reads that constant any more (a dead export of it survives in
+  `src/sync/protocol.ts` and is imported by nothing). An
+  attachment of any size the vault accepts (up to `MAX_ATTACHMENT_SIZE` =
+  250 MiB) synchronizes: a `version: 3` change body carries a manifest of
+  content-addressed *blobs*, and each blob is one AEAD-sealed 1 MiB chunk
+  moved through a separate relay collection. Two consequences are accepted
+  rather than solved. First, **there is no blob retention or garbage
+  collection**: deleting an attachment leaves its blobs on the relay, so
+  relay storage for a vault that churns large attachments grows without
+  bound and the operator must reclaim it out of band. Second, **two devices
+  that each add the same file produce two distinct blob sets**, because AEAD
+  nonces are random per seal; this was chosen over a deterministic nonce,
+  which would have weakened the AEAD construction to save relay storage.
+  This bullet is also a pointer: the blob path is new attack surface, and
+  §2 and §9 below allocate review effort to it explicitly.
 
 - **A known gap in the format catalogue.** `documents/index.enc`
   (`AAD.documentIndex`) and `documents/plugin-policy.enc`
@@ -232,10 +254,11 @@ It is weighted by where this project believes its own risk actually sits:
 
 | Area | Weight |
 |---|---:|
-| §6 two-implementation divergence, including differential execution over `test/fixtures/` | ~40% |
+| §6 two-implementation divergence, including differential execution over `test/fixtures/` | ~35% |
 | Sync protocol: envelopes, registry, revocation cutoffs, epoch rotation (§8 Q1, Q2) | ~30% |
 | Hostile-input handling and resource bounds in both implementations (§8 Q3) | ~15% |
 | Vault envelope and key derivation: `src/crypto.ts`, `src/document-crypto.ts` | ~10% |
+| Attachment blob transport: blob identity, the relay `blobs` collection, fail-closed apply | ~5% |
 | Grant layer and plugin signature verification (§8 Q5) | ~5% |
 
 **Deliverables.**

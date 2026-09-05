@@ -91,9 +91,13 @@ about. Vault Brain stays local-first with optional self-hosted sync.
 - [ ] Desktop multi-device release
   - [x] Read-only desktop sync status; mutation remains CLI-only
   - [ ] Desktop-driven enrollment, revocation and relay exchange
-- [ ] Resumable chunked transport for large attachment blobs
-  - Attachment snapshots share the 8 MiB change limit (about 6 MiB of raw
-    bytes); larger files live in the vault but cannot sync today
+- [x] Resumable chunked transport for large attachment blobs
+  - [x] Version 3 change bodies carry an attachment manifest; the bytes
+    travel as content-addressed, AEAD-sealed 1 MiB blobs
+  - [x] Per-chunk idempotent push and pull, and an apply that fails closed
+    while a chunk is missing
+  - [x] `sync blobs status/fetch/prune` and relay-free bundle transport via
+    `sync export --bundle` / `sync import`
 - [x] Automated encrypted-backup plus relay catch-up recovery drill
 - [ ] External security audit and stable 1.0 format
   - [x] Stable 1.0 on-disk format with committed conformance fixtures

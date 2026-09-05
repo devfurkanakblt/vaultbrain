@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import { assertNotSymlink, readTextFileLimited, writeFileAtomic } from "./fs-safe.js";
+import { openOrCreateVaultKey, openVaultKey } from "./keyring.js";
 import { resolveInside } from "./safety.js";
 import { withVaultLock } from "./vault-lock.js";
 
@@ -184,7 +185,7 @@ export function appendAudit(
     const previousSigned = [...existing].reverse().find((item) => item.hash);
     const prevHash = previousSigned?.hash ?? GENESIS_HASH;
     const unsigned = { timestamp: new Date().toISOString(), ...entry, prevHash };
-    const key = auditKey(vaultDir, passphrase, loadOrCreateMeta(vaultDir));
+    const key = chainKeyForAppend(vaultDir, passphrase);
     const hash = calculateHash(unsigned, key);
     const full: AuditEntry = { ...unsigned, hash };
     fs.appendFileSync(p, JSON.stringify(full) + "\n", { encoding: "utf8", mode: 0o600 });
@@ -264,6 +265,14 @@ export function verifyAudit(vaultDir: string, passphrase: string): AuditVerifica
   }
   const sealedPath = headPath(vaultDir);
   if (!fs.existsSync(sealedPath)) {
+    // Audit heads were introduced after signed chains. A migrated vault keeps
+    // audit.meta.json as its authenticated legacy marker, so its already-
+    // verified chain remains readable; the next append writes the head. New
+    // keyring-native vaults have no metadata file and still fail closed when
+    // their head is removed.
+    if (loadMeta(vaultDir)) {
+      return { valid: true, signedEntries: signed.length, legacyEntries };
+    }
     return { valid: false, signedEntries: signed.length, legacyEntries, error: "Audit head is missing." };
   }
   assertNotSymlink(sealedPath);

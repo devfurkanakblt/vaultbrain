@@ -1,7 +1,17 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
-import { decrypt, encrypt, type AnyEncryptedPayload } from "./crypto.js";
+import {
+  decrypt,
+  decryptWithKey,
+  encrypt,
+  encryptWithKey,
+  envelopeVersion,
+  KEYED_ENVELOPE_VERSION,
+  type AnyEncryptedPayload,
+  type KeyedEncryptedPayload,
+} from "./crypto.js";
 import { assertNotSymlink, readTextFileLimited, writeFileAtomic } from "./fs-safe.js";
+import { openOrCreateVaultKey, openVaultKey } from "./keyring.js";
 import { isRedactionLevel, type RedactionLevel } from "./redaction.js";
 import { normalizeVaultName, resolveInside } from "./safety.js";
 
@@ -133,7 +143,15 @@ export function loadGrants(vaultDir: string, passphrase: string): GrantFile | nu
   if (!fs.existsSync(path)) return null;
   assertNotSymlink(path);
   const payload: AnyEncryptedPayload = JSON.parse(readTextFileLimited(path, 8 * 1024 * 1024, "Grant policy"));
-  const parsed: GrantFile = JSON.parse(decrypt(payload, passphrase));
+  const parsed: GrantFile = JSON.parse(
+    envelopeVersion(payload) === KEYED_ENVELOPE_VERSION
+      ? decryptWithKey(
+          payload as KeyedEncryptedPayload,
+          requireGrantsKey(vaultDir, passphrase),
+          GRANTS_FILE_IDENTITY,
+        )
+      : decrypt(payload, passphrase),
+  );
   if (parsed.version !== 1 || !Array.isArray(parsed.grants)) {
     throw new Error("Unrecognized grant file. Refusing to enforce a policy this build cannot read.");
   }

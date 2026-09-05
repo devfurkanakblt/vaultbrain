@@ -2,7 +2,7 @@ import type { SyncAppliedObject } from "./change-log.js";
 import { SyncApplyReceiptStore, type SyncApplyLiveIdentity, type SyncApplyReceipt } from "./transaction.js";
 import type { SyncChange, SyncObjectType } from "./protocol.js";
 
-type LiveObjectType = Extract<SyncObjectType, "note" | "canvas" | "attachment">;
+type LiveObjectType = SyncObjectType;
 
 function sameObject(change: SyncChange, objectType: LiveObjectType, objectId: string): boolean {
   return change.mutation.objectType === objectType && change.mutation.objectId === objectId;

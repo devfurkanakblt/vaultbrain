@@ -1,11 +1,19 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { AAD, FORMAT_COMPATIBILITY, VAULT_FORMAT_VERSION, canonicalBase64 } from "../dist/format-version.js";
-import { SyncChangeLog, SyncDeviceManager } from "../dist/sync.js";
+import { SyncBlobStore } from "../dist/sync-blobs.js";
+import {
+  SyncChangeLog,
+  SyncDeviceManager,
+  SyncedDocumentVault,
+  parseAttachmentSnapshot,
+} from "../dist/sync.js";
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
 const FIXTURE_PASSPHRASE = "fixture-only-passphrase";
@@ -33,6 +41,10 @@ test("the format version surface is frozen and complete", () => {
   }
   assert.deepEqual(FORMAT_COMPATIBILITY.encryptedEnvelope.reads, [0, 1]);
   assert.deepEqual(FORMAT_COMPATIBILITY.encryptedEnvelope.writes, [1]);
+
+  // Blob transport added change body version 3 to the sync change entry.
+  assert.deepEqual(FORMAT_COMPATIBILITY.syncChangeEnvelope.reads, [1, 2, 3]);
+  assert.deepEqual(FORMAT_COMPATIBILITY.syncChangeEnvelope.writes, [1, 2, 3]);
 });
 
 test("canonical base64 rejects non-canonical and wrong-length encodings", () => {
@@ -93,4 +105,76 @@ test("the committed registry pins the post-rotation shape", () => {
 test("the fixture vault caches no epoch key the revoked device could use", () => {
   const epochs = path.join(FIXTURES, "sync-epoch-v2", "documents", "sync", "identity", "epochs");
   assert.deepEqual(fs.readdirSync(epochs), ["2.key.enc"], "only the current epoch key is cached");
+});
+
+const BLOBS_FIXTURE = path.join(FIXTURES, "sync-attachment-blobs-v3");
+const blobsManifest = JSON.parse(fs.readFileSync(path.join(BLOBS_FIXTURE, "manifest.json"), "utf8"));
+
+test("the committed attachment blob fixture pins the version 3 manifest body", () => {
+  const log = new SyncChangeLog(path.join(BLOBS_FIXTURE, "source"), FIXTURE_PASSPHRASE);
+  try {
+    const changes = log.changes();
+    assert.equal(changes.length, blobsManifest.changeCount);
+    const attachment = changes.find((change) => change.mutation.objectType === "attachment");
+
+    // A version 3 body is authorized exactly like a version 2 body, and this
+    // build must keep reading it.
+    assert.equal(attachment.version, 3);
+    assert.equal(attachment.authorization.certificateSerial, 1);
+    assert.equal(attachment.mutation.objectId, blobsManifest.attachmentId);
+
+    // The bytes are not in the change: the snapshot is a manifest.
+    const snapshot = parseAttachmentSnapshot(attachment.mutation.value);
+    assert.equal(snapshot.data, undefined);
+    assert.equal(snapshot.filename, blobsManifest.filename);
+    assert.equal(snapshot.mime, blobsManifest.mime);
+    assert.equal(snapshot.size, blobsManifest.size);
+    assert.equal(snapshot.chunks, 2);
+    assert.equal(snapshot.chunks, snapshot.blobs.length);
+    assert.deepEqual(snapshot.blobs, blobsManifest.blobs);
+
+    // A blob id is the SHA-256 of the sealed chunk itself, which is what lets
+    // the relay verify an upload while holding no key.
+    const store = new SyncBlobStore(path.join(BLOBS_FIXTURE, "source"));
+    for (const id of snapshot.blobs) {
+      assert.match(id, /^[0-9a-f]{64}$/u);
+      assert.equal(crypto.createHash("sha256").update(store.read(id)).digest("hex"), id);
+    }
+  } finally {
+    log.close();
+  }
+});
+
+test("a second device reassembles the committed attachment from its staged blobs", () => {
+  const targetDir = fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-blob-fixture-"));
+  fs.rmSync(targetDir, { recursive: true, force: true });
+  fs.cpSync(path.join(BLOBS_FIXTURE, "target"), targetDir, { recursive: true });
+  const sourceDir = path.join(BLOBS_FIXTURE, "source");
+
+  const source = new SyncChangeLog(sourceDir, FIXTURE_PASSPHRASE);
+  const target = new SyncedDocumentVault(targetDir, FIXTURE_PASSPHRASE);
+  try {
+    target.changeLog.import(source.envelopes());
+
+    // Without the bytes the apply fails closed and writes nothing.
+    assert.throws(
+      () => target.applyResolved("attachment", blobsManifest.attachmentId),
+      /2 of 2 attachment chunks are missing\./u,
+    );
+    assert.equal(target.listAttachments().length, 0);
+
+    const from = new SyncBlobStore(sourceDir);
+    const to = new SyncBlobStore(targetDir);
+    for (const id of blobsManifest.blobs) to.put(id, from.read(id));
+
+    target.applyResolved("attachment", blobsManifest.attachmentId);
+    const recovered = target.getAttachment(blobsManifest.attachmentId);
+    assert.equal(recovered.info.filename, blobsManifest.filename);
+    assert.equal(recovered.data.length, blobsManifest.size);
+    assert.equal(crypto.createHash("sha256").update(recovered.data).digest("hex"), blobsManifest.sha256);
+  } finally {
+    source.close();
+    target.lock();
+    fs.rmSync(targetDir, { recursive: true, force: true });
+  }
 });

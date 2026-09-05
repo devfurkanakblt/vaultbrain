@@ -17,7 +17,9 @@ import {
 import { resolveInside } from "./safety.js";
 import { withVaultLock } from "./vault-lock.js";
 import {
+  ATTACHMENT_CHUNK_SIZE,
   DocumentVault,
+  MAX_ATTACHMENT_SIZE,
   type AttachmentInfo,
   type CanvasDocument,
   type CanvasInput,
@@ -48,6 +50,17 @@ import {
   unwrapEpochKey,
   type EpochKeyWrap,
 } from "./sync-epoch.js";
+import { SyncApplyEngine, planSyncApplication, type SyncApplyEffects } from "./sync/engine.js";
+import { SyncBlobStore, openAttachmentBlob, sealAttachmentBlobs } from "./sync-blobs.js";
+import {
+  SyncApplyReceiptStore,
+  SyncLocalTransaction,
+  type SyncApplyLiveIdentity,
+  type SyncApplyReceipt,
+  type SyncLocalStorageOperation,
+  type SyncTransactionEffects,
+  type SyncTransactionOptions,
+} from "./sync/transaction.js";
 
 const MAX_CHANGE_BYTES = 8 * 1024 * 1024;
 const MAX_ENVELOPE_BYTES = 12 * 1024 * 1024;
@@ -60,9 +73,6 @@ const MAX_JSON_NODES = 100_000;
 const CHANGE_ID = /^[a-f0-9]{64}$/u;
 const DEVICE_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
 const OBJECT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u;
-
-/** Base64 plus the change body must remain inside the authenticated 8 MiB envelope limit. */
-export const MAX_SYNC_ATTACHMENT_BYTES = Math.floor(((MAX_CHANGE_BYTES - 64 * 1024) * 3) / 4);
 
 export type SyncObjectType = "note" | "canvas" | "attachment" | "plugin" | "vault";
 export type SyncOperation = "put" | "delete";
@@ -78,7 +88,7 @@ export interface SyncMutation {
 }
 
 export interface SyncChangeBody {
-  version: 1 | 2;
+  version: 1 | 2 | 3;
   deviceId: string;
   sequence: number;
   previousDeviceChange: string | null;
@@ -101,8 +111,19 @@ export interface EncryptedSyncChange {
   payload: DocumentPayload;
 }
 
-/** Resolves an epoch number to its content key. Epoch 1 resolves to the vault key. */
-export type SyncEpochKeyResolver = (epoch: number) => Buffer;
+export interface SyncChangeKeys {
+  /** Permanent identity key: rotating envelope encryption must not rewrite DAG IDs. */
+  syncChangeKey: Buffer;
+  /** Rotatable key used only to derive the per-change encryption key. */
+  syncEnvelopeKey: Buffer;
+  /** Optional pre-keyring key used only while reading already-written changes. */
+  legacyKey?: Buffer;
+}
+
+export type SyncChangeKeyMaterial = Buffer | SyncChangeKeys;
+
+/** Resolves an epoch number to its identity/envelope key material. */
+export type SyncEpochKeyResolver = (epoch: number) => SyncChangeKeyMaterial;
 
 export interface SyncChange extends SyncChangeBody {
   id: string;
@@ -241,19 +262,71 @@ interface CanvasSyncSnapshot {
   createdAt: string;
 }
 
-interface AttachmentSyncSnapshot {
+export interface InlineAttachmentSyncSnapshot {
   filename: string;
   mime: string;
   data: string;
 }
 
+export interface BlobAttachmentSyncSnapshot {
+  filename: string;
+  mime: string;
+  size: number;
+  chunks: number;
+  blobs: string[];
+}
+
+export type AttachmentSyncSnapshot = InlineAttachmentSyncSnapshot | BlobAttachmentSyncSnapshot;
+
+/** An attachment snapshot may reference at most this many blobs, matching the parents cap. */
+export const MAX_ATTACHMENT_BLOBS = 256;
+const BLOB_ID_PATTERN = /^[0-9a-f]{64}$/u;
+
 interface PluginSyncSnapshot {
   manifest: PluginPackage["manifest"];
   source: string;
-  enabled: boolean;
+}
+
+interface PluginLocalStorageInput extends PluginSyncSnapshot {
+  localEnabled: boolean;
 }
 
 const PLUGIN_POLICY_OBJECT_ID = "plugin-policy";
+
+function validateOptionalDeviceId(passphrase: string, deviceId: string | undefined): string {
+  if (deviceId !== undefined && !DEVICE_ID.test(deviceId)) {
+    throw new Error("Sync device ID must be a lowercase UUID.");
+  }
+  return passphrase;
+}
+
+function sameSyncValue(left: SyncJson, right: SyncJson): boolean {
+  return canonicalSyncJson(left) === canonicalSyncJson(right);
+}
+
+/**
+ * Compare two captured storage snapshots. Two seals of the same attachment
+ * carry different blob ids by design - the AEAD nonce is fresh each time - so
+ * an attachment is compared on the identity the change already content-
+ * addresses, never on the snapshot bytes.
+ */
+function sameStorageValue(objectType: SyncObjectType, left: SyncJson, right: SyncJson): boolean {
+  if (objectType !== "attachment") return sameSyncValue(left, right);
+  if (left === null || right === null) return left === right;
+  return sameAttachmentSnapshot(left, right);
+}
+
+function noteSummary(note: NoteDocument): NoteSummary {
+  return {
+    id: note.id,
+    path: note.path,
+    title: note.title,
+    aliases: note.aliases,
+    tags: note.tags,
+    updatedAt: note.updatedAt,
+    revision: note.revision,
+  };
+}
 
 function assertUnicode(value: string, label: string): void {
   for (let index = 0; index < value.length; index += 1) {
@@ -368,9 +441,41 @@ function validateChangeAuthorization(value: unknown): SyncChangeAuthorization {
   };
 }
 
+/**
+ * The branch `parseAttachmentSnapshot` takes: a put whose attachment snapshot
+ * references blobs instead of carrying inline base64. Deliberately structural
+ * and non-throwing, because body validation has always deferred snapshot
+ * well-formedness to the reader that actually needs the bytes.
+ */
+function carriesBlobAttachmentSnapshot(mutation: SyncMutation): boolean {
+  if (mutation.objectType !== "attachment" || mutation.operation !== "put") return false;
+  const value = mutation.value;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const raw = value as Record<string, SyncJson>;
+  return raw.data === undefined && raw.blobs !== undefined;
+}
+
+/**
+ * Version 3 exists so that a client which only understands the inline
+ * attachment form refuses a blob manifest at the version check, instead of
+ * accepting the version and then choking on a snapshot shape it has never seen.
+ * It is an *authorized* version: a device with no registry has no signature to
+ * offer, so its manifest stays on the version 1 ladder, which has no version 3
+ * counterpart.
+ */
+function changeBodyVersion(mutation: SyncMutation, authorized: boolean): 1 | 2 | 3 {
+  if (!authorized) return 1;
+  return carriesBlobAttachmentSnapshot(mutation) ? 3 : 2;
+}
+
 export function validateSyncChangeBody(value: unknown): SyncChangeBody {
   const body = value as SyncChangeBody | undefined;
-  if (!body || typeof body !== "object" || Array.isArray(body) || (body.version !== 1 && body.version !== 2)) {
+  if (
+    !body ||
+    typeof body !== "object" ||
+    Array.isArray(body) ||
+    (body.version !== 1 && body.version !== 2 && body.version !== 3)
+  ) {
     throw new Error("Unsupported or invalid sync change.");
   }
   if (typeof body.deviceId !== "string" || !DEVICE_ID.test(body.deviceId)) {
@@ -418,13 +523,20 @@ export function validateSyncChangeBody(value: unknown): SyncChangeBody {
   } else {
     normalized.authorization = validateChangeAuthorization(body.authorization);
   }
+  const blobForm = carriesBlobAttachmentSnapshot(normalized.mutation);
+  if (normalized.version === 3 && !blobForm) {
+    throw new Error("A version 3 sync change must carry an attachment blob manifest.");
+  }
+  if (normalized.version === 2 && blobForm) {
+    throw new Error("An attachment blob manifest requires a version 3 sync change.");
+  }
   const bytes = Buffer.byteLength(canonicalSyncJson(normalized as unknown as SyncJson), "utf8");
   if (bytes > MAX_CHANGE_BYTES) throw new Error("Sync change exceeds 8 MiB.");
   return normalized;
 }
 
 function changeAuthorizationPayload(body: SyncChangeBody): Buffer {
-  if (body.version !== 2 || !body.authorization) {
+  if (body.version === 1 || !body.authorization) {
     throw new Error("Only version 2 sync changes have a device signature payload.");
   }
   const payload = {
@@ -459,12 +571,26 @@ function changeEncryptionKey(key: Buffer, id: string, epoch: number): Buffer {
     .digest();
 }
 
-export function sealSyncChange(body: SyncChangeBody, key: Buffer, epoch = 1): EncryptedSyncChange {
+function splitSyncKeys(keys: SyncChangeKeyMaterial): SyncChangeKeys {
+  return Buffer.isBuffer(keys)
+    ? { syncChangeKey: keys, syncEnvelopeKey: keys }
+    : keys;
+}
+
+export function sealSyncChange(
+  body: SyncChangeBody,
+  keys: SyncChangeKeyMaterial,
+  epoch = 1,
+): EncryptedSyncChange {
   if (!Number.isSafeInteger(epoch) || epoch < 1) throw new Error("A sync epoch must be a positive integer.");
   const normalized = validateSyncChangeBody(body);
   const canonical = canonicalSyncJson(normalized as unknown as SyncJson);
-  const id = changeId(normalized, key, epoch);
-  const envelopeKey = changeEncryptionKey(key, id, epoch);
+  const { syncChangeKey, syncEnvelopeKey } = splitSyncKeys(keys);
+  // A structured key pair is the keyring-native form: its identity key is
+  // intentionally epoch-independent. A bare Buffer remains the legacy API,
+  // including the old epoch-bound IDs needed to open existing fixtures.
+  const id = changeId(normalized, syncChangeKey, Buffer.isBuffer(keys) ? epoch : 1);
+  const envelopeKey = changeEncryptionKey(syncEnvelopeKey, id, epoch);
   try {
     const payload = encryptDocument(canonical, envelopeKey, syncChangeAad(id));
     return epoch === 1 ? { version: 1, id, payload } : { version: 2, id, epoch, payload };
@@ -993,7 +1119,9 @@ function signAuthorizedChange(
   }
   const unsigned: SyncChangeBody = {
     ...body,
-    version: 2,
+    // The caller already chose 2 or 3 from the mutation's shape. Only a
+    // registry-less body arrives here as version 1, and enrolling it makes it 2.
+    version: body.version === 1 ? 2 : body.version,
     authorization: { certificateSerial: record.certificate.serial, signature: Buffer.alloc(64).toString("base64") },
   };
   unsigned.authorization!.signature = crypto
@@ -1606,28 +1734,47 @@ export class SyncDeviceManager {
   }
 }
 
-export function openSyncChange(value: unknown, key: Buffer | SyncEpochKeyResolver): SyncChange {
+export function openSyncChange(
+  value: unknown,
+  key: SyncChangeKeyMaterial | SyncEpochKeyResolver,
+): SyncChange {
   const envelope = validateEnvelope(value);
   const epoch = envelope.version === 2 ? envelope.epoch! : 1;
-  let contentKey: Buffer;
+  let material: SyncChangeKeyMaterial;
   if (typeof key === "function") {
-    contentKey = key(epoch);
+    material = key(epoch);
   } else {
     if (epoch !== 1) {
       throw new Error(`Opening an epoch ${epoch} sync change requires an epoch key resolver.`);
     }
-    contentKey = key;
+    material = key;
   }
-  const envelopeKey = changeEncryptionKey(contentKey, envelope.id, epoch);
+  const { syncChangeKey, syncEnvelopeKey, legacyKey } = splitSyncKeys(material);
+  let encryptionKey = syncEnvelopeKey;
+  let envelopeKey = changeEncryptionKey(encryptionKey, envelope.id, epoch);
   let plaintext: string;
   try {
-    plaintext = decryptDocument(envelope.payload, envelopeKey, syncChangeAad(envelope.id));
+    try {
+      plaintext = decryptDocument(envelope.payload, envelopeKey, syncChangeAad(envelope.id));
+    } catch (error) {
+      if (!legacyKey || legacyKey === syncEnvelopeKey) throw error;
+      envelopeKey.fill(0);
+      encryptionKey = legacyKey;
+      envelopeKey = changeEncryptionKey(encryptionKey, envelope.id, epoch);
+      plaintext = decryptDocument(envelope.payload, envelopeKey, syncChangeAad(envelope.id));
+    }
   } finally {
     envelopeKey.fill(0);
   }
   if (Buffer.byteLength(plaintext, "utf8") > MAX_CHANGE_BYTES) throw new Error("Sync change exceeds 8 MiB.");
   const body = validateSyncChangeBody(JSON.parse(plaintext));
-  const actual = Buffer.from(changeId(body, contentKey, epoch), "hex");
+  const identityKey = encryptionKey === legacyKey ? encryptionKey : syncChangeKey;
+  const modernId = changeId(body, identityKey, Buffer.isBuffer(material) || encryptionKey === legacyKey ? epoch : 1);
+  const legacyId =
+    epoch > 1 && !Buffer.isBuffer(material)
+      ? changeId(body, syncEnvelopeKey, epoch)
+      : modernId;
+  const actual = Buffer.from(modernId === envelope.id ? modernId : legacyId, "hex");
   const expected = Buffer.from(envelope.id, "hex");
   if (!crypto.timingSafeEqual(actual, expected)) throw new Error("Sync change ID does not match its content.");
   if (plaintext !== canonicalSyncJson(body as unknown as SyncJson)) {
@@ -1658,14 +1805,42 @@ function assertSyncSnapshotSize(value: unknown, label: string): void {
   }
 }
 
+function parentFirstChanges(changes: readonly SyncChange[]): SyncChange[] {
+  const byId = new Map(changes.map((change) => [change.id, change]));
+  const ordered: SyncChange[] = [];
+  const visited = new Set<string>();
+  const visit = (change: SyncChange): void => {
+    if (visited.has(change.id)) return;
+    for (const parent of change.parents) {
+      const known = byId.get(parent);
+      if (known) visit(known);
+    }
+    visited.add(change.id);
+    ordered.push(change);
+  };
+  for (const change of [...changes].sort(
+    (left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
+  )) {
+    visit(change);
+  }
+  return ordered;
+}
+
+function prevalidateLocalCaptureSnapshot(value: unknown, label: string): SyncJson {
+  const snapshot = asSyncJson(value);
+  assertSyncSnapshotSize(snapshot, label);
+  return snapshot;
+}
+
 function noteSnapshot(note: NoteDocument): NoteSyncSnapshot {
   const snapshot: NoteSyncSnapshot = {
     path: note.path,
     title: note.title,
+    body: note.body,
     aliases: note.aliases,
     tags: note.tags,
-    updatedAt: note.updatedAt,
-    revision: note.revision,
+    properties: note.properties,
+    createdAt: note.createdAt,
   };
   if (note.frontmatterSource !== undefined) snapshot.frontmatterSource = note.frontmatterSource;
   return structuredClone(snapshot);
@@ -1681,12 +1856,33 @@ function canvasSnapshot(canvas: CanvasDocument): CanvasSyncSnapshot {
   });
 }
 
-function attachmentSnapshot(data: Buffer, info: AttachmentInfo): AttachmentSyncSnapshot {
-  return { filename: info.filename, mime: info.mime, data: data.toString("base64") };
+/** Overwrite a blob key session in place. */
+function zeroBlobSession(session: DocumentKeySession): void {
+  session.key.fill(0);
+  session.attachmentIdKey.fill(0);
+  session.syncChangeKey.fill(0);
+  session.syncEnvelopeKey.fill(0);
+}
+
+/**
+ * Capture an attachment as blob references and stage the sealed chunks the
+ * receiving device will need. The bytes never enter the change body.
+ */
+function attachmentSnapshot(
+  data: Buffer,
+  info: AttachmentInfo,
+  key: Buffer,
+  store: SyncBlobStore,
+): BlobAttachmentSyncSnapshot {
+  const { blobs, payloads } = sealAttachmentBlobs(data, info.id, key);
+  for (const [index, payload] of payloads.entries()) store.put(blobs[index], payload);
+  return { filename: info.filename, mime: info.mime, size: info.size, chunks: info.chunks, blobs };
 }
 
 function pluginSnapshot(plugin: PluginPackage): PluginSyncSnapshot {
-  return structuredClone({ manifest: plugin.manifest, source: plugin.source, enabled: plugin.enabled });
+  // Enabled/disabled is a device-local execution decision. Receiving package
+  // bytes must never cause code to become runnable on another device.
+  return structuredClone({ manifest: plugin.manifest, source: plugin.source });
 }
 
 function recordValue(value: SyncJson, label: string): Record<string, SyncJson> {
@@ -1748,20 +1944,63 @@ function parseCanvasSnapshot(value: SyncJson): CanvasSyncSnapshot {
   });
 }
 
-function parseAttachmentSnapshot(value: SyncJson): AttachmentSyncSnapshot {
+export function isBlobAttachmentSnapshot(
+  snapshot: AttachmentSyncSnapshot,
+): snapshot is BlobAttachmentSyncSnapshot {
+  return "blobs" in snapshot;
+}
+
+export function parseAttachmentSnapshot(value: SyncJson): AttachmentSyncSnapshot {
   const raw = recordValue(value, "Attachment");
-  const data = requiredString(raw.data, "Attachment sync data");
-  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(data)) {
-    throw new Error("Attachment sync data must be canonical base64.");
+  const filename = requiredString(raw.filename, "Attachment sync filename");
+  const mime = requiredString(raw.mime, "Attachment sync MIME type");
+  const hasInline = raw.data !== undefined;
+  const hasBlobs = raw.blobs !== undefined || raw.chunks !== undefined || raw.size !== undefined;
+  if (hasInline === hasBlobs) {
+    throw new Error("An attachment sync snapshot must carry exactly one of inline data or blob references.");
   }
-  if (Buffer.from(data, "base64").toString("base64") !== data) {
-    throw new Error("Attachment sync data must be canonical base64.");
+
+  if (hasInline) {
+    const data = requiredString(raw.data, "Attachment sync data");
+    if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(data)) {
+      throw new Error("Attachment sync data must be canonical base64.");
+    }
+    if (Buffer.from(data, "base64").toString("base64") !== data) {
+      throw new Error("Attachment sync data must be canonical base64.");
+    }
+    return { filename, mime, data };
   }
-  return {
-    filename: requiredString(raw.filename, "Attachment sync filename"),
-    mime: requiredString(raw.mime, "Attachment sync MIME type"),
-    data,
-  };
+
+  const { size, chunks, blobs } = raw as { size: unknown; chunks: unknown; blobs: unknown };
+  // The blob list is bounded before anything else so hostile input cannot be
+  // scanned unboundedly, and so an oversize claim is reported as the cap it
+  // breaks rather than as a size error.
+  if (!Array.isArray(blobs)) throw new Error("Attachment sync blobs must be an array.");
+  if (blobs.length > MAX_ATTACHMENT_BLOBS) {
+    throw new Error(`An attachment sync snapshot may reference at most ${MAX_ATTACHMENT_BLOBS} blobs.`);
+  }
+  for (const blob of blobs) {
+    if (typeof blob !== "string" || !BLOB_ID_PATTERN.test(blob)) {
+      throw new Error("An attachment sync blob id must be 64 lowercase hexadecimal characters.");
+    }
+  }
+  if (!Number.isSafeInteger(size) || (size as number) < 1 || (size as number) > MAX_ATTACHMENT_SIZE) {
+    throw new Error("Attachment sync size must be between 1 byte and 250 MiB.");
+  }
+  if (
+    !Number.isSafeInteger(chunks) ||
+    chunks !== blobs.length ||
+    chunks !== Math.ceil((size as number) / ATTACHMENT_CHUNK_SIZE)
+  ) {
+    throw new Error("Attachment sync chunk count must match both its blob list and its size.");
+  }
+  return { filename, mime, size: size as number, chunks: chunks as number, blobs: blobs as string[] };
+}
+
+export function sameAttachmentSnapshot(a: SyncJson, b: SyncJson): boolean {
+  const left = parseAttachmentSnapshot(a);
+  const right = parseAttachmentSnapshot(b);
+  return left.filename === right.filename && left.mime === right.mime;
 }
 
 function parsePluginSnapshot(value: SyncJson): PluginSyncSnapshot {
@@ -1769,14 +2008,22 @@ function parsePluginSnapshot(value: SyncJson): PluginSyncSnapshot {
   if (!raw.manifest || typeof raw.manifest !== "object" || Array.isArray(raw.manifest)) {
     throw new Error("Plugin sync manifest must be an object.");
   }
-  if (typeof raw.source !== "string" || typeof raw.enabled !== "boolean") {
-    throw new Error("Plugin sync snapshot has invalid source or enabled state.");
+  if (typeof raw.source !== "string") {
+    throw new Error("Plugin sync snapshot has invalid source.");
   }
   return structuredClone({
     manifest: raw.manifest as unknown as PluginPackage["manifest"],
     source: raw.source,
-    enabled: raw.enabled,
   });
+}
+
+function parsePluginLocalStorageInput(value: SyncJson): PluginLocalStorageInput {
+  const raw = recordValue(value, "Plugin storage input");
+  const snapshot = parsePluginSnapshot(value);
+  if (typeof raw.localEnabled !== "boolean") {
+    throw new Error("Plugin storage input must declare its device-local enabled state.");
+  }
+  return { ...snapshot, localEnabled: raw.localEnabled };
 }
 
 function parsePluginPolicySnapshot(value: SyncJson): PluginSecurityPolicy {
@@ -1933,6 +2180,9 @@ export class SyncChangeLog {
   close(): void {
     if (this.closed) return;
     this.session.key.fill(0);
+    this.session.attachmentIdKey.fill(0);
+    this.session.syncChangeKey.fill(0);
+    this.session.syncEnvelopeKey.fill(0);
     this.closed = true;
   }
 
@@ -1944,8 +2194,14 @@ export class SyncChangeLog {
   private epochResolver(): SyncEpochKeyResolver {
     const vaultKey = this.key();
     const rootDir = this.session.rootDir;
-    return (epoch: number): Buffer => {
-      if (epoch === 1) return vaultKey;
+    return (epoch: number): SyncChangeKeyMaterial => {
+      if (epoch === 1) {
+        return {
+          syncChangeKey: this.session.syncChangeKey,
+          syncEnvelopeKey: this.session.syncEnvelopeKey,
+          legacyKey: vaultKey,
+        };
+      }
       const key = readEpochKey(rootDir, vaultKey, epoch);
       if (!key) {
         throw new Error(
@@ -2004,6 +2260,26 @@ export class SyncChangeLog {
     this.saveAppliedState(state);
   }
 
+  change(changeId: string): SyncChange | undefined {
+    if (!CHANGE_ID.test(changeId)) throw new Error("Invalid sync change ID.");
+    return this.changes().find((candidate) => candidate.id === changeId);
+  }
+
+  markPreparedLocalChangesApplied(envelopes: readonly EncryptedSyncChange[]): void {
+    const known = new Map(this.changes().map((change) => [change.id, change]));
+    const state = this.readAppliedState();
+    for (const envelope of envelopes) {
+      const change = known.get(envelope.id);
+      if (!change) throw new Error(`Cannot mark an unknown sync change as applied: ${envelope.id}`);
+      state.objects[objectKey(change)] = {
+        changeId: change.id,
+        revision: change.mutation.revision,
+        operation: change.mutation.operation,
+      };
+    }
+    this.saveAppliedState(state);
+  }
+
   private readEnvelopes(): EncryptedSyncChange[] {
     this.key();
     assertNoSymlinkComponents(this.session.rootDir, this.changesDir);
@@ -2044,9 +2320,7 @@ export class SyncChangeLog {
     const changes = this.readEnvelopes().map((envelope) => openSyncChange(envelope, this.epochResolver()));
     validateChangeSet(changes);
     validateAuthorizedChanges(changes, readDeviceRegistry(this.session.rootDir, this.key()));
-    return changes.sort(
-      (left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
-    );
+    return parentFirstChanges(changes);
   }
 
   verify(): SyncVerification {
@@ -2081,6 +2355,49 @@ export class SyncChangeLog {
     }
   }
 
+  prepareLocalChanges(
+    deviceId: string,
+    mutations: readonly SyncMutation[],
+    createdAt = new Date().toISOString(),
+  ): EncryptedSyncChange[] {
+    const current = this.changes();
+    const prepared: EncryptedSyncChange[] = [];
+    const registry = readDeviceRegistry(this.session.rootDir, this.key());
+    for (const mutation of mutations) {
+      const verification = validateChangeSet(current);
+      const previous = current
+        .filter((change) => change.deviceId === deviceId)
+        .sort((left, right) => left.sequence - right.sequence)
+        .at(-1);
+      const parents = [...new Set([...verification.heads, ...(previous ? [previous.id] : [])])].sort();
+      const unsigned: Omit<SyncChangeBody, "authorization"> = {
+        version: changeBodyVersion(mutation, Boolean(registry)),
+        deviceId,
+        sequence: (previous?.sequence ?? 0) + 1,
+        previousDeviceChange: previous?.id ?? null,
+        parents,
+        createdAt,
+        mutation,
+      };
+      const body = registry
+        ? signAuthorizedChange(unsigned, registry, this.session.rootDir, this.key())
+        : validateSyncChangeBody(unsigned);
+      const epoch = registry?.body.epoch ?? 1;
+      const contentKey = epoch === 1 ? this.key() : this.epochResolver()(epoch);
+      const envelope = sealSyncChange(body, contentKey, epoch);
+      const change = openSyncChange(envelope, this.epochResolver());
+      current.push(change);
+      validateChangeSet(current);
+      validateAuthorizedChanges(current, registry);
+      prepared.push(envelope);
+    }
+    return prepared;
+  }
+
+  installPreparedLocalChanges(envelopes: readonly EncryptedSyncChange[]): void {
+    this.import(envelopes);
+  }
+
   append(deviceId: string, mutation: SyncMutation, createdAt = new Date().toISOString()): SyncChange {
     return withVaultLock(this.vaultDir, () => {
       const current = this.changes();
@@ -2092,7 +2409,7 @@ export class SyncChangeLog {
       const parents = [...new Set([...verification.heads, ...(previous ? [previous.id] : [])])].sort();
       const registry = readDeviceRegistry(this.session.rootDir, this.key());
       const unsigned: Omit<SyncChangeBody, "authorization"> = {
-        version: registry ? 2 : 1,
+        version: changeBodyVersion(mutation, Boolean(registry)),
         deviceId,
         sequence: (previous?.sequence ?? 0) + 1,
         previousDeviceChange: previous?.id ?? null,
@@ -2152,6 +2469,25 @@ export class SyncChangeLog {
   resolve(objectType: SyncObjectType, objectId: string): SyncResolution {
     return resolveSyncObject(this.changes(), objectType, objectId);
   }
+
+  conflicts(): SyncResolution[] {
+    const changes = this.changes();
+    const objects = new Map<string, { objectType: SyncObjectType; objectId: string }>();
+    for (const change of changes) {
+      const key = objectKey(change);
+      objects.set(key, {
+        objectType: change.mutation.objectType,
+        objectId: change.mutation.objectId,
+      });
+    }
+    return [...objects.values()]
+      .map(({ objectType, objectId }) => resolveSyncObject(changes, objectType, objectId))
+      .filter((resolution) => resolution.status === "conflict")
+      .sort(
+        (left, right) =>
+          left.objectType.localeCompare(right.objectType) || left.objectId.localeCompare(right.objectId),
+      );
+  }
 }
 
 /**
@@ -2164,6 +2500,14 @@ export class SyncedDocumentVault extends DocumentVault {
   readonly changeLog: SyncChangeLog;
   private readonly localTransaction: SyncLocalTransaction;
   private readonly applyEngine: SyncApplyEngine;
+  private readonly blobStore: SyncBlobStore;
+  /**
+   * A key session of this class own, used only to seal and open attachment
+   * blobs. `DocumentVault.session` is private, so a subclass cannot borrow it;
+   * the keyring caches unwrapped material per process, so this is a copy
+   * rather than a second passphrase derivation. Zeroed by `lock()`.
+   */
+  private readonly blobSession: DocumentKeySession;
   private syncClosed = false;
 
   constructor(
@@ -2176,12 +2520,16 @@ export class SyncedDocumentVault extends DocumentVault {
     const changeLog = new SyncChangeLog(syncVaultDir, passphrase);
     let localTransaction: SyncLocalTransaction | undefined;
     let applyEngine: SyncApplyEngine | undefined;
+    let blobSession: DocumentKeySession | undefined;
     try {
       localTransaction = new SyncLocalTransaction(syncVaultDir, passphrase, transactionOptions);
       applyEngine = new SyncApplyEngine(new SyncApplyReceiptStore(syncVaultDir, passphrase, transactionOptions));
+      blobSession = openDocumentKey(syncVaultDir, passphrase);
       this.changeLog = changeLog;
       this.localTransaction = localTransaction;
       this.applyEngine = applyEngine;
+      this.blobSession = blobSession;
+      this.blobStore = new SyncBlobStore(syncVaultDir);
       withVaultLock(this.syncVaultDir, () => {
         this.localTransaction.recover(this.transactionEffects());
         this.applyEngine.recover(this.applyEffects());
@@ -2190,6 +2538,7 @@ export class SyncedDocumentVault extends DocumentVault {
       // later rejected local preflight can then remain byte-for-byte read-only.
       super.list();
     } catch (error) {
+      if (blobSession) zeroBlobSession(blobSession);
       applyEngine?.close();
       localTransaction?.close();
       changeLog.close();
@@ -2200,6 +2549,7 @@ export class SyncedDocumentVault extends DocumentVault {
 
   override lock(): void {
     if (!this.syncClosed) {
+      zeroBlobSession(this.blobSession);
       this.applyEngine.close();
       this.localTransaction.close();
       this.changeLog.close();
@@ -2242,10 +2592,102 @@ export class SyncedDocumentVault extends DocumentVault {
     }
   }
 
-  private appendLocal(
-    objectType: SyncObjectType,
-    objectId: string,
-    operation: SyncOperation,
+  private transactionEffects(): SyncTransactionEffects {
+    return {
+      writeStorage: (operations) => this.writeLocalStorage(operations),
+      installEnvelopes: (changes) => this.changeLog.installPreparedLocalChanges(changes),
+      writeCursor: (changes) => this.changeLog.markPreparedLocalChangesApplied(changes),
+    };
+  }
+
+  private planLocalChanges(
+    deviceId: string,
+    operations: readonly SyncLocalStorageOperation[],
+  ): EncryptedSyncChange[] {
+    const current = this.changeLog.changes();
+    const revisions = new Map<string, number | null>();
+    const mutations: SyncMutation[] = [];
+    for (const operation of operations) {
+      const key = `${operation.objectType}\0${operation.objectId}`;
+      let revision = revisions.get(key);
+      if (revision === undefined) {
+        const resolution = resolveSyncObject(current, operation.objectType, operation.objectId);
+        revision = resolution.winner?.mutation.revision ?? null;
+      }
+      if (revision === null && operation.beforeValue !== null) {
+        mutations.push({
+          objectType: operation.objectType,
+          objectId: operation.objectId,
+          operation: "put",
+          baseRevision: null,
+          revision: 1,
+          value: operation.beforeValue,
+        });
+        revision = 1;
+        if (
+          operation.objectType === "attachment" &&
+          operation.operation === "put" &&
+          operation.targetValue !== null &&
+          sameAttachmentSnapshot(operation.beforeValue, operation.targetValue)
+        ) {
+          revisions.set(key, revision);
+          continue;
+        }
+      }
+      const targetRevision = (revision ?? 0) + 1;
+      mutations.push({
+        objectType: operation.objectType,
+        objectId: operation.objectId,
+        operation: operation.operation,
+        baseRevision: revision,
+        revision: targetRevision,
+        value: operation.targetValue,
+      });
+      revisions.set(key, targetRevision);
+    }
+    return this.changeLog.prepareLocalChanges(deviceId, mutations);
+  }
+
+  private runLocalTransaction(
+    deviceId: string,
+    operations: readonly SyncLocalStorageOperation[],
+  ): void {
+    const changes = this.planLocalChanges(deviceId, operations);
+    this.localTransaction.run({ deviceId, operations: [...operations], changes }, this.transactionEffects());
+  }
+
+  private noteOperation(document: NoteDocument, before: NoteDocument | undefined): SyncLocalStorageOperation {
+    const targetValue = prevalidateLocalCaptureSnapshot(noteSnapshot(document), "Note snapshot");
+    return {
+      objectType: "note",
+      objectId: document.id,
+      operation: "put",
+      input: targetValue,
+      beforeStorageRevision: before?.revision ?? null,
+      targetStorageRevision: document.revision,
+      beforeValue: before ? prevalidateLocalCaptureSnapshot(noteSnapshot(before), "Note snapshot") : null,
+      targetValue,
+    };
+  }
+
+  private canvasOperation(document: CanvasDocument, before: CanvasDocument | undefined): SyncLocalStorageOperation {
+    const targetValue = prevalidateLocalCaptureSnapshot(canvasSnapshot(document), "Canvas snapshot");
+    return {
+      objectType: "canvas",
+      objectId: document.id,
+      operation: "put",
+      input: targetValue,
+      beforeStorageRevision: before?.revision ?? null,
+      targetStorageRevision: document.revision,
+      beforeValue: before ? prevalidateLocalCaptureSnapshot(canvasSnapshot(before), "Canvas snapshot") : null,
+      targetValue,
+    };
+  }
+
+  private laterDocumentTargetMatches(
+    operations: readonly SyncLocalStorageOperation[],
+    index: number,
+    revision: number,
     value: SyncJson,
   ): boolean {
     return operations
@@ -2260,12 +2702,33 @@ export class SyncedDocumentVault extends DocumentVault {
       );
   }
 
+  private appendLocal(
+    objectType: SyncObjectType,
+    objectId: string,
+    operation: SyncOperation,
+    value: SyncJson,
+  ): SyncChange {
+    const resolution = this.changeLog.resolve(objectType, objectId);
+    const baseRevision = resolution.winner?.mutation.revision ?? null;
+    return this.changeLog.append(this.localDeviceId(), {
+      objectType,
+      objectId,
+      operation,
+      baseRevision,
+      revision: (baseRevision ?? 0) + 1,
+      value,
+    });
+  }
+
   private assertExpectedDocumentState(
     operation: SyncLocalStorageOperation,
     currentRevision: number | null,
     currentValue: SyncJson,
   ): void {
-    if (currentRevision !== operation.beforeStorageRevision || !sameSyncValue(currentValue, operation.beforeValue)) {
+    if (
+      currentRevision !== operation.beforeStorageRevision ||
+      !sameStorageValue(operation.objectType, currentValue, operation.beforeValue)
+    ) {
       throw new Error(`Live ${operation.objectType} state does not match its pending sync transaction.`);
     }
   }
@@ -2338,32 +2801,94 @@ export class SyncedDocumentVault extends DocumentVault {
         continue;
       }
 
+      if (operation.objectType === "plugin") {
+        const current = this.tryPlugin(operation.objectId);
+        const currentValue = current ? asSyncJson(pluginSnapshot(current)) : null;
+        if (operation.operation === "delete") {
+          if (!current) continue;
+          this.assertExpectedDocumentState(operation, current.revision, currentValue);
+          super.removePlugin(current.id);
+          continue;
+        }
+        if (
+          current &&
+          current.revision === operation.targetStorageRevision &&
+          sameSyncValue(currentValue, operation.targetValue)
+        ) {
+          continue;
+        }
+        if (current && this.laterDocumentTargetMatches(operations, index, current.revision, currentValue)) continue;
+        this.assertExpectedDocumentState(operation, current?.revision ?? null, currentValue);
+        const target = parsePluginSnapshot(operation.targetValue);
+        const input = parsePluginLocalStorageInput(operation.input);
+        if (
+          !sameSyncValue(
+            asSyncJson(target),
+            asSyncJson({ manifest: input.manifest, source: input.source }),
+          )
+        ) {
+          throw new Error("Plugin storage input does not match its portable sync snapshot.");
+        }
+        const written = super.installPlugin({
+          manifest: input.manifest,
+          source: input.source,
+          enabled: input.localEnabled,
+          baseRevision: (operation.targetStorageRevision ?? 1) - 1,
+        });
+        if (
+          written.revision !== operation.targetStorageRevision ||
+          !sameSyncValue(asSyncJson(pluginSnapshot(written)), operation.targetValue)
+        ) {
+          throw new Error("A prepared plugin write did not materialize its intended state.");
+        }
+        continue;
+      }
+
+      if (operation.objectType === "vault") {
+        if (operation.objectId !== PLUGIN_POLICY_OBJECT_ID || operation.operation !== "put") {
+          throw new Error("Unsupported synchronized vault storage operation.");
+        }
+        const current = super.pluginSecurityPolicy();
+        const currentValue = asSyncJson(current);
+        if (sameSyncValue(currentValue, operation.targetValue)) continue;
+        this.assertExpectedDocumentState(operation, null, currentValue);
+        const policy = parsePluginPolicySnapshot(operation.targetValue);
+        super.savePluginPolicy(policy);
+        for (const summary of super.listPlugins()) {
+          const plugin = super.getPlugin(summary.id);
+          if (plugin.enabled && plugin.signature && policy.revokedSigners.includes(plugin.signature.keyId)) {
+            super.setPluginEnabled(plugin.id, false);
+          }
+        }
+        continue;
+      }
+
       const existing = super.listAttachments().some((item) => item.id === operation.objectId)
         ? super.getAttachment(operation.objectId)
         : undefined;
-      const currentValue = existing ? asSyncJson(attachmentSnapshot(existing.data, existing.info)) : null;
+      const currentValue = existing
+        ? asSyncJson(attachmentSnapshot(existing.data, existing.info, this.blobSession.key, this.blobStore))
+        : null;
       if (operation.operation === "delete") {
         if (!existing) continue;
         this.assertExpectedDocumentState(operation, null, currentValue);
         super.removeAttachment(operation.objectId);
         continue;
       }
-      if (existing && sameSyncValue(currentValue, operation.targetValue)) continue;
+      if (
+        existing &&
+        currentValue !== null &&
+        operation.targetValue !== null &&
+        sameAttachmentSnapshot(currentValue, operation.targetValue)
+      ) {
+        continue;
+      }
       this.assertExpectedDocumentState(operation, null, currentValue);
-      const snapshot = parseAttachmentSnapshot(operation.targetValue);
-      const info = super.putAttachment(Buffer.from(snapshot.data, "base64"), snapshot.filename, snapshot.mime);
+      const info = super.putAttachment(
+        ...this.attachmentFromSnapshot(operation.objectId, operation.targetValue),
+      );
       if (info.id !== operation.objectId) throw new Error("Attachment sync snapshot does not match its content ID.");
     }
-  }
-
-  private ensurePluginBaseline(plugin: PluginPackage): void {
-    if (this.changeLog.resolve("plugin", plugin.manifest.id).status !== "missing") return;
-    this.appendLocal("plugin", plugin.manifest.id, "put", asSyncJson(pluginSnapshot(plugin)));
-  }
-
-  private ensurePluginPolicyBaseline(policy: PluginSecurityPolicy): void {
-    if (this.changeLog.resolve("vault", PLUGIN_POLICY_OBJECT_ID).status !== "missing") return;
-    this.appendLocal("vault", PLUGIN_POLICY_OBJECT_ID, "put", asSyncJson(policy));
   }
 
   override put(input: NoteInput): NoteDocument {
@@ -2444,16 +2969,11 @@ export class SyncedDocumentVault extends DocumentVault {
 
   override putAttachment(data: Buffer, filename: string, mime = "application/octet-stream"): AttachmentInfo {
     const deviceId = this.localDeviceId();
-    if (data.length > MAX_SYNC_ATTACHMENT_BYTES) {
-      throw new Error(
-        `A synchronized attachment cannot exceed ${MAX_SYNC_ATTACHMENT_BYTES} bytes until blob transport is available.`,
-      );
-    }
     return withVaultLock(this.syncVaultDir, () => {
       const prepared = this.prepareAttachmentPut(data, filename, mime);
       const before = prepared.existed ? super.getAttachment(prepared.info.id) : undefined;
       const targetValue = prevalidateLocalCaptureSnapshot(
-        attachmentSnapshot(prepared.data, prepared.info),
+        attachmentSnapshot(prepared.data, prepared.info, this.blobSession.key, this.blobStore),
         "Attachment snapshot",
       );
       const resolution = this.changeLog.resolve("attachment", prepared.info.id);
@@ -2468,7 +2988,10 @@ export class SyncedDocumentVault extends DocumentVault {
         beforeStorageRevision: null,
         targetStorageRevision: null,
         beforeValue: before
-          ? prevalidateLocalCaptureSnapshot(attachmentSnapshot(before.data, before.info), "Attachment snapshot")
+          ? prevalidateLocalCaptureSnapshot(
+              attachmentSnapshot(before.data, before.info, this.blobSession.key, this.blobStore),
+              "Attachment snapshot",
+            )
           : null,
         targetValue,
       };
@@ -2482,7 +3005,7 @@ export class SyncedDocumentVault extends DocumentVault {
     return withVaultLock(this.syncVaultDir, () => {
       const attachment = super.getAttachment(id);
       const beforeValue = prevalidateLocalCaptureSnapshot(
-        attachmentSnapshot(attachment.data, attachment.info),
+        attachmentSnapshot(attachment.data, attachment.info, this.blobSession.key, this.blobStore),
         "Attachment snapshot",
       );
       const operation: SyncLocalStorageOperation = {
@@ -2506,76 +3029,145 @@ export class SyncedDocumentVault extends DocumentVault {
     enabled?: boolean;
     baseRevision?: number;
   }): PluginPackage {
+    const deviceId = this.localDeviceId();
     return withVaultLock(this.syncVaultDir, () => {
-      const manifestId =
-        input.manifest && typeof input.manifest === "object" && !Array.isArray(input.manifest)
-          ? String((input.manifest as { id?: unknown }).id ?? "")
-          : "";
-      const existing = manifestId ? this.tryPlugin(manifestId) : undefined;
-      if (existing) this.ensurePluginBaseline(existing);
-      const plugin = super.installPlugin(input);
-      this.appendLocal("plugin", plugin.manifest.id, "put", asSyncJson(pluginSnapshot(plugin)));
-      return plugin;
+      const prepared = this.preparePluginInstall(input);
+      const existing = this.tryPlugin(prepared.manifest.id);
+      const targetValue = prevalidateLocalCaptureSnapshot(pluginSnapshot(prepared), "Plugin snapshot");
+      const storageInput = prevalidateLocalCaptureSnapshot(
+        { ...pluginSnapshot(prepared), localEnabled: prepared.enabled },
+        "Plugin storage input",
+      );
+      const operation: SyncLocalStorageOperation = {
+        objectType: "plugin",
+        objectId: prepared.manifest.id,
+        operation: "put",
+        input: storageInput,
+        beforeStorageRevision: existing?.revision ?? null,
+        targetStorageRevision: prepared.revision,
+        beforeValue: existing
+          ? prevalidateLocalCaptureSnapshot(pluginSnapshot(existing), "Plugin snapshot")
+          : null,
+        targetValue,
+      };
+      this.runLocalTransaction(deviceId, [operation]);
+      return super.getPlugin(prepared.manifest.id);
     });
   }
 
   override setPluginEnabled(reference: string, enabled: boolean): PluginSummary {
-    return withVaultLock(this.syncVaultDir, () => {
-      const current = super.getPlugin(reference);
-      this.ensurePluginBaseline(current);
-      const summary = super.setPluginEnabled(reference, enabled);
-      const plugin = super.getPlugin(summary.id);
-      this.appendLocal("plugin", plugin.manifest.id, "put", asSyncJson(pluginSnapshot(plugin)));
-      return summary;
-    });
+    // Execution consent is intentionally local and absent from the sync DAG.
+    return super.setPluginEnabled(reference, enabled);
   }
 
   override removePlugin(reference: string): PluginSummary {
+    const deviceId = this.localDeviceId();
     return withVaultLock(this.syncVaultDir, () => {
       const current = super.getPlugin(reference);
-      this.ensurePluginBaseline(current);
-      const summary = super.removePlugin(reference);
-      this.appendLocal("plugin", current.manifest.id, "delete", null);
+      const summary = super.listPlugins().find((candidate) => candidate.id === current.id);
+      if (!summary) throw new Error(`Plugin not found: ${reference}`);
+      const beforeValue = prevalidateLocalCaptureSnapshot(pluginSnapshot(current), "Plugin snapshot");
+      const operation: SyncLocalStorageOperation = {
+        objectType: "plugin",
+        objectId: current.manifest.id,
+        operation: "delete",
+        input: null,
+        beforeStorageRevision: current.revision,
+        targetStorageRevision: null,
+        beforeValue,
+        targetValue: null,
+      };
+      this.runLocalTransaction(deviceId, [operation]);
       return summary;
     });
   }
 
   override setPluginRestrictedMode(restrictedMode: boolean): PluginSecurityPolicy {
+    const deviceId = this.localDeviceId();
     return withVaultLock(this.syncVaultDir, () => {
-      this.ensurePluginPolicyBaseline(super.pluginSecurityPolicy());
-      const policy = super.setPluginRestrictedMode(restrictedMode);
-      this.appendLocal("vault", PLUGIN_POLICY_OBJECT_ID, "put", asSyncJson(policy));
+      const previous = super.pluginSecurityPolicy();
+      const policy = { ...previous, restrictedMode };
+      this.runLocalTransaction(deviceId, [{
+        objectType: "vault",
+        objectId: PLUGIN_POLICY_OBJECT_ID,
+        operation: "put",
+        input: asSyncJson(policy),
+        beforeStorageRevision: null,
+        targetStorageRevision: null,
+        beforeValue: asSyncJson(previous),
+        targetValue: asSyncJson(policy),
+      }]);
       return policy;
     });
   }
 
   override revokePluginSigner(reference: string): PluginSecurityPolicy {
+    const deviceId = this.localDeviceId();
     return withVaultLock(this.syncVaultDir, () => {
-      this.ensurePluginPolicyBaseline(super.pluginSecurityPolicy());
-      const policy = super.revokePluginSigner(reference);
-      this.appendLocal("vault", PLUGIN_POLICY_OBJECT_ID, "put", asSyncJson(policy));
+      const plugin = super.getPlugin(reference);
+      if (!plugin.signature) throw new Error("An unsigned plugin has no signer to revoke.");
+      const previous = super.pluginSecurityPolicy();
+      const policy = {
+        ...previous,
+        revokedSigners: [...new Set([...previous.revokedSigners, plugin.signature.keyId])].sort(),
+      };
+      this.runLocalTransaction(deviceId, [{
+        objectType: "vault",
+        objectId: PLUGIN_POLICY_OBJECT_ID,
+        operation: "put",
+        input: asSyncJson(policy),
+        beforeStorageRevision: null,
+        targetStorageRevision: null,
+        beforeValue: asSyncJson(previous),
+        targetValue: asSyncJson(policy),
+      }]);
       return policy;
     });
   }
 
   override restorePluginSigner(keyId: string): PluginSecurityPolicy {
+    const deviceId = this.localDeviceId();
     return withVaultLock(this.syncVaultDir, () => {
-      this.ensurePluginPolicyBaseline(super.pluginSecurityPolicy());
-      const policy = super.restorePluginSigner(keyId);
-      this.appendLocal("vault", PLUGIN_POLICY_OBJECT_ID, "put", asSyncJson(policy));
+      const normalized = keyId.trim().toLowerCase();
+      if (!/^[a-f0-9]{64}$/u.test(normalized)) throw new Error("Invalid plugin signer key ID.");
+      const previous = super.pluginSecurityPolicy();
+      const policy = {
+        ...previous,
+        revokedSigners: previous.revokedSigners.filter((entry) => entry !== normalized),
+      };
+      this.runLocalTransaction(deviceId, [{
+        objectType: "vault",
+        objectId: PLUGIN_POLICY_OBJECT_ID,
+        operation: "put",
+        input: asSyncJson(policy),
+        beforeStorageRevision: null,
+        targetStorageRevision: null,
+        beforeValue: asSyncJson(previous),
+        targetValue: asSyncJson(policy),
+      }]);
       return policy;
     });
   }
 
-  private isAncestor(changes: Map<string, SyncChange>, ancestor: string, descendant: string): boolean {
-    const pending = [...(changes.get(descendant)?.parents ?? [])];
-    const seen = new Set<string>();
-    while (pending.length > 0) {
-      const id = pending.pop()!;
-      if (id === ancestor) return true;
-      if (seen.has(id)) continue;
-      seen.add(id);
-      pending.push(...(changes.get(id)?.parents ?? []));
+  private expectedRemoteLive(change: SyncChange): SyncApplyLiveIdentity {
+    const { objectType, objectId, operation } = change.mutation;
+    if (operation === "delete") return { objectId, storageRevision: null };
+    if (objectType === "note") return { objectId, storageRevision: (this.tryNote(objectId)?.revision ?? 0) + 1 };
+    if (objectType === "canvas") return { objectId, storageRevision: (this.tryCanvas(objectId)?.revision ?? 0) + 1 };
+    if (objectType === "plugin") return { objectId, storageRevision: (this.tryPlugin(objectId)?.revision ?? 0) + 1 };
+    return { objectId, storageRevision: null };
+  }
+
+  private remoteChangeMaterialized(change: SyncChange, receipt: SyncApplyReceipt): boolean {
+    const { objectType, objectId, operation, value } = change.mutation;
+    if (objectType === "note") {
+      const current = this.tryNote(objectId);
+      return operation === "delete"
+        ? !current
+        : !!current &&
+            current.id === receipt.expectedLive.objectId &&
+            current.revision === receipt.expectedLive.storageRevision &&
+            sameSyncValue(asSyncJson(noteSnapshot(current)), value);
     }
     if (objectType === "canvas") {
       const current = this.tryCanvas(objectId);
@@ -2593,10 +3185,73 @@ export class SyncedDocumentVault extends DocumentVault {
       const attachment = super.getAttachment(objectId);
       return (
         attachment.info.id === receipt.expectedLive.objectId &&
-        sameSyncValue(asSyncJson(attachmentSnapshot(attachment.data, attachment.info)), value)
+        value !== null &&
+        sameAttachmentSnapshot(
+          asSyncJson(attachmentSnapshot(attachment.data, attachment.info, this.blobSession.key, this.blobStore)),
+          value,
+        )
       );
     }
-    throw new Error(`Live sync application is not implemented for ${objectType} objects.`);
+    if (objectType === "plugin") {
+      const current = this.tryPlugin(objectId);
+      return operation === "delete"
+        ? !current
+        : !!current &&
+            current.revision === receipt.expectedLive.storageRevision &&
+            sameSyncValue(asSyncJson(pluginSnapshot(current)), value);
+    }
+    if (objectType === "vault" && objectId === PLUGIN_POLICY_OBJECT_ID && operation === "put") {
+      return sameSyncValue(asSyncJson(super.pluginSecurityPolicy()), value);
+    }
+    return false;
+  }
+
+  /** Refuse a reassembly that would be partial, naming how much is absent. */
+  private assertBlobsStaged(snapshot: BlobAttachmentSyncSnapshot): void {
+    const missing = this.blobStore.missing(snapshot.blobs);
+    if (missing.length > 0) {
+      throw new Error(`${missing.length} of ${snapshot.blobs.length} attachment chunks are missing.`);
+    }
+    const corrupt = this.blobStore.corrupt(snapshot.blobs);
+    if (corrupt.length > 0) {
+      throw new Error(`${corrupt.length} of ${snapshot.blobs.length} attachment chunks are corrupt.`);
+    }
+  }
+
+  /**
+   * Refuse a remote attachment change whose chunks have not arrived, before a
+   * receipt exists for it. A receipt written first would be rolled forward on
+   * every later unlock and fail there too, leaving the vault unopenable until
+   * the blobs turned up.
+   */
+  private assertRemoteChangeIsStaged(change: SyncChange): void {
+    const { objectType, operation, value } = change.mutation;
+    if (objectType !== "attachment" || operation === "delete") return;
+    const snapshot = parseAttachmentSnapshot(value);
+    if (isBlobAttachmentSnapshot(snapshot)) this.assertBlobsStaged(snapshot);
+  }
+
+  /**
+   * Materialize the plaintext an attachment snapshot stands for, as the
+   * argument tuple `putAttachment` takes. A blob-form snapshot is reassembled
+   * from the local blob store and a missing chunk fails closed, so a partial
+   * attachment is never written. `objectId` is passed as the attachment id, so
+   * a relay that reorders chunks or substitutes one from another attachment
+   * fails the AEAD AAD check before the content-address check is reached.
+   */
+  private attachmentFromSnapshot(objectId: string, value: SyncJson): [Buffer, string, string] {
+    const snapshot = parseAttachmentSnapshot(value);
+    if (!isBlobAttachmentSnapshot(snapshot)) {
+      return [Buffer.from(snapshot.data, "base64"), snapshot.filename, snapshot.mime];
+    }
+    this.assertBlobsStaged(snapshot);
+    const data = Buffer.concat(
+      snapshot.blobs.map((id, index) =>
+        openAttachmentBlob(this.blobStore.read(id), objectId, index, this.blobSession.key),
+      ),
+    );
+    if (data.length !== snapshot.size) throw new Error("Attachment sync size does not match its blobs.");
+    return [data, snapshot.filename, snapshot.mime];
   }
 
   private applyStorageChange(change: SyncChange): void {
@@ -2626,8 +3281,7 @@ export class SyncedDocumentVault extends DocumentVault {
         if (super.listAttachments().some((item) => item.id === objectId)) super.removeAttachment(objectId);
         return;
       }
-      const snapshot = parseAttachmentSnapshot(value);
-      const info = super.putAttachment(Buffer.from(snapshot.data, "base64"), snapshot.filename, snapshot.mime);
+      const info = super.putAttachment(...this.attachmentFromSnapshot(objectId, value));
       if (info.id !== objectId) throw new Error("Attachment sync snapshot does not match its content ID.");
       return;
     }
@@ -2644,7 +3298,7 @@ export class SyncedDocumentVault extends DocumentVault {
       super.installPlugin({
         manifest: snapshot.manifest,
         source: snapshot.source,
-        enabled: snapshot.enabled,
+        enabled: false,
         ...(existing ? { baseRevision: existing.revision } : {}),
       });
       return;
@@ -2654,6 +3308,19 @@ export class SyncedDocumentVault extends DocumentVault {
       return;
     }
     throw new Error(`Live sync application is not implemented for ${objectType} objects.`);
+  }
+
+  private applyEffects(): SyncApplyEffects {
+    return {
+      // `src/sync/engine.ts` types its change through the extracted
+      // `src/sync/protocol.ts`, whose body version is still `1 | 2`. A version 3
+      // body is structurally identical, so the widening stays at this boundary.
+      findChange: (changeId) => this.changeLog.change(changeId) as ReturnType<SyncApplyEffects["findChange"]>,
+      expectedLive: (change) => this.expectedRemoteLive(change),
+      isMaterialized: (change, receipt) => this.remoteChangeMaterialized(change, receipt),
+      writeStorage: (change) => this.applyStorageChange(change),
+      writeCursor: (change) => this.changeLog.markApplied(change),
+    };
   }
 
   applyResolved(objectType: SyncObjectType, objectId: string): SyncApplyResult {
@@ -2687,7 +3354,14 @@ export class SyncedDocumentVault extends DocumentVault {
         };
       }
 
-      const planned = planSyncApplication(this.changeLog.changes(), objectType, objectId, winner, applied);
+      const planned = planSyncApplication(
+        this.changeLog.changes() as Parameters<typeof planSyncApplication>[0],
+        objectType,
+        objectId,
+        winner as Parameters<typeof planSyncApplication>[3],
+        applied,
+      );
+      for (const next of planned) this.assertRemoteChangeIsStaged(next);
       let appliedCount = 0;
       for (const next of planned) {
         this.applyEngine.apply(next, this.applyEffects());
@@ -2701,6 +3375,59 @@ export class SyncedDocumentVault extends DocumentVault {
         applied: appliedCount,
         alreadyApplied: false,
       };
+    });
+  }
+
+  listConflicts(): SyncResolution[] {
+    return this.changeLog.conflicts();
+  }
+
+  /**
+   * Resolve an explicit head, or safely union a concurrent plugin policy.
+   * No other object type receives a guessed winner: note/canvas/attachment and
+   * plugin package conflicts require the caller to name one preserved head.
+   */
+  resolveConflict(
+    objectType: SyncObjectType,
+    objectId: string,
+    selectedHeadId?: string,
+  ): SyncApplyResult {
+    this.localDeviceId();
+    return withVaultLock(this.syncVaultDir, () => {
+      const resolution = this.changeLog.resolve(objectType, objectId);
+      if (resolution.status !== "conflict" || !resolution.winner) {
+        throw new Error(`No unresolved sync conflict exists for ${objectType}:${objectId}.`);
+      }
+
+      let operation: SyncOperation;
+      let value: SyncJson;
+      if (selectedHeadId !== undefined) {
+        if (!resolution.heads.includes(selectedHeadId)) {
+          throw new Error("The selected change is not one of the current conflict heads.");
+        }
+        const selected = this.changeLog.change(selectedHeadId)!;
+        operation = selected.mutation.operation;
+        value = selected.mutation.value;
+      } else if (objectType === "vault" && objectId === PLUGIN_POLICY_OBJECT_ID) {
+        const policies = resolution.heads.map((head) => {
+          const change = this.changeLog.change(head)!;
+          if (change.mutation.operation !== "put") {
+            throw new Error("A plugin policy deletion cannot be merged automatically.");
+          }
+          return parsePluginPolicySnapshot(change.mutation.value);
+        });
+        operation = "put";
+        value = asSyncJson({
+          version: 1,
+          restrictedMode: policies.some((policy) => policy.restrictedMode),
+          revokedSigners: [...new Set(policies.flatMap((policy) => policy.revokedSigners))].sort(),
+        });
+      } else {
+        throw new Error("This conflict requires an explicit current head selection.");
+      }
+
+      this.appendLocal(objectType, objectId, operation, value);
+      return this.applyResolved(objectType, objectId);
     });
   }
 }

@@ -5,7 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { startSyncRelay, SyncRelayClient } from "../dist/sync-relay.js";
+import { SyncBlobStore } from "../dist/sync-blobs.js";
+import { attachmentBlobIds, startSyncRelay, SyncRelayClient } from "../dist/sync-relay.js";
 import { SyncChangeLog, SyncDeviceManager } from "../dist/sync.js";
 
 const PASSPHRASE = "relay-test-passphrase";
@@ -114,6 +115,158 @@ test("relay byte and object quotas reject additional data without partial writes
     log.close();
     manager.close();
     fs.rmSync(vaultDir, { recursive: true, force: true });
+    fs.rmSync(storageDir, { recursive: true, force: true });
+  }
+});
+
+test("the relay stores blobs only under their own SHA-256 and never lists them", async () => {
+  const storageDir = tempDir("blob-relay");
+  const vaultId = crypto.randomBytes(32).toString("hex");
+  const relay = await startSyncRelay({ storageDir, token: TOKEN });
+  const base = `${relay.url}/v1/vaults/${vaultId}`;
+  const auth = { Authorization: `Bearer ${TOKEN}` };
+  const headers = { ...auth, "Content-Type": "application/octet-stream" };
+  const body = crypto.randomBytes(1024);
+  const id = crypto.createHash("sha256").update(body).digest("hex");
+
+  try {
+    const wrong = await fetch(`${base}/blobs/${"f".repeat(64)}`, { method: "PUT", headers, body });
+    assert.equal(wrong.status, 400);
+
+    const first = await fetch(`${base}/blobs/${id}`, { method: "PUT", headers, body });
+    assert.equal(first.status, 201);
+    const again = await fetch(`${base}/blobs/${id}`, { method: "PUT", headers, body });
+    assert.equal(again.status, 200);
+
+    const fetched = await fetch(`${base}/blobs/${id}`, { headers: auth });
+    assert.equal(fetched.status, 200);
+    assert.equal(fetched.headers.get("content-type"), "application/octet-stream");
+    assert.deepEqual(Buffer.from(await fetched.arrayBuffer()), body);
+
+    const probe = await fetch(`${base}/blobs/${id}`, { method: "HEAD", headers: auth });
+    assert.equal(probe.status, 200);
+    const probeMissing = await fetch(`${base}/blobs/${"a".repeat(64)}`, { method: "HEAD", headers: auth });
+    assert.equal(probeMissing.status, 404);
+
+    const missing = await fetch(`${base}/blobs/${"a".repeat(64)}`, { headers: auth });
+    assert.equal(missing.status, 404);
+
+    // There is deliberately no list route for blobs.
+    const listed = await fetch(`${base}/blobs`, { headers: auth });
+    assert.equal(listed.status, 404);
+    const shortId = await fetch(`${base}/blobs/not-a-blob-id`, { headers: auth });
+    assert.equal(shortId.status, 404);
+
+    const oversize = Buffer.alloc(2 * 1024 * 1024 + 1);
+    const oversizeId = crypto.createHash("sha256").update(oversize).digest("hex");
+    const rejected = await fetch(`${base}/blobs/${oversizeId}`, { method: "PUT", headers, body: oversize });
+    assert.equal(rejected.status, 413);
+
+    const badMethod = await fetch(`${base}/blobs/${id}`, { method: "DELETE", headers: auth });
+    assert.equal(badMethod.status, 405);
+
+    const unauthorized = await fetch(`${base}/blobs/${id}`);
+    assert.equal(unauthorized.status, 401);
+
+    assert.deepEqual(fs.readdirSync(path.join(storageDir, vaultId, "blobs")), [id]);
+  } finally {
+    await relay.close();
+    fs.rmSync(storageDir, { recursive: true, force: true });
+  }
+});
+
+test("a push uploads blobs before the change, and an interrupted pull resumes", async () => {
+  const vaultDir = tempDir("blob-source");
+  const targetDir = tempDir("blob-target");
+  const storageDir = tempDir("blob-transport");
+  const manager = new SyncDeviceManager(vaultDir, PASSPHRASE);
+  manager.initializeOwner("Owner", DEVICE_ID, "2026-09-04T10:00:00.000Z");
+  const vaultId = manager.fingerprint();
+  const log = new SyncChangeLog(vaultDir, PASSPHRASE);
+
+  // Three sealed chunks staged locally, named by the SHA-256 of their own bytes.
+  const bodies = [crypto.randomBytes(4096), crypto.randomBytes(8192), crypto.randomBytes(2048)];
+  const blobs = bodies.map((body) => crypto.createHash("sha256").update(body).digest("hex"));
+  const sourceStore = new SyncBlobStore(vaultDir);
+  bodies.forEach((body, index) => sourceStore.put(blobs[index], body));
+
+  const noteChange = log.append(DEVICE_ID, mutation(1, null, "before"), "2026-09-04T10:01:00.000Z");
+  const attachmentChange = log.append(
+    DEVICE_ID,
+    {
+      objectType: "attachment",
+      objectId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      operation: "put",
+      baseRevision: null,
+      revision: 1,
+      value: {
+        filename: "clip.bin",
+        mime: "application/octet-stream",
+        size: 2 * 1024 * 1024 + 5,
+        chunks: 3,
+        blobs,
+      },
+    },
+    "2026-09-04T10:02:00.000Z",
+  );
+  assert.deepEqual(attachmentBlobIds(attachmentChange), blobs);
+  assert.deepEqual(attachmentBlobIds(noteChange), []);
+
+  const relay = await startSyncRelay({ storageDir, token: TOKEN });
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = (input, init) => {
+    const target = typeof input === "string" ? input : input.url;
+    requests.push(`${init?.method ?? "GET"} ${new URL(target).pathname}`);
+    return originalFetch(input, init);
+  };
+
+  try {
+    const client = new SyncRelayClient(relay.url, TOKEN, vaultId, vaultDir);
+    assert.deepEqual(await client.uploadChanges(log.envelopes(), log.changes()), { stored: 2, existing: 0 });
+
+    // The relay never advertises a change whose bytes it does not already hold.
+    const changePut = requests.indexOf(`PUT /v1/vaults/${vaultId}/changes/${attachmentChange.id}`);
+    assert.ok(changePut >= 0);
+    for (const id of blobs) {
+      const blobPut = requests.indexOf(`PUT /v1/vaults/${vaultId}/blobs/${id}`);
+      assert.ok(blobPut >= 0 && blobPut < changePut, `blob ${id} must be uploaded before its change`);
+      const stored = await fetch(`${relay.url}/v1/vaults/${vaultId}/blobs/${id}`, {
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      assert.equal(stored.status, 200);
+    }
+
+    // Re-running a push re-sends only what is genuinely missing.
+    assert.deepEqual(await client.pushBlobs(blobs), { uploaded: 0, skipped: 3 });
+
+    // Simulate an interrupted pull: stage all but the last blob, then resume.
+    const targetStore = new SyncBlobStore(targetDir);
+    for (const id of blobs.slice(0, -1)) targetStore.put(id, sourceStore.read(id));
+    const receiver = new SyncRelayClient(relay.url, TOKEN, vaultId, targetDir);
+    assert.deepEqual(await receiver.pullBlobs(blobs), { fetched: 1, skipped: 2 });
+    assert.deepEqual(targetStore.missing(blobs), []);
+    assert.deepEqual(targetStore.read(blobs[2]), bodies[2]);
+    assert.deepEqual(await receiver.pullBlobs(blobs), { fetched: 0, skipped: 3 });
+
+    // A relay that cannot produce the bytes fails closed rather than staging junk.
+    await assert.rejects(
+      () => receiver.pullBlobs(["c".repeat(64)]),
+      /Relay is missing/iu,
+    );
+
+    // Blob transport needs a local staging directory.
+    await assert.rejects(
+      () => new SyncRelayClient(relay.url, TOKEN, vaultId).pullBlobs(blobs),
+      /vault directory/iu,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    await relay.close();
+    log.close();
+    manager.close();
+    fs.rmSync(vaultDir, { recursive: true, force: true });
+    fs.rmSync(targetDir, { recursive: true, force: true });
     fs.rmSync(storageDir, { recursive: true, force: true });
   }
 });

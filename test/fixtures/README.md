@@ -15,6 +15,7 @@ They contain dummy data only. Never point a fixture at a real vault.
 | `documents-attachments-v1/` | document vault with chunk-encrypted attachments | Content-addressed attachments written by the TypeScript core still open in the Rust desktop core |
 | `documents-canvas-v1/` | document vault with encrypted canvas objects | Canvas objects, identities, references and AAD written by the TypeScript core stay readable |
 | `sync-epoch-v2/` | sync registry v2, change envelopes v1 and v2 | A rotated vault still opens: epoch 1 changes stay vault-key sealed, epoch 2 changes need the wrapped content key, and the revoked device holds no wrap |
+| `sync-attachment-blobs-v3/` | sync change body v3, attachment blob manifest | An attachment change that carries `size`/`chunks`/`blobs[]` instead of base64 bytes still opens; `source/` stages the two sealed chunks, `target/` is the same vault before the attachment and reassembles it from them. `manifest.json` records the blob ids and the plaintext SHA-256 |
 
 Regenerate deliberately (see `scripts/make-fixtures.mjs`) — overwriting a
 fixture throws away the evidence it was there to provide. To cover a new

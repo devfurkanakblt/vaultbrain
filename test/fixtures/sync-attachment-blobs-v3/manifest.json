@@ -1,0 +1,15 @@
+{
+  "deviceId": "11111111-1111-4111-8111-111111111111",
+  "changeCount": 2,
+  "changeBodyVersion": 3,
+  "attachmentId": "5e0e54ad8104876049202bb403532716a1bb35cf6606624c0dc18a7097b96918",
+  "filename": "frozen-blob.bin",
+  "mime": "application/octet-stream",
+  "size": 1572864,
+  "chunks": 2,
+  "blobs": [
+    "efc1f04fabd5aff9eb3e4fd9fc0be8e11584226f9a4fdd35a971198a8b5561d4",
+    "bb37e7da7c7542932209d090ac64fad0822acc28374526f460d4942de6c145e7"
+  ],
+  "sha256": "23e1a9ba7dda59eb93d4bf23cd1a5d0c1242fcca95265e179e6bd8b7a7bec0b1"
+}

@@ -446,7 +446,7 @@ test("plugin packages and security policy changes synchronize and apply", () => 
   fs.cpSync(sourceDir, targetDir, { recursive: true });
 
   const source = new SyncedDocumentVault(sourceDir, PASSPHRASE, DEVICE_A);
-  const installed = source.installPlugin({
+  source.installPlugin({
     manifest: {
       manifestVersion: 1,
       id: "sync-example",
@@ -459,16 +459,16 @@ test("plugin packages and security policy changes synchronize and apply", () => 
     source: "api.notice('ready');",
     enabled: true,
   });
-  source.setPluginEnabled(installed.id, false);
+  assert.equal(source.getPlugin("sync-example").enabled, true, "source execution consent stays local");
   source.setPluginRestrictedMode(true);
 
   const pluginChanges = source.changeLog.changes().filter((change) => change.mutation.objectType === "plugin");
-  assert.deepEqual(pluginChanges.map((change) => change.mutation.revision), [1, 2]);
+  assert.deepEqual(pluginChanges.map((change) => change.mutation.revision), [1]);
   assert.equal(source.changeLog.resolve("vault", "plugin-policy").winner.mutation.revision, 2);
 
   const target = new SyncedDocumentVault(targetDir, PASSPHRASE);
   target.changeLog.import(source.changeLog.envelopes());
-  assert.equal(target.applyResolved("plugin", "sync-example").applied, 2);
+  assert.equal(target.applyResolved("plugin", "sync-example").applied, 1);
   assert.equal(target.applyResolved("vault", "plugin-policy").applied, 2);
   assert.equal(target.getPlugin("sync-example").enabled, false);
   assert.equal(target.pluginSecurityPolicy().restrictedMode, true);
@@ -549,8 +549,50 @@ test("unresolved remote conflicts never mutate live vault storage", () => {
   first.changeLog.import(second.changeLog.envelopes());
 
   assert.equal(first.changeLog.resolve("note", note.id).status, "conflict");
+  assert.deepEqual(
+    first.listConflicts().map((conflict) => [conflict.objectType, conflict.objectId]),
+    [["note", note.id]],
+  );
   assert.equal(first.applyResolved("note", note.id).conflict, true);
   assert.equal(first.get(note.id).body, "from A");
+  assert.throws(() => first.resolveConflict("note", note.id), /explicit current head/iu);
+  const fromB = first
+    .changeLog
+    .resolve("note", note.id)
+    .heads
+    .find((head) => first.changeLog.change(head).mutation.value.body === "from B");
+  const resolved = first.resolveConflict("note", note.id, fromB);
+  assert.equal(resolved.conflict, undefined);
+  assert.equal(first.get(note.id).body, "from B");
+  assert.equal(first.changeLog.resolve("note", note.id).status, "clean");
+
+  first.lock();
+  second.lock();
+  fs.rmSync(firstDir, { recursive: true, force: true });
+  fs.rmSync(secondDir, { recursive: true, force: true });
+});
+
+test("concurrent plugin policies merge only toward stronger restrictions", () => {
+  const firstDir = tempVault("policy-conflict-a");
+  let first = new SyncedDocumentVault(firstDir, PASSPHRASE, DEVICE_A);
+  first.setPluginRestrictedMode(false);
+  first.lock();
+
+  const secondDir = tempVault("policy-conflict-b");
+  fs.rmSync(secondDir, { recursive: true, force: true });
+  fs.cpSync(firstDir, secondDir, { recursive: true });
+
+  first = new SyncedDocumentVault(firstDir, PASSPHRASE, DEVICE_A);
+  const second = new SyncedDocumentVault(secondDir, PASSPHRASE, DEVICE_B);
+  first.setPluginRestrictedMode(true);
+  second.setPluginRestrictedMode(false);
+  first.changeLog.import(second.changeLog.envelopes());
+
+  assert.equal(first.changeLog.resolve("vault", "plugin-policy").status, "conflict");
+  const merged = first.resolveConflict("vault", "plugin-policy");
+  assert.equal(merged.conflict, undefined);
+  assert.equal(first.pluginSecurityPolicy().restrictedMode, true);
+  assert.equal(first.changeLog.resolve("vault", "plugin-policy").status, "clean");
 
   first.lock();
   second.lock();
@@ -822,4 +864,145 @@ test("a checkpoint created before rotation still verifies afterwards", () => {
     log.close();
     manager.close();
   }
+});
+
+test("an attachment sync snapshot parses in both the inline and the blob form", async () => {
+  const { parseAttachmentSnapshot, isBlobAttachmentSnapshot, sameAttachmentSnapshot } = await import("../dist/sync.js");
+  const blobId = "a".repeat(64);
+
+  const inline = parseAttachmentSnapshot({ filename: "a.txt", mime: "text/plain", data: "aGk=" });
+  assert.equal(isBlobAttachmentSnapshot(inline), false);
+  assert.equal(inline.data, "aGk=");
+
+  const blob = parseAttachmentSnapshot({
+    filename: "a.bin",
+    mime: "application/octet-stream",
+    size: 2,
+    chunks: 1,
+    blobs: [blobId],
+  });
+  assert.equal(isBlobAttachmentSnapshot(blob), true);
+  assert.deepEqual(blob.blobs, [blobId]);
+
+  // A snapshot may not claim both forms.
+  assert.throws(
+    () => parseAttachmentSnapshot({ filename: "a", mime: "text/plain", data: "aGk=", size: 2, chunks: 1, blobs: [blobId] }),
+    /exactly one/i,
+  );
+  // chunks must agree with blobs.length.
+  assert.throws(
+    () => parseAttachmentSnapshot({ filename: "a", mime: "text/plain", size: 2, chunks: 2, blobs: [blobId] }),
+    /chunk count/i,
+  );
+  // chunks must agree with size.
+  assert.throws(
+    () => parseAttachmentSnapshot({ filename: "a", mime: "text/plain", size: 5 * 1024 * 1024, chunks: 1, blobs: [blobId] }),
+    /chunk count/i,
+  );
+  // size must be at least 1: an empty attachment is refused at the storage layer too.
+  assert.throws(
+    () => parseAttachmentSnapshot({ filename: "a", mime: "text/plain", size: 0, chunks: 1, blobs: [blobId] }),
+    /size/i,
+  );
+  // blob ids are 64 lowercase hex characters.
+  assert.throws(
+    () => parseAttachmentSnapshot({ filename: "a", mime: "text/plain", size: 2, chunks: 1, blobs: ["NOTHEX"] }),
+    /blob id/i,
+  );
+  // at most 256 blobs.
+  assert.throws(
+    () =>
+      parseAttachmentSnapshot({
+        filename: "a",
+        mime: "text/plain",
+        size: 257 * 1024 * 1024,
+        chunks: 257,
+        blobs: Array.from({ length: 257 }, () => blobId),
+      }),
+    /at most 256/i,
+  );
+
+  // Equality ignores the form and the blob ids.
+  assert.equal(
+    sameAttachmentSnapshot(
+      { filename: "a.bin", mime: "text/plain", data: "aGk=" },
+      { filename: "a.bin", mime: "text/plain", size: 2, chunks: 1, blobs: [blobId] },
+    ),
+    true,
+  );
+  assert.equal(
+    sameAttachmentSnapshot(
+      { filename: "a.bin", mime: "text/plain", data: "aGk=" },
+      { filename: "renamed.bin", mime: "text/plain", size: 2, chunks: 1, blobs: [blobId] },
+    ),
+    false,
+  );
+});
+
+test("an attachment larger than the old 6 MiB ceiling is captured as blob references", async () => {
+  const { parseAttachmentSnapshot, isBlobAttachmentSnapshot } = await import("../dist/sync.js");
+  const { SyncBlobStore } = await import("../dist/sync-blobs.js");
+  const dir = tempVault("blob-writer");
+  const vault = new SyncedDocumentVault(dir, PASSPHRASE, DEVICE_A);
+
+  // Nine chunks: comfortably past the 6,242,304-byte inline ceiling this replaces.
+  const data = crypto.randomBytes(9 * 1024 * 1024);
+  const info = vault.putAttachment(data, "big.bin", "application/octet-stream");
+  assert.equal(info.size, data.length);
+
+  const changes = vault.changeLog.changes().filter((change) => change.mutation.objectType === "attachment");
+  const snapshot = parseAttachmentSnapshot(changes.at(-1).mutation.value);
+  assert.equal(isBlobAttachmentSnapshot(snapshot), true);
+  assert.equal(snapshot.size, data.length);
+  assert.equal(snapshot.chunks, 9);
+  assert.equal(snapshot.blobs.length, 9);
+
+  const store = new SyncBlobStore(dir);
+  assert.deepEqual(store.missing(snapshot.blobs), []);
+  assert.deepEqual(vault.getAttachment(info.id).data, data);
+
+  vault.lock();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("an enrolled device stamps a blob attachment change at version 3", () => {
+  const dir = tempVault("blob-body-version");
+  const manager = new SyncDeviceManager(dir, PASSPHRASE);
+  manager.initializeOwner("Owner", DEVICE_A, "2026-09-04T00:00:00.000Z");
+  manager.close();
+
+  const vault = new SyncedDocumentVault(dir, PASSPHRASE, DEVICE_A);
+  vault.put({ path: "Plans/Launch.md", body: "first" });
+  const info = vault.putAttachment(Buffer.from("blob transported bytes"), "brief.txt", "text/plain");
+  vault.removeAttachment(info.id);
+
+  const changes = vault.changeLog.changes();
+  const pick = (objectType, operation) =>
+    changes.find((change) => change.mutation.objectType === objectType && change.mutation.operation === operation);
+
+  // Only the body that actually carries a blob manifest moves to version 3, so
+  // a client that stops at version 2 refuses the manifest instead of misreading it.
+  assert.equal(pick("attachment", "put").version, 3);
+  assert.equal(pick("attachment", "delete").version, 2);
+  assert.equal(pick("note", "put").version, 2);
+
+  vault.lock();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("an unenrolled vault keeps writing version 1, blob manifest included", () => {
+  const dir = tempVault("blob-body-version-legacy");
+  const vault = new SyncedDocumentVault(dir, PASSPHRASE, DEVICE_A);
+  const info = vault.putAttachment(Buffer.from("legacy blob bytes"), "brief.txt", "text/plain");
+
+  // Version 3 requires a device signature, which a vault without a device
+  // registry cannot produce; the legacy unauthorized ladder has no version 3.
+  const change = vault.changeLog
+    .changes()
+    .find((candidate) => candidate.mutation.objectType === "attachment");
+  assert.equal(change.version, 1);
+  assert.equal(change.mutation.objectId, info.id);
+
+  vault.lock();
+  fs.rmSync(dir, { recursive: true, force: true });
 });

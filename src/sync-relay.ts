@@ -4,10 +4,14 @@ import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 import { assertNoSymlinkComponents, assertNotSymlink } from "./fs-safe.js";
 import { resolveInside } from "./safety.js";
+import { MAX_BLOB_BYTES, SyncBlobStore } from "./sync-blobs.js";
 import {
+  isBlobAttachmentSnapshot,
+  parseAttachmentSnapshot,
   validateRelayArtifactEnvelope,
   validateRelayEnvelope,
   type EncryptedSyncChange,
+  type SyncChange,
 } from "./sync.js";
 
 const OPAQUE_ID = /^[a-f0-9]{64}$/u;
@@ -17,6 +21,22 @@ const DEFAULT_MAX_VAULT_BYTES = 512 * 1024 * 1024;
 const DEFAULT_MAX_CHANGES = 50_000;
 const MAX_PAGE_SIZE = 64;
 const MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
+/** Blob transfers move up to 2 MiB per request, so they get a longer budget than a JSON call. */
+const BLOB_REQUEST_TIMEOUT_MS = 30_000;
+
+/**
+ * An error that carries the HTTP status the relay must answer with. Anything
+ * else thrown out of a handler stays a 400, exactly as it did before.
+ */
+class RelayHttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "RelayHttpError";
+  }
+}
 
 export interface SyncRelayOptions {
   storageDir: string;
@@ -69,18 +89,20 @@ function json(response: ServerResponse, status: number, value: unknown): void {
   response.end(body);
 }
 
-async function requestBody(request: IncomingMessage, limit: number): Promise<Buffer> {
+async function requestBody(request: IncomingMessage, limit: number, overLimitStatus = 400): Promise<Buffer> {
+  const tooLarge = (): Error => new RelayHttpError(overLimitStatus, "Relay request exceeds its byte limit.");
   const declared = request.headers["content-length"];
   if (declared !== undefined) {
     const bytes = Number(declared);
-    if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > limit) throw new Error("Relay request exceeds its byte limit.");
+    if (!Number.isSafeInteger(bytes) || bytes < 0) throw new Error("Relay request exceeds its byte limit.");
+    if (bytes > limit) throw tooLarge();
   }
   const parts: Buffer[] = [];
   let total = 0;
   for await (const part of request) {
     const chunk = Buffer.isBuffer(part) ? part : Buffer.from(part);
     total += chunk.length;
-    if (total > limit) throw new Error("Relay request exceeds its byte limit.");
+    if (total > limit) throw tooLarge();
     parts.push(chunk);
   }
   return Buffer.concat(parts, total);
@@ -109,9 +131,10 @@ function immutableWrite(destination: string, body: Buffer): boolean {
   }
 }
 
-function directoryUsage(root: string): { bytes: number; changes: number } {
-  if (!fs.existsSync(root)) return { bytes: 0, changes: 0 };
+function directoryUsage(root: string): { bytes: number; objects: number; changes: number } {
+  if (!fs.existsSync(root)) return { bytes: 0, objects: 0, changes: 0 };
   let bytes = 0;
+  let objects = 0;
   let changes = 0;
   const pending = [root];
   while (pending.length > 0) {
@@ -123,11 +146,14 @@ function directoryUsage(root: string): { bytes: number; changes: number } {
       if (entry.isDirectory()) pending.push(child);
       else if (entry.isFile()) {
         bytes += fs.statSync(child).size;
-        if (path.basename(path.dirname(child)) === "changes") changes += 1;
+        const collection = path.basename(path.dirname(child));
+        if (collection === "changes") changes += 1;
+        // Blobs are stored objects like any other and count toward the caps.
+        if (collection === "changes" || collection === "blobs") objects += 1;
       }
     }
   }
-  return { bytes, changes };
+  return { bytes, objects, changes };
 }
 
 function parseRoute(urlValue: string): { vaultId: string; section: string; kind?: string; id?: string } | undefined {
@@ -136,6 +162,9 @@ function parseRoute(urlValue: string): { vaultId: string; section: string; kind?
   if (parts.length < 4 || parts[0] !== "v1" || parts[1] !== "vaults" || !OPAQUE_ID.test(parts[2])) return undefined;
   if (parts[3] === "changes" && (parts.length === 4 || (parts.length === 5 && OPAQUE_ID.test(parts[4])))) {
     return { vaultId: parts[2], section: "changes", ...(parts[4] ? { id: parts[4] } : {}) };
+  }
+  if (parts[3] === "blobs" && parts.length === 5 && OPAQUE_ID.test(parts[4])) {
+    return { vaultId: parts[2], section: "blobs", id: parts[4] };
   }
   if (
     parts[3] === "artifacts" &&
@@ -195,6 +224,46 @@ export async function startSyncRelay(options: SyncRelayOptions): Promise<Running
       }
       const vaultDir = resolveInside(storageDir, route.vaultId);
       assertNoSymlinkComponents(storageDir, vaultDir);
+
+      // Blobs are opaque bytes: the relay holds no key, verifies only that the
+      // content hashes to the id it is filed under, and never lists them.
+      if (route.section === "blobs") {
+        const blobsDir = resolveInside(vaultDir, "blobs");
+        const destination = resolveInside(blobsDir, route.id!);
+        if (request.method === "PUT") {
+          const body = await requestBody(request, Math.min(maxRequestBytes, MAX_BLOB_BYTES), 413);
+          if (crypto.createHash("sha256").update(body).digest("hex") !== route.id) {
+            throw new Error("Blob content does not match its id.");
+          }
+          const created = await serialize(route.vaultId, async () => {
+            fs.mkdirSync(blobsDir, { recursive: true, mode: 0o700 });
+            assertNoSymlinkComponents(storageDir, blobsDir);
+            const usage = directoryUsage(vaultDir);
+            const exists = fs.existsSync(destination);
+            if (!exists && usage.bytes + body.length > maxVaultBytes) throw new Error("Relay vault byte quota exceeded.");
+            if (!exists && usage.objects >= maxChanges) throw new Error("Relay object quota exceeded.");
+            return immutableWrite(destination, body);
+          });
+          json(response, created ? 201 : 200, { stored: created });
+          return;
+        }
+        if (request.method === "GET" || request.method === "HEAD") {
+          if (!fs.existsSync(destination)) {
+            json(response, 404, { error: "Not found." });
+            return;
+          }
+          assertNotSymlink(destination);
+          const size = fs.statSync(destination).size;
+          if (size > MAX_BLOB_BYTES) throw new Error("Stored relay object exceeds its byte limit.");
+          responseHeaders(response);
+          response.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Length": size });
+          response.end(request.method === "HEAD" ? undefined : fs.readFileSync(destination));
+          return;
+        }
+        json(response, 405, { error: "Method not allowed." });
+        return;
+      }
+
       const sectionDir = resolveInside(vaultDir, route.section === "changes" ? "changes" : path.join("artifacts", route.kind!));
       assertNoSymlinkComponents(storageDir, sectionDir);
 
@@ -219,7 +288,7 @@ export async function startSyncRelay(options: SyncRelayOptions): Promise<Running
           const destination = resolveInside(sectionDir, `${route.id}.json`);
           const exists = fs.existsSync(destination);
           if (!exists && usage.bytes + storedBody.length > maxVaultBytes) throw new Error("Relay vault byte quota exceeded.");
-          if (!exists && route.section === "changes" && usage.changes >= maxChanges) throw new Error("Relay change quota exceeded.");
+          if (!exists && route.section === "changes" && usage.objects >= maxChanges) throw new Error("Relay change quota exceeded.");
           return immutableWrite(destination, storedBody);
         });
         json(response, created ? 201 : 200, { stored: created });
@@ -272,7 +341,8 @@ export async function startSyncRelay(options: SyncRelayOptions): Promise<Running
 
       json(response, 405, { error: "Method not allowed." });
     })().catch((error: unknown) => {
-      if (!response.headersSent) json(response, 400, { error: error instanceof Error ? error.message : "Relay request failed." });
+      const status = error instanceof RelayHttpError ? error.status : 400;
+      if (!response.headersSent) json(response, status, { error: error instanceof Error ? error.message : "Relay request failed." });
       else response.destroy();
     });
   });
@@ -298,7 +368,7 @@ export async function startSyncRelay(options: SyncRelayOptions): Promise<Running
   };
 }
 
-async function responseJson(response: Response, limit = MAX_RESPONSE_BYTES): Promise<unknown> {
+async function responseBytes(response: Response, limit: number): Promise<Buffer> {
   if (!response.body) throw new Error("Relay response has no body.");
   const reader = response.body.getReader();
   const parts: Uint8Array[] = [];
@@ -313,8 +383,22 @@ async function responseJson(response: Response, limit = MAX_RESPONSE_BYTES): Pro
     }
     parts.push(value);
   }
-  const body = Buffer.concat(parts.map((part) => Buffer.from(part)), total).toString("utf8");
-  const parsed: unknown = JSON.parse(body);
+  return Buffer.concat(parts.map((part) => Buffer.from(part)), total);
+}
+
+/**
+ * The blob ids a change references, or an empty list for anything that is not
+ * a blob-form attachment snapshot. A caller that has decrypted its own changes
+ * uses this to learn which bytes must travel with them.
+ */
+export function attachmentBlobIds(change: SyncChange): string[] {
+  if (change.mutation.objectType !== "attachment" || change.mutation.operation !== "put") return [];
+  const snapshot = parseAttachmentSnapshot(change.mutation.value);
+  return isBlobAttachmentSnapshot(snapshot) ? [...snapshot.blobs] : [];
+}
+
+async function responseJson(response: Response, limit = MAX_RESPONSE_BYTES): Promise<unknown> {
+  const parsed: unknown = JSON.parse((await responseBytes(response, limit)).toString("utf8"));
   if (!response.ok) {
     const message = parsed && typeof parsed === "object" && "error" in parsed ? String((parsed as { error: unknown }).error) : `HTTP ${response.status}`;
     throw new Error(`Relay rejected the request: ${message}`);
@@ -324,8 +408,15 @@ async function responseJson(response: Response, limit = MAX_RESPONSE_BYTES): Pro
 
 export class SyncRelayClient {
   private readonly baseUrl: string;
+  /** Present only when the client was given a vault directory to stage blobs in. */
+  private readonly blobStore: SyncBlobStore | undefined;
 
-  constructor(baseUrl: string, private readonly token: string, private readonly vaultId: string) {
+  constructor(
+    baseUrl: string,
+    private readonly token: string,
+    private readonly vaultId: string,
+    vaultDir?: string,
+  ) {
     const parsed = new URL(baseUrl);
     if (
       !["http:", "https:"].includes(parsed.protocol) ||
@@ -343,6 +434,88 @@ export class SyncRelayClient {
     if (Buffer.byteLength(token, "utf8") < 32) throw new Error("Relay bearer token must contain at least 32 bytes.");
     if (!OPAQUE_ID.test(vaultId)) throw new Error("Relay vault ID must be 64 lowercase hexadecimal characters.");
     this.baseUrl = parsed.origin;
+    this.blobStore = vaultDir === undefined ? undefined : new SyncBlobStore(vaultDir);
+  }
+
+  private blobs(): SyncBlobStore {
+    if (!this.blobStore) {
+      throw new Error("A relay client needs a vault directory to transfer attachment blobs.");
+    }
+    return this.blobStore;
+  }
+
+  private async blobRequest(id: string, method: "GET" | "HEAD" | "PUT", body?: Buffer): Promise<Response> {
+    if (!OPAQUE_ID.test(id)) throw new Error("A blob id must be 64 lowercase hexadecimal characters.");
+    // `fetch` wants a plain ArrayBuffer-backed view, which a Buffer is not.
+    let payload: Uint8Array<ArrayBuffer> | undefined;
+    if (body !== undefined) {
+      payload = new Uint8Array(new ArrayBuffer(body.length));
+      payload.set(body);
+    }
+    return fetch(`${this.baseUrl}/v1/vaults/${this.vaultId}/blobs/${id}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+        ...(payload ? { "Content-Type": "application/octet-stream" } : {}),
+      },
+      ...(payload ? { body: payload } : {}),
+      redirect: "error",
+      signal: AbortSignal.timeout(BLOB_REQUEST_TIMEOUT_MS),
+    });
+  }
+
+  /**
+   * Upload every staged blob the relay does not already hold. Idempotent: a
+   * re-run after an interruption re-sends only what is genuinely missing.
+   */
+  async pushBlobs(ids: readonly string[]): Promise<{ uploaded: number; skipped: number }> {
+    const store = this.blobs();
+    let uploaded = 0;
+    let skipped = 0;
+    for (const id of new Set(ids)) {
+      const probe = await this.blobRequest(id, "HEAD");
+      await probe.body?.cancel();
+      if (probe.status === 200) {
+        skipped += 1;
+        continue;
+      }
+      if (probe.status !== 404) throw new Error(`Relay rejected the request: HTTP ${probe.status}`);
+      const result = (await responseJson(await this.blobRequest(id, "PUT", store.read(id)))) as {
+        stored?: unknown;
+      };
+      if (result.stored === true) uploaded += 1;
+      else skipped += 1;
+    }
+    return { uploaded, skipped };
+  }
+
+  /**
+   * Stage every referenced blob that is not already on disk. `SyncBlobStore.put`
+   * re-verifies SHA-256(body) === id, so a relay cannot substitute bytes.
+   */
+  async pullBlobs(ids: readonly string[]): Promise<{ fetched: number; skipped: number }> {
+    const store = this.blobs();
+    let fetched = 0;
+    let skipped = 0;
+    for (const id of new Set(ids)) {
+      if (!OPAQUE_ID.test(id)) throw new Error("A blob id must be 64 lowercase hexadecimal characters.");
+      if (store.has(id)) {
+        skipped += 1;
+        continue;
+      }
+      const response = await this.blobRequest(id, "GET");
+      if (response.status === 404) {
+        await response.body?.cancel();
+        throw new Error(`Relay is missing blob ${id}.`);
+      }
+      if (!response.ok) {
+        await responseJson(response);
+        throw new Error(`Relay rejected the request: HTTP ${response.status}`);
+      }
+      store.put(id, await responseBytes(response, MAX_BLOB_BYTES));
+      fetched += 1;
+    }
+    return { fetched, skipped };
   }
 
   private async request(pathname: string, init: RequestInit = {}): Promise<unknown> {
@@ -355,11 +528,23 @@ export class SyncRelayClient {
     return responseJson(response);
   }
 
-  async uploadChanges(envelopes: readonly EncryptedSyncChange[]): Promise<{ stored: number; existing: number }> {
+  /**
+   * Upload change envelopes. When the caller also supplies the decrypted
+   * changes, every blob an attachment change references is uploaded *before*
+   * that change's envelope, so the relay never advertises a change whose bytes
+   * it cannot serve.
+   */
+  async uploadChanges(
+    envelopes: readonly EncryptedSyncChange[],
+    changes: readonly SyncChange[] = [],
+  ): Promise<{ stored: number; existing: number }> {
+    const blobsByChange = new Map(changes.map((change) => [change.id, attachmentBlobIds(change)]));
     let stored = 0;
     let existing = 0;
     for (const candidate of envelopes) {
       const envelope = validateRelayEnvelope(candidate);
+      const referenced = blobsByChange.get(envelope.id);
+      if (referenced && referenced.length > 0) await this.pushBlobs(referenced);
       const result = await this.request(`/v1/vaults/${this.vaultId}/changes/${envelope.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },

@@ -621,13 +621,15 @@ sbrain --experimental-trusted-sync --vault ./restored-vault \
 Unresolved heads fail before live storage is touched. Plugin package bytes and
 the fail-closed plugin policy are portable, while plugin storage and the local
 enabled/disabled execution choice never enter the sync log; a received plugin
-is always installed disabled. Synchronized attachment snapshots currently
-share the 8 MiB change limit (about 6 MiB of raw bytes); resumable chunked
-transport for larger blobs and independently witnessed freshness remain
-Phase 6 work. The relay is not key escrow: first-device recovery needs an
-encrypted vault backup containing the original key-derivation metadata. A
-normal device clone must never carry another device's `documents/sync/identity`
-directory; private identity keys are local-only and absent from sync exports.
+is always installed disabled. Attachment bytes travel outside the change
+envelope: a change carries a manifest of content-addressed, AEAD-sealed 1 MiB
+blobs, so an attachment of any size the vault accepts synchronizes and an
+interrupted transfer resumes one chunk at a time. Independently witnessed
+freshness remains Phase 6 work. The relay is not key escrow: first-device
+recovery needs an encrypted vault backup containing the original
+key-derivation metadata. A normal device clone must never carry another
+device's `documents/sync/identity` directory; private identity keys are
+local-only and absent from sync exports.
 
 Revoking a device rotates the content key: the registry advances to a new epoch,
 a fresh random content key is wrapped to each remaining device's X25519 key, and
@@ -687,10 +689,10 @@ live note/canvas/attachment/plugin capture and application, owner-signed device
 enrollment and removal with automatic epoch content-key rotation on revocation,
 owner-signed freshness checkpoints, an authenticated opaque self-hosted relay,
 an automated recovery drill, a frozen 1.0 on-disk format with committed
-conformance fixtures, and read-only desktop sync status. Desktop-driven sync
-mutation (enrollment, revocation, relay push/pull from the app), resumable
-chunked transport for attachments larger than the change limit, and the
-independent security audit remain open — see
+conformance fixtures, read-only desktop sync status, and resumable
+content-addressed transport for attachment blobs of any size the vault
+accepts. Desktop-driven sync mutation (enrollment, revocation, relay
+push/pull from the app) and the independent security audit remain open — see
 [`docs/AUDIT-SCOPE.md`](docs/AUDIT-SCOPE.md) for the audit readiness package.
 iOS/Android clients are out of scope: Vault Brain stays local-first with
 optional self-hosted sync rather than putting the passphrase, and a hosted

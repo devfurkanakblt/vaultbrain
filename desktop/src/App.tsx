@@ -135,7 +135,8 @@ function rememberVault(path: string) {
 }
 
 function LockScreen({ notice, onUnlock }: { notice: string; onUnlock: (path: string, passphrase: string) => Promise<void> }) {
-  const [path, setPath] = useState("./vault/personal");
+  const history = useMemo(readVaultHistory, []);
+  const [path, setPath] = useState(() => history[0] ?? DEFAULT_VAULT_PATH);
   const [passphrase, setPassphrase] = useState("");
   const [busy, setBusy] = useState(false);
   const [choosing, setChoosing] = useState(false);
@@ -169,6 +170,7 @@ function LockScreen({ notice, onUnlock }: { notice: string; onUnlock: (path: str
     try {
       await onUnlock(target, passphrase);
       setPassphrase("");
+      rememberVault(target);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -293,6 +295,9 @@ export function App() {
   const [pluginCommands, setPluginCommands] = useState<RegisteredCommand[]>([]);
   const [pluginPanels, setPluginPanels] = useState<PluginPanel[]>([]);
   const pluginHost = useRef<PluginHost>(undefined);
+  const [reveal, setReveal] = useState<{ line: number; token: number }>();
+  const revealToken = useRef(0);
+  const documentBody = useRef<HTMLDivElement>(null);
   const [syncStatus, setSyncStatus] = useState<SyncStatusData | null>(null);
   const [notice, setNotice] = useState("");
   const [lockNotice, setLockNotice] = useState("");

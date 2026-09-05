@@ -88,6 +88,27 @@ test("missing or invalid device IDs fail before any synchronized storage or log 
       mutate: (vault, seeded) => vault.removeAttachment(seeded.id),
     },
     {
+      label: "plugin-put",
+      seed: () => undefined,
+      mutate: (vault) => vault.installPlugin({
+        manifest: {
+          manifestVersion: 1,
+          id: "rejected-plugin",
+          name: "Rejected plugin",
+          version: "1.0.0",
+          description: "Must not land without a device ID.",
+          author: "Vault Brain",
+          capabilities: ["notes:metadata"],
+        },
+        source: "api.notice('must not land');",
+      }),
+    },
+    {
+      label: "plugin-policy",
+      seed: () => undefined,
+      mutate: (vault) => vault.setPluginRestrictedMode(true),
+    },
+    {
       label: "put-many",
       seed: () => undefined,
       mutate: (vault) =>
@@ -279,6 +300,68 @@ function setupScenario(label) {
         },
       };
     }
+    case "plugin-put":
+      legacy.lock();
+      return {
+        vaultDir,
+        mutate: (vault) => vault.installPlugin({
+          manifest: {
+            manifestVersion: 1,
+            id: "transaction-plugin",
+            name: "Transaction plugin",
+            version: "1.0.0",
+            description: "Exercises recoverable plugin capture.",
+            author: "Vault Brain",
+            capabilities: ["notes:metadata"],
+          },
+          source: "api.notice('plugin secret');",
+          enabled: true,
+        }),
+        verify: (vault) => {
+          const plugin = vault.getPlugin("transaction-plugin");
+          assert.equal(plugin.enabled, true, "the source device keeps its local execution consent");
+          return [["plugin", "transaction-plugin", "put", 1]];
+        },
+      };
+    case "plugin-delete": {
+      const plugin = legacy.installPlugin({
+        manifest: {
+          manifestVersion: 1,
+          id: "transaction-plugin",
+          name: "Transaction plugin",
+          version: "1.0.0",
+          description: "Exercises recoverable plugin capture.",
+          author: "Vault Brain",
+          capabilities: ["notes:metadata"],
+        },
+        source: "api.notice('legacy plugin secret');",
+      });
+      legacy.lock();
+      return {
+        vaultDir,
+        mutate: (vault) => vault.removePlugin(plugin.id),
+        verify: (vault) => {
+          assert.equal(vault.listPlugins().length, 0);
+          return [
+            ["plugin", "transaction-plugin", "put", 1],
+            ["plugin", "transaction-plugin", "delete", 2],
+          ];
+        },
+      };
+    }
+    case "plugin-policy":
+      legacy.lock();
+      return {
+        vaultDir,
+        mutate: (vault) => vault.setPluginRestrictedMode(true),
+        verify: (vault) => {
+          assert.equal(vault.pluginSecurityPolicy().restrictedMode, true);
+          return [
+            ["vault", "plugin-policy", "put", 1],
+            ["vault", "plugin-policy", "put", 2],
+          ];
+        },
+      };
     case "put-many":
       legacy.lock();
       return {
@@ -333,6 +416,9 @@ for (const scenarioName of [
   "canvas-delete",
   "attachment-put",
   "attachment-delete",
+  "plugin-put",
+  "plugin-delete",
+  "plugin-policy",
   "put-many",
 ]) {
   test(`${scenarioName} rolls forward exactly once after every durable boundary`, () => {
@@ -359,7 +445,7 @@ for (const scenarioName of [
 }
 
 test("recovery recognizes updated storage already written before its durable phase marker", () => {
-  for (const scenarioName of ["note-update", "canvas-update", "attachment-put"]) {
+  for (const scenarioName of ["note-update", "canvas-update", "attachment-put", "plugin-put", "plugin-policy"]) {
     const scenario = setupScenario(scenarioName);
     const crashed = new SyncedDocumentVault(scenario.vaultDir, PASSPHRASE, DEVICE_A, {
       faultInjector: faultAt("storage-written", "after-effect"),

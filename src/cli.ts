@@ -52,12 +52,14 @@ import {
   type EncryptedSyncChange,
   type EncryptedSyncDeviceRegistry,
   type EncryptedSyncFreshnessCheckpoint,
+  type SyncChange,
   type SyncJson,
   type SyncMutation,
   type SyncObjectType,
   type SyncOperation,
 } from "./sync.js";
-import { startSyncRelay, SyncRelayClient } from "./sync-relay.js";
+import { attachmentBlobIds, startSyncRelay, SyncRelayClient } from "./sync-relay.js";
+import { MAX_BLOB_BYTES, SyncBlobStore } from "./sync-blobs.js";
 import {
   createFromTemplate,
   openDailyNote,
@@ -725,6 +727,44 @@ function relayToken(): string {
   return token;
 }
 
+/** The enrollment authority fingerprint doubles as the relay's vault ID. */
+function relayVaultId(manager: SyncDeviceManager): string {
+  const vaultId = manager.fingerprint();
+  if (!vaultId) throw new Error("Initialize sync device enrollment before using a relay.");
+  return vaultId;
+}
+
+/**
+ * Every attachment blob the given changes reference, de-duplicated and in
+ * change order. A change that is not a blob-form attachment contributes none.
+ */
+function referencedBlobIds(changes: readonly SyncChange[]): string[] {
+  return [...new Set(changes.flatMap((change) => attachmentBlobIds(change)))];
+}
+
+/**
+ * Ask the relay whether it already holds a blob. `SyncRelayClient` exposes no
+ * such probe on purpose — the blob collection has no list route — so
+ * `sync blobs prune` asks over the wire itself. Constructing the client first
+ * reuses its URL, token and vault-ID validation before any request is made.
+ */
+function relayBlobProbe(url: string, vaultId: string, token: string): (id: string) => Promise<boolean> {
+  new SyncRelayClient(url, token, vaultId);
+  const origin = new URL(url).origin;
+  return async (id: string): Promise<boolean> => {
+    const response = await fetch(`${origin}/v1/vaults/${vaultId}/blobs/${id}`, {
+      method: "HEAD",
+      headers: { Authorization: `Bearer ${token}` },
+      redirect: "error",
+      signal: AbortSignal.timeout(15_000),
+    });
+    await response.body?.cancel();
+    if (response.status === 200) return true;
+    if (response.status === 404) return false;
+    throw new Error(`Relay rejected the request: HTTP ${response.status}`);
+  };
+}
+
 sync.hook("preAction", () => {
   if (!program.opts().experimentalTrustedSync) {
     throw new Error(
@@ -1038,10 +1078,11 @@ syncRelay
     const manager = new SyncDeviceManager(dir, passphrase);
     const log = new SyncChangeLog(dir, passphrase);
     try {
-      const vaultId = manager.fingerprint();
-      if (!vaultId) throw new Error("Initialize sync device enrollment before using a relay.");
-      const client = new SyncRelayClient(url, relayToken(), vaultId);
-      const changes = await client.uploadChanges(log.envelopes());
+      const client = new SyncRelayClient(url, relayToken(), relayVaultId(manager), dir);
+      // Passing the decrypted changes is what makes `uploadChanges` send each
+      // attachment's blobs first, so the relay never advertises a change whose
+      // bytes no peer can fetch.
+      const changes = await client.uploadChanges(log.envelopes(), log.changes());
       const registryArtifact = await client.uploadArtifact("registry", manager.exportRegistry());
       let checkpointArtifact: string | null = null;
       if (manager.checkpoint()) {
@@ -1070,7 +1111,7 @@ syncRelay
       if (!expectedAuthority || !/^[a-f0-9]{64}$/u.test(expectedAuthority)) {
         throw new Error("First relay pull requires --authority with the expected 64-character fingerprint.");
       }
-      const client = new SyncRelayClient(url, relayToken(), expectedAuthority);
+      const client = new SyncRelayClient(url, relayToken(), expectedAuthority, dir);
       const registryBundles = await client.downloadArtifacts("registry");
       const registries = registryBundles
         .map((value) => ({ value, registry: manager.inspectRegistry(value) }))
@@ -1083,6 +1124,9 @@ syncRelay
       log = new SyncChangeLog(dir, passphrase);
       const imported = log.import(await client.downloadChanges());
       const changes = log.changes();
+      // The symmetric half of the push ordering: an admitted attachment change
+      // is useless until its sealed chunks are on disk, so fetch them now.
+      const blobs = await client.pullBlobs(referencedBlobIds(changes));
 
       const checkpointBundles = await client.downloadArtifacts("checkpoint");
       const checkpoints = checkpointBundles
@@ -1114,6 +1158,7 @@ syncRelay
           {
             registryRevision: newest.registry.body.revision,
             changes: imported,
+            blobs,
             checkpoint: pinned?.id ?? null,
             checkpointWarning: pinned ? null : "No checkpoint was pinned; use --checkpoint on the first pull.",
           },
@@ -1123,6 +1168,82 @@ syncRelay
       );
     } finally {
       log?.close();
+      manager.close();
+    }
+  });
+
+const syncBlobs = sync
+  .command("blobs")
+  .description("staged sealed attachment chunks that travel beside their changes");
+
+syncBlobs
+  .command("status")
+  .description("report present and missing chunks for every attachment change in the log")
+  .action(async () => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const log = new SyncChangeLog(dir, passphrase);
+    const store = new SyncBlobStore(dir);
+    try {
+      for (const change of log.changes()) {
+        const blobs = attachmentBlobIds(change);
+        if (blobs.length === 0) continue;
+        const missing = store.missing(blobs).length;
+        console.log(`${change.mutation.objectId} ${blobs.length - missing} present, ${missing} missing`);
+      }
+    } finally {
+      log.close();
+    }
+  });
+
+syncBlobs
+  .command("fetch <url>")
+  .description("stage only the attachment chunks still missing for already-admitted changes")
+  .action(async (url) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const manager = new SyncDeviceManager(dir, passphrase);
+    const log = new SyncChangeLog(dir, passphrase);
+    try {
+      const client = new SyncRelayClient(url, relayToken(), relayVaultId(manager), dir);
+      const store = new SyncBlobStore(dir);
+      const referenced = referencedBlobIds(log.changes());
+      const missing = store.missing(referenced);
+      const result = await client.pullBlobs(missing);
+      console.log(
+        `Fetched ${result.fetched} blob(s); ${referenced.length - missing.length} already present.`,
+      );
+    } finally {
+      log.close();
+      manager.close();
+    }
+  });
+
+syncBlobs
+  .command("prune <url>")
+  .description("delete staged attachment chunks the relay confirms it already holds")
+  .action(async (url) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const manager = new SyncDeviceManager(dir, passphrase);
+    const log = new SyncChangeLog(dir, passphrase);
+    try {
+      const held = relayBlobProbe(url, relayVaultId(manager), relayToken());
+      const store = new SyncBlobStore(dir);
+      let pruned = 0;
+      let kept = 0;
+      for (const id of referencedBlobIds(log.changes())) {
+        if (!store.has(id)) continue;
+        // A blob the relay does not hold is never dropped locally: that would
+        // leave the change unappliable on every device that still needs it.
+        if (await held(id)) {
+          store.remove(id);
+          pruned += 1;
+        } else kept += 1;
+      }
+      console.log(`Pruned ${pruned} staged blob(s); kept ${kept} the relay does not hold.`);
+    } finally {
+      log.close();
       manager.close();
     }
   });
@@ -1179,12 +1300,35 @@ sync
 sync
   .command("export")
   .description("write relay-safe opaque encrypted envelopes as JSON to stdout")
-  .action(async () => {
+  .option("--bundle <dir>", "write changes.json plus blobs/<id> into a directory instead of stdout")
+  .action(async (opts) => {
     const dir = program.opts().vault;
     const passphrase = await getPassphrase({ vaultDir: dir });
     const log = new SyncChangeLog(dir, passphrase);
     try {
-      process.stdout.write(`${JSON.stringify(log.envelopes(), null, 2)}\n`);
+      const envelopes = log.envelopes();
+      const serialized = `${JSON.stringify(envelopes, null, 2)}\n`;
+      if (!opts.bundle) {
+        process.stdout.write(serialized);
+        return;
+      }
+      // A bundle is the relay-independent transport: the same opaque
+      // ciphertext, plus the sealed chunks the envelopes no longer carry.
+      const bundleDir = path.resolve(opts.bundle);
+      const store = new SyncBlobStore(dir);
+      const ids = referencedBlobIds(log.changes());
+      const absent = store.missing(ids);
+      if (absent.length > 0) {
+        throw new Error(
+          `${absent.length} of ${ids.length} attachment chunks are missing; run sync blobs fetch before exporting a bundle.`,
+        );
+      }
+      fs.mkdirSync(path.join(bundleDir, "blobs"), { recursive: true, mode: 0o700 });
+      for (const id of ids) {
+        writeFileAtomic(path.join(bundleDir, "blobs", id), store.read(id), { mode: 0o600 });
+      }
+      writeFileAtomic(path.join(bundleDir, "changes.json"), serialized, { mode: 0o600 });
+      console.log(`Exported ${envelopes.length} envelope(s) and ${ids.length} blob(s) to ${bundleDir}.`);
     } finally {
       log.close();
     }
@@ -1192,15 +1336,40 @@ sync
 
 sync
   .command("import <source>")
-  .description("verify a complete batch, then idempotently admit encrypted envelopes from another device")
+  .description(
+    "verify a complete batch, then idempotently admit encrypted envelopes from a JSON file or an exported bundle directory",
+  )
   .action(async (source) => {
     const dir = program.opts().vault;
     const passphrase = await getPassphrase({ vaultDir: dir });
-    const parsed: unknown = JSON.parse(fs.readFileSync(path.resolve(source), "utf8"));
+    const resolved = path.resolve(source);
+    const bundle = fs.statSync(resolved).isDirectory();
+    let staged = 0;
+    if (bundle) {
+      // Stage the sealed chunks first: `SyncBlobStore.put` re-verifies each
+      // SHA-256, so a tampered bundle fails before any envelope is admitted.
+      const store = new SyncBlobStore(dir);
+      const blobsDir = path.join(resolved, "blobs");
+      for (const name of fs.existsSync(blobsDir) ? fs.readdirSync(blobsDir).sort() : []) {
+        if (!/^[0-9a-f]{64}$/u.test(name)) {
+          throw new Error(`A sync bundle blob filename must be 64 lowercase hexadecimal characters: ${name}`);
+        }
+        const blobPath = path.join(blobsDir, name);
+        if (fs.statSync(blobPath).size > MAX_BLOB_BYTES) {
+          throw new Error(`Sync bundle blob ${name} exceeds its 2 MiB limit.`);
+        }
+        store.put(name, fs.readFileSync(blobPath));
+        staged += 1;
+      }
+    }
+    const parsed: unknown = JSON.parse(
+      fs.readFileSync(bundle ? path.join(resolved, "changes.json") : resolved, "utf8"),
+    );
     if (!Array.isArray(parsed)) throw new Error("Sync import must contain a JSON array of envelopes.");
     const log = new SyncChangeLog(dir, passphrase);
     try {
       const result = log.import(parsed as EncryptedSyncChange[]);
+      if (bundle) console.log(`Staged ${staged} attachment blob(s).`);
       console.log(`Imported ${result.imported}; already present ${result.existing}.`);
     } finally {
       log.close();
@@ -1225,11 +1394,53 @@ sync
   });
 
 sync
-  .command("resolve <object-type> <object-id>")
-  .description("show the deterministic winner and every preserved concurrent branch")
-  .action(async (objectType, objectId) => {
+  .command("conflicts")
+  .description("list every object with concurrent unresolved heads without printing snapshot values")
+  .action(async () => {
     const dir = program.opts().vault;
     const passphrase = await getPassphrase({ vaultDir: dir });
+    const log = new SyncChangeLog(dir, passphrase);
+    try {
+      const conflicts = log.conflicts().map((resolution) => ({
+        objectType: resolution.objectType,
+        objectId: resolution.objectId,
+        heads: resolution.heads,
+      }));
+      console.log(JSON.stringify(conflicts, null, 2));
+    } finally {
+      log.close();
+    }
+  });
+
+sync
+  .command("resolve <object-type> <object-id>")
+  .description("inspect a conflict, select a preserved head, or safely merge a plugin policy")
+  .option("--head <change-id>", "resolve by selecting one of the current conflict heads")
+  .option("--safe", "apply the built-in strengthening-only merge for a plugin policy conflict")
+  .action(async (objectType, objectId, opts) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    if (opts.head || opts.safe) {
+      const deviceId = program.opts().syncDevice as string | undefined;
+      if (!deviceId) throw new Error("Resolving a conflict requires --sync-device <uuid>.");
+      const vault = new SyncedDocumentVault(dir, passphrase, deviceId);
+      try {
+        console.log(
+          JSON.stringify(
+            vault.resolveConflict(
+              objectType as SyncObjectType,
+              objectId,
+              opts.head as string | undefined,
+            ),
+            null,
+            2,
+          ),
+        );
+      } finally {
+        vault.lock();
+      }
+      return;
+    }
     const log = new SyncChangeLog(dir, passphrase);
     try {
       console.log(JSON.stringify(log.resolve(objectType as SyncObjectType, objectId), null, 2));

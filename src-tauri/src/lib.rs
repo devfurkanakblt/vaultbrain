@@ -168,14 +168,6 @@ struct KdfManifest {
     salt: String,
 }
 
-/// Just enough of a manifest to learn its version. A v2 manifest carries no
-/// `kdf` and no `verifier`, so deserializing into `Manifest` fails on a missing
-/// field and reports that instead of what actually happened to the vault.
-#[derive(Debug, Deserialize)]
-struct ManifestVersion {
-    version: u8,
-}
-
 /// Byte-identical to what `vbrain migrate` writes, so a created vault and a
 /// migrated vault are the same shape on disk.
 const MANIFEST_TOMBSTONE: &str = "{\n  \"version\": 2,\n  \"keyring\": true\n}\n";
@@ -1537,9 +1529,22 @@ fn open_vault_keys(
     let manifest_path = root_dir.join("manifest.json");
     if manifest_path.exists() {
         reject_symlink(&manifest_path)?;
+        let manifest_bytes = read_limited(&manifest_path, 64 * 1024, "vault manifest")?;
+        let manifest_value: serde_json::Value =
+            serde_json::from_slice(&manifest_bytes).map_err(|error| error.to_string())?;
+        if manifest_value
+            .get("version")
+            .and_then(serde_json::Value::as_u64)
+            == Some(2)
+            && manifest_value
+                .get("keyring")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        {
+            return Err("this vault was upgraded to a keyring, but keyring.json is missing".into());
+        }
         let manifest: Manifest =
-            serde_json::from_slice(&read_limited(&manifest_path, 64 * 1024, "vault manifest")?)
-                .map_err(|error| error.to_string())?;
+            serde_json::from_value(manifest_value).map_err(|error| error.to_string())?;
         if manifest.version != 1
             || manifest.kdf.name != "scrypt"
             || !matches!(manifest.kdf.n, 32_768 | 65_536)
@@ -1553,8 +1558,11 @@ fn open_vault_keys(
         if verifier(key.as_ref())? != manifest.verifier {
             return Err("wrong passphrase or damaged manifest".into());
         }
-        (key, manifest)
-    } else {
+        let attachment_id_key = key.clone();
+        return Ok((key, attachment_id_key));
+    }
+
+    if vault_holds_legacy_material(vault_dir) {
         validate_new_passphrase(passphrase)?;
         let mut salt = [0u8; 16];
         OsRng.fill_bytes(&mut salt);
@@ -4728,7 +4736,7 @@ fn delete_canvas(reference: String, state: State<'_, AppState>) -> Result<Canvas
 /// This is the same on-disk shape the TypeScript core writes, because both
 /// implementations have to read one vault: `attachments/<id>/manifest.enc`
 /// beside `attachments/<id>/<n>.chunk.enc`, where `<id>` is
-/// `HMAC-SHA256(vault key, "secondbrain-vault:attachment-id:v1\0" || bytes)`.
+/// `HMAC-SHA256(attachment-id key, "secondbrain-vault:attachment-id:v1\0" || bytes)`.
 /// Keying the address means two vaults never agree on an ID for the same file,
 /// so a directory listing tells an observer nothing about what is stored.
 ///
@@ -5390,6 +5398,22 @@ fn sync_verify_registry(state: State<'_, AppState>) -> Result<bool, String> {
         return Err("vault has no sync device registry".into());
     };
     verify_registry_signature(&registry)
+}
+
+/// Opens the operating system's folder chooser and reports back only the path
+/// the person selected, or `None` when they dismissed it.
+#[tauri::command(async)]
+fn pick_vault_directory(app: AppHandle) -> Result<Option<String>, String> {
+    let chosen = app
+        .dialog()
+        .file()
+        .set_title("Choose a vault folder")
+        .blocking_pick_folder();
+    let Some(chosen) = chosen else {
+        return Ok(None);
+    };
+    let path = chosen.into_path().map_err(|error| error.to_string())?;
+    Ok(Some(path.to_string_lossy().into_owned()))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -6789,15 +6813,6 @@ mod tests {
         }
     }
 
-    fn fixture(name: &str) -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("workspace root")
-            .join("test")
-            .join("fixtures")
-            .join(name)
-    }
-
     #[test]
     fn attachments_deduplicate_by_content_and_chunk_at_one_mebibyte() {
         let (path, session) = attachment_session("attachment-round-trip");
@@ -7181,6 +7196,31 @@ mod tests {
         // The fixture holds one epoch 1 change and one epoch 2 change. The count
         // comes from filenames, so it works even though this build holds no epoch
         // key and could not open the second envelope.
+        assert_eq!(count_sync_changes(&session).unwrap(), 2);
+
+        drop(session);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    /// The TypeScript core moved attachment bytes out of the change body and
+    /// into content-addressed blobs, which introduced change body version 3.
+    /// The Rust core counts changes from filenames and never opens a body, so
+    /// it is expected to be indifferent to that. Expected is not verified, so
+    /// this pins it against the committed version 3 fixture.
+    #[test]
+    fn sync_status_counts_version_three_attachment_changes() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("test")
+            .join("fixtures")
+            .join("sync-attachment-blobs-v3")
+            .join("source");
+        let path = temporary_vault("sync-status-blobs");
+        copy_tree(&fixture, &path);
+        let session = open_session(&path.to_string_lossy(), "fixture-only-passphrase").unwrap();
+
+        // One note change (body version 2) and one attachment change (body
+        // version 3, carrying a blob manifest instead of base64 bytes).
         assert_eq!(count_sync_changes(&session).unwrap(), 2);
 
         drop(session);

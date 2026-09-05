@@ -62,7 +62,9 @@ export function loadVaultFile(
   if (!fs.existsSync(filePath)) return [];
   assertNotSymlink(filePath);
   const payload: AnyEncryptedPayload = JSON.parse(readTextFileLimited(filePath, 64 * 1024 * 1024, "Vault file"));
-  const plaintext = decrypt(payload, passphrase);
+  const plaintext = envelopeVersion(payload) === KEYED_ENVELOPE_VERSION
+    ? decryptWithKey(payload as KeyedEncryptedPayload, requireKvKey(vaultDir, passphrase), normalizeVaultName(name))
+    : decrypt(payload, passphrase);
   return parseKV(plaintext);
 }
 

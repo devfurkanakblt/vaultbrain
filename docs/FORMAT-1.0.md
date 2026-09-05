@@ -378,7 +378,11 @@ version guarantees.
 
 ### `syncChangeEnvelope` — `documents/sync/changes/*.change.enc`
 
-`reads: [1, 2]`, `writes: [1, 2]`. Defined in `src/sync.ts`:
+`reads: [1, 2, 3]`, `writes: [1, 2, 3]`. Defined in `src/sync.ts`. This
+entry covers two nested version numbers that are **not** the same number:
+the envelope's own `version`, which is still only `1` or `2` and selects the
+epoch sealing rule below, and the `version` of the `SyncChangeBody` sealed
+inside it, which is where `3` appears.
 
 ```ts
 interface EncryptedSyncChange {
@@ -416,7 +420,7 @@ The plaintext inside `payload` is `canonicalSyncJson(SyncChangeBody)`:
 
 ```ts
 interface SyncChangeBody {
-  version: 1 | 2;
+  version: 1 | 2 | 3; // 1 = unsigned legacy; 2 and 3 = device-authorized
   deviceId: string; // lowercase UUID
   sequence: number; // safe integer >= 1
   previousDeviceChange: string | null; // change id, or null iff sequence === 1
@@ -430,7 +434,7 @@ interface SyncChangeBody {
     revision: number;
     value: SyncJson; // null iff operation === "delete"
   };
-  authorization?: { certificateSerial: number; signature: string }; // version 2 only
+  authorization?: { certificateSerial: number; signature: string }; // versions 2 and 3
 }
 ```
 
@@ -442,6 +446,112 @@ to just `certificateSerial` (the signature itself is excluded from what it
 signs) — see `changeAuthorizationPayload` in `src/sync.ts`. A version 1 body
 must not carry `authorization` at all. The whole body is capped at 8 MiB
 (`MAX_CHANGE_BYTES`) of canonical-JSON UTF-8.
+
+A **version 3** body is validated, signed and verified exactly as a version 2
+body is: `authorization` is required, and `changeAuthorizationPayload` pins
+the literal `version: 2` inside the signed bytes for every authorized body,
+so the signature input is byte-identical for versions 2 and 3. The body
+version is still covered by the change `id`, which is an HMAC over the whole
+canonical body under a key the relay does not hold, so a transport cannot
+flip it undetected. Version 3 names the generation of the format in which an
+attachment change carries a *blob manifest* instead of base64 bytes.
+
+> **How a writer chooses a version.** An enrolled device stamps `3` on an
+> attachment change carrying a blob manifest and `2` on every other
+> authorized change; a vault with no device registry stamps `1` either way,
+> because version 3 requires `authorization` and an un-enrolled vault cannot
+> produce one (`changeBodyVersion`, `src/sync.ts`). Validation enforces the
+> pairing in both directions: a version 3 body must carry a blob manifest,
+> and a version 2 body may not. *Reading* still branches on shape —
+> `parseAttachmentSnapshot` takes the blob branch whenever
+> `size`/`chunks`/`blobs` are present and the inline branch whenever `data`
+> is — so a version 1 body carrying a manifest is read as one. A third-party
+> implementation must read all three versions and may write any of them.
+
+#### Attachment snapshots: inline bytes and blob manifests
+
+An attachment change's `mutation.value` has two accepted shapes
+(`parseAttachmentSnapshot`, `src/sync.ts`):
+
+```ts
+// Legacy: read at every version, written by none. The writer always
+// produces the manifest form below, whatever the attachment size.
+interface InlineAttachmentSyncSnapshot {
+  filename: string;
+  mime: string;
+  data: string; // canonical base64 of the whole plaintext
+}
+
+// The blob manifest form. The bytes are not in the change.
+interface BlobAttachmentSyncSnapshot {
+  filename: string;
+  mime: string;
+  size: number;    // safe integer, 1 <= size <= 250 MiB (MAX_ATTACHMENT_SIZE)
+  chunks: number;  // safe integer >= 1
+  blobs: string[]; // one blob id per chunk, in chunk order
+}
+```
+
+The rules, all enforced before any byte is transferred:
+
+- Exactly one of `data` or the `size`/`chunks`/`blobs` trio. A snapshot
+  carrying both forms, or neither, is refused. The pairing with the body
+  version is deliberately asymmetric: a version 2 body carrying `blobs` is
+  refused, while a version 1 body carrying `blobs` is read as a blob
+  manifest, because an un-enrolled vault has no version 3 available to it.
+- `blobs` holds at most **256** entries (`MAX_ATTACHMENT_BLOBS`, matching the
+  `parents` cap). This bound is checked first, so hostile input cannot force
+  an unbounded scan. 250 MiB at 1 MiB per chunk is 250 entries, so the cap is
+  not reachable by a legal attachment.
+- Every blob id is exactly 64 lowercase hexadecimal characters.
+- `chunks === blobs.length === Math.ceil(size / ATTACHMENT_CHUNK_SIZE)`, with
+  `ATTACHMENT_CHUNK_SIZE` = 1 MiB. `size` is at least 1 because an empty
+  attachment is refused at `prepareAttachmentPut`, so `chunks` is at least 1.
+
+**Blob identity.** A blob is one plaintext 1 MiB chunk sealed as a
+`DocumentPayload` under the vault's document key with AAD
+`attachmentChunkAad(attachmentId, index)` — the same key, the same AAD
+builder and the same chunk size the on-disk chunk file uses. No new AAD
+string was introduced. It is a *fresh* seal, not a copy of
+`documents/attachments/<id>/<index>.chunk.enc`: AEAD nonces are random per
+seal, so the two ciphertexts differ even though they carry the same chunk.
+
+The blob id is the lowercase hex `SHA-256` of the exact sealed bytes
+transferred — the JSON-encoded `DocumentPayload`, unkeyed:
+
+```ts
+blobId = crypto.createHash("sha256").update(sealedChunkJsonBytes).digest("hex");
+```
+
+It is deliberately **not** keyed, unlike `syncChangeId`. Because nonces are
+random, two devices sealing the same chunk produce different ciphertext; a
+keyed id would make those different bytes claim one id and collide in an
+immutable content-addressed store — a correctness failure, not a storage
+inefficiency. Hashing the ciphertext instead keeps the transport opaque (the
+input is AEAD output), lets a relay verify an upload while holding no key,
+and deduplicates identical uploads. The cost accepted in exchange is that two
+devices that each add the same file produce two distinct blob sets.
+
+**Plaintext integrity does not rest on the blob id.** After reassembly the
+receiving device recomputes `HMAC-SHA256(attachmentIdKey, AAD.attachmentId ||
+data)` and refuses anything that is not the change's `mutation.objectId`,
+exactly as an ordinary local read does; and because each chunk's AAD binds
+the attachment id and the chunk index, a reordered or cross-attachment chunk
+fails to open at all. A transport that serves corrupted, substituted or
+mismatched blobs therefore produces an attachment that is refused rather than
+one that is trusted.
+
+**Staging.** Sealed blobs awaiting transfer live at
+`documents/sync/blobs/<blobId>`, one file per blob, 2 MiB maximum
+(`SyncBlobStore`, `src/sync-blobs.ts`). This is a transfer staging area, not
+a durable vault artifact — the durable copy of an attachment is always
+`documents/attachments/<id>/` — which is why it has no `FORMAT_COMPATIBILITY`
+entry of its own. The store re-verifies `SHA-256(body) === id` on every write.
+
+**Fail-closed apply.** Applying an attachment change whose blobs have not all
+arrived refuses with `"<n> of <m> attachment chunks are missing."` *before*
+any apply receipt is written, so a partial attachment never reaches live
+storage and no receipt is left to be rolled forward on the next unlock.
 
 ### `syncDeviceCertificate` and `syncDeviceRegistry` — `documents/sync/devices.enc`
 
@@ -700,13 +810,21 @@ descriptions of the format — under `test/fixtures/`:
   at its pre-rotation certificate epoch, and exactly one cached epoch key
   file (`documents/sync/identity/epochs/2.key.enc` — nothing cached for the
   revoked device's inaccessible epoch).
+- **`test/fixtures/sync-attachment-blobs-v3/`** — a two-directory vault pair
+  pinning the blob manifest form. `source/` is an owner-enrolled vault whose
+  attachment change is a version 3 body carrying `size`, `chunks` and four
+  blob ids instead of base64 bytes, with the four sealed chunks staged under
+  `documents/sync/blobs/`; `target/` is the same vault copied before the
+  attachment existed, so it shares the key material and the registry and can
+  admit the change the way a second device would. `manifest.json` records the
+  blob ids and the plaintext SHA-256 the reassembly must reproduce.
 - **`test/fixtures/kv-envelope-v0/`** — a pre-versioning (`encryptedEnvelope`
   version 0) `*.kv.enc` file: no `version`, `cipher`, or `kdf` fields, no AAD.
 
 `test/format-conformance.test.mjs` is the executable form of this document: it
 asserts `VAULT_FORMAT_VERSION === "1.0"`, that every `AAD` value is unique and
 carries the `secondbrain-vault:` prefix, that `FORMAT_COMPATIBILITY` reads
-every version it writes, and that both fixture vaults above open to the
+every version it writes, and that every fixture vault above opens to the
 expected plaintext and shape. Any change that breaks that test has broken
 this specification and requires either a fix or, if the change is
 intentional, the format 2.0 migration path described in Section 2.

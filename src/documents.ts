@@ -17,6 +17,7 @@ import {
   readTextFileLimited,
   writeFileAtomic,
 } from "./fs-safe.js";
+import { forgetVaultKeys } from "./keyring.js";
 import {
   analyzeMarkdown,
   makeExcerpt,
@@ -357,8 +358,8 @@ export interface AttachmentInfo {
   createdAt: string;
 }
 
-const ATTACHMENT_CHUNK_SIZE = 1024 * 1024;
-const MAX_ATTACHMENT_SIZE = 250 * 1024 * 1024;
+export const ATTACHMENT_CHUNK_SIZE = 1024 * 1024;
+export const MAX_ATTACHMENT_SIZE = 250 * 1024 * 1024;
 
 function normalizeText(value: string): string {
   return value.normalize("NFKC").toLocaleLowerCase("en-US");
@@ -1491,59 +1492,70 @@ export class DocumentVault {
    * source: a plugin whose declared reach and whose code arrived separately
    * could be approved as one thing and run as another.
    */
+  protected preparePluginInstall(input: {
+    manifest: unknown;
+    source: string;
+    enabled?: boolean;
+    baseRevision?: number;
+  }): PluginPackage {
+    const manifest = parsePluginManifest(input.manifest);
+    const source = validatePluginSource(input.source);
+    const signature = verifyPluginSignature(manifest, source);
+    const policy = this.loadPluginPolicy();
+    if (signature && policy.revokedSigners.includes(signature.keyId)) {
+      throw new Error(`Plugin signer is revoked: ${signature.keyId}`);
+    }
+    if (policy.restrictedMode && !signature) {
+      throw new Error("Restricted mode accepts cryptographically signed plugins only.");
+    }
+    const index = this.loadIndex();
+    const plugins = index.plugins ?? {};
+    const existing = Object.values(plugins).find((plugin) => plugin.manifestId === manifest.id);
+    if (!existing && Object.keys(plugins).length >= MAX_PLUGINS) {
+      throw new Error(`A vault may hold at most ${MAX_PLUGINS} plugins.`);
+    }
+    if (existing && input.baseRevision !== undefined && input.baseRevision !== existing.revision) {
+      throw new Error(
+        `Plugin revision conflict: expected revision ${input.baseRevision}, current revision ${existing.revision}.`,
+      );
+    }
+    const id = existing?.id ?? crypto.randomUUID();
+    if (!existing && (index.notes[id] || index.canvases[id])) {
+      throw new Error(`Document ID already exists: ${id}`);
+    }
+    const previous = existing ? this.loadPluginById(id) : undefined;
+    if (previous?.signature && !signature) {
+      throw new Error("A signed plugin cannot be updated with an unsigned package.");
+    }
+    if (previous?.signature && signature && previous.signature.keyId !== signature.keyId) {
+      throw new Error("Plugin signer changed. Remove the plugin and approve it as a new install.");
+    }
+    const now = new Date().toISOString();
+    return {
+      version: 1,
+      id,
+      manifest,
+      source,
+      ...(signature ? { signature } : {}),
+      // An update never silently re-enables a plugin the person turned off,
+      // and never enables a new one without being asked to.
+      enabled: input.enabled ?? previous?.enabled ?? false,
+      installedAt: previous?.installedAt ?? now,
+      updatedAt: now,
+      revision: (existing?.revision ?? 0) + 1,
+    };
+  }
+
   installPlugin(input: { manifest: unknown; source: string; enabled?: boolean; baseRevision?: number }): PluginPackage {
     return withVaultLock(this.vaultDir, () => {
-      const manifest = parsePluginManifest(input.manifest);
-      const source = validatePluginSource(input.source);
-      const signature = verifyPluginSignature(manifest, source);
-      const policy = this.loadPluginPolicy();
-      if (signature && policy.revokedSigners.includes(signature.keyId)) {
-        throw new Error(`Plugin signer is revoked: ${signature.keyId}`);
-      }
-      if (policy.restrictedMode && !signature) {
-        throw new Error("Restricted mode accepts cryptographically signed plugins only.");
-      }
+      const plugin = this.preparePluginInstall(input);
       const index = this.loadIndex();
       const plugins = index.plugins ?? {};
-      const existing = Object.values(plugins).find((plugin) => plugin.manifestId === manifest.id);
-      if (!existing && Object.keys(plugins).length >= MAX_PLUGINS) {
-        throw new Error(`A vault may hold at most ${MAX_PLUGINS} plugins.`);
-      }
-      if (existing && input.baseRevision !== undefined && input.baseRevision !== existing.revision) {
-        throw new Error(
-          `Plugin revision conflict: expected revision ${input.baseRevision}, current revision ${existing.revision}.`,
-        );
-      }
-      const id = existing?.id ?? crypto.randomUUID();
-      if (!existing && (index.notes[id] || index.canvases[id])) {
-        throw new Error(`Document ID already exists: ${id}`);
-      }
-      const previous = existing ? this.loadPluginById(id) : undefined;
-      if (previous?.signature && !signature) {
-        throw new Error("A signed plugin cannot be updated with an unsigned package.");
-      }
-      if (previous?.signature && signature && previous.signature.keyId !== signature.keyId) {
-        throw new Error("Plugin signer changed. Remove the plugin and approve it as a new install.");
-      }
-      const now = new Date().toISOString();
-      const plugin: PluginPackage = {
-        version: 1,
-        id,
-        manifest,
-        source,
-        ...(signature ? { signature } : {}),
-        // An update never silently re-enables a plugin the person turned off,
-        // and never enables a new one without being asked to.
-        enabled: input.enabled ?? previous?.enabled ?? false,
-        installedAt: previous?.installedAt ?? now,
-        updatedAt: now,
-        revision: (existing?.revision ?? 0) + 1,
-      };
-      this.beginJournal("plugins", [id]);
+      this.beginJournal("plugins", [plugin.id]);
       fs.mkdirSync(this.objectsDir(), { recursive: true, mode: 0o700 });
-      const payload = encryptDocument(JSON.stringify(plugin), this.session.key, pluginAad(id));
-      writeFileAtomic(this.pluginObjectPath(id), JSON.stringify(payload), { mode: 0o600 });
-      index.plugins = { ...plugins, [id]: summarizePlugin(plugin, policy) };
+      const payload = encryptDocument(JSON.stringify(plugin), this.session.key, pluginAad(plugin.id));
+      writeFileAtomic(this.pluginObjectPath(plugin.id), JSON.stringify(payload), { mode: 0o600 });
+      index.plugins = { ...plugins, [plugin.id]: summarizePlugin(plugin, this.loadPluginPolicy()) };
       this.saveIndex(index);
       this.endJournal();
       return plugin;
@@ -2174,7 +2186,7 @@ export class DocumentVault {
       throw new Error("Invalid attachment MIME type.");
     }
     const id = crypto
-      .createHmac("sha256", this.session.key)
+      .createHmac("sha256", this.session.attachmentIdKey)
       .update(AAD.attachmentId, "utf8")
       .update(data)
       .digest("hex");
@@ -2217,7 +2229,7 @@ export class DocumentVault {
     }
     const data = Buffer.concat(parts);
     const actualId = crypto
-      .createHmac("sha256", this.session.key)
+      .createHmac("sha256", this.session.attachmentIdKey)
       .update(AAD.attachmentId, "utf8")
       .update(data)
       .digest("hex");
