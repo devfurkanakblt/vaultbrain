@@ -372,14 +372,24 @@ export function parseJsonCanvas(text: string): { nodes: CanvasNode[]; edges: Can
  * `file` node carries the label the vault derived for it. Attachment labels are
  * re-rooted at the assets folder the caller names, because that is where the
  * bytes land if it asked for them at all.
+ *
+ * `exportedAssetPaths` maps an attachment id to the path the caller actually
+ * wrote it to. Two attachments can share a filename, and a whole-vault export
+ * has to give the second one a different name; without the map this node would
+ * name the first one's file and the canvas would quietly point at the wrong
+ * bytes.
  */
-export function serializeJsonCanvas(canvas: CanvasDocument, assetsDir = DEFAULT_ASSETS_DIR): string {
+export function serializeJsonCanvas(
+  canvas: CanvasDocument,
+  assetsDir = DEFAULT_ASSETS_DIR,
+  exportedAssetPaths?: ReadonlyMap<string, string>
+): string {
   const nodes = canvas.nodes.map((node) => {
     if (node.type !== "file") return { ...node };
     const { noteId: _noteId, attachmentId, ...rest } = node;
-    return attachmentId
-      ? { ...rest, file: path.posix.join(assetsDir, path.posix.basename(node.file)) }
-      : { ...rest };
+    if (!attachmentId) return { ...rest };
+    const exported = exportedAssetPaths?.get(attachmentId);
+    return { ...rest, file: exported ?? path.posix.join(assetsDir, path.posix.basename(node.file)) };
   });
   return `${JSON.stringify({ nodes, edges: canvas.edges }, null, 2)}\n`;
 }

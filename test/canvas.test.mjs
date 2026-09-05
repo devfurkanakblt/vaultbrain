@@ -348,6 +348,16 @@ test("JSON Canvas import/export preserves standard fields, binds identities and 
   assert.equal(portableAsset.file, "assets/diagram.png");
   assert.equal("attachmentId" in portableAsset, false);
 
+  // A caller that has already written the bytes says where they landed. A
+  // whole-vault export renames an attachment whose filename another attachment
+  // already claimed, and the canvas has to follow the rename rather than name
+  // the file that won the collision.
+  const renamed = JSON.parse(
+    vault.exportCanvas(withAsset.id, "assets", new Map([[attachment.id, "assets/diagram (2).png"]])),
+  );
+  assert.equal(renamed.nodes.find((node) => node.id === "asset").file, "assets/diagram (2).png");
+  assert.equal(renamed.nodes.find((node) => node.id === "note").file, "Notes/Golden.md");
+
   const roundTrip = vault.importCanvas("Boards/Round trip", `${JSON.stringify(portable)}\n`);
   assert.equal(roundTrip.nodes.find((node) => node.id === "note").noteId, note.id);
   assert.equal(roundTrip.nodes.find((node) => node.id === "asset").attachmentId, attachment.id);
