@@ -910,11 +910,18 @@ test("post-rotation changes are unreadable with the revoked device's epoch keys"
     assert.equal(rotatedEnvelope.epoch, 2);
     assert.equal(legacyEnvelope.version, 1, "pre-rotation changes keep their epoch 1 sealing");
 
-    // Holding only the vault key — which a revoked device still has — is no
-    // longer enough for the post-rotation change.
+    // Holding only the epoch 1 key material — which a revoked device still has —
+    // is no longer enough for the post-rotation change.
     const session = openDocumentKey(vaultDir, PASSPHRASE);
-    assert.doesNotThrow(() => openSyncChange(legacyEnvelope, session.key));
-    assert.throws(() => openSyncChange(rotatedEnvelope, session.key), /epoch/iu);
+    const epochOne = {
+      syncChangeKey: session.syncChangeKey,
+      syncEnvelopeKey: session.syncEnvelopeKey,
+    };
+    assert.doesNotThrow(() => openSyncChange(legacyEnvelope, epochOne));
+    assert.throws(() => openSyncChange(rotatedEnvelope, epochOne), /epoch/iu);
+    // The bare documents key opened epoch 1 changes before the identity key was
+    // separated out; it deliberately no longer does.
+    assert.throws(() => openSyncChange(legacyEnvelope, session.key));
 
     // The whole log still verifies on the device that holds the epoch key.
     assert.equal(log.verify().heads.length, 1);

@@ -228,3 +228,42 @@ test("the sync device registry still opens during a re-key", async () => {
   assert.equal(after.fingerprint(), fingerprint);
   after.close();
 });
+
+test("an epoch 1 change is identified by the permanent key, not the rotatable one", async () => {
+  const { openDocumentKey } = await import("../dist/document-crypto.js");
+  const { SyncDeviceManager, SyncChangeLog, openSyncChange } = await import("../dist/sync.js");
+  const vaultDir = temporaryVault("rekey-change-identity");
+
+  const devices = new SyncDeviceManager(vaultDir, PASSPHRASE);
+  const registry = devices.initializeOwner("Owner laptop");
+  const deviceId = registry.body.devices[0].certificate.deviceId;
+  devices.close();
+
+  const log = new SyncChangeLog(vaultDir, PASSPHRASE);
+  const change = log.append(
+    deviceId,
+    {
+      objectType: "note",
+      objectId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      operation: "put",
+      baseRevision: null,
+      revision: 1,
+      value: { title: "Plan", body: "written before the re-key" },
+    },
+    "2026-09-05T08:00:00.000Z",
+  );
+  const envelope = log.envelopes().find((candidate) => candidate.id === change.id);
+  log.close();
+
+  const session = openDocumentKey(vaultDir, PASSPHRASE);
+  // The body opens under syncEnvelope, which a re-key rotates, while the id is
+  // an HMAC under syncChange, which it never touches. That split is what lets a
+  // re-key re-seal every change without renaming one of them.
+  const opened = openSyncChange(envelope, {
+    syncChangeKey: session.syncChangeKey,
+    syncEnvelopeKey: session.syncEnvelopeKey,
+  });
+  assert.equal(opened.id, change.id);
+  // The documents key is no longer any part of a change's identity or sealing.
+  assert.throws(() => openSyncChange(envelope, session.key));
+});

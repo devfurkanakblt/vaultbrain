@@ -1077,24 +1077,7 @@ function validateAuthorizedChanges(changes: readonly SyncChange[], registry: Sig
   }
 }
 
-/**
- * Pre-enrollment changes are sealed under the bare vault key rather than the
- * structured pair, so each generation has to be offered as its own material.
- */
-function openLegacyChange(envelope: unknown, keys: readonly Buffer[]): SyncChange {
-  let failure: unknown;
-  for (const key of keys) {
-    try {
-      return openSyncChange(envelope, key);
-    } catch (error) {
-      failure = error;
-    }
-  }
-  throw failure;
-}
-
-function enrollmentLegacyChanges(rootDir: string, vaultKey: DocumentReadKey): SyncChange[] {
-  const candidates = Buffer.isBuffer(vaultKey) ? [vaultKey] : vaultKey;
+function enrollmentLegacyChanges(rootDir: string, keys: SyncChangeKeys): SyncChange[] {
   const changesDir = resolveInside(rootDir, path.join("sync", "changes"));
   if (!fs.existsSync(changesDir)) return [];
   assertNoSymlinkComponents(rootDir, changesDir);
@@ -1119,7 +1102,7 @@ function enrollmentLegacyChanges(rootDir: string, vaultKey: DocumentReadKey): Sy
       JSON.parse(readTextFileLimited(filePath, MAX_ENVELOPE_BYTES, `Sync envelope ${id}`)),
     );
     if (envelope.id !== id) throw new Error(`Sync change filename does not match its envelope: ${id}`);
-    const change = openLegacyChange(envelope, candidates);
+    const change = openSyncChange(envelope, keys);
     if (change.version !== 1) {
       throw new Error("A signed sync change cannot exist before device enrollment is initialized.");
     }
@@ -1342,6 +1325,21 @@ export class SyncDeviceManager {
     return this.session.readKeys;
   }
 
+  /**
+   * Epoch-1 change material: a permanent identity key, a rotatable body key,
+   * the retiring body key of an unfinished re-key, and the bare documents key
+   * that opens changes sealed before either existed.
+   */
+  private syncKeys(): SyncChangeKeys {
+    if (this.closed) throw new Error("Sync device manager is closed.");
+    return {
+      syncChangeKey: this.session.syncChangeKey,
+      syncEnvelopeKey: this.session.syncEnvelopeKey,
+      retiringSyncEnvelopeKey: this.session.syncEnvelopeReadKeys[1],
+      legacyKey: this.session.key,
+    };
+  }
+
   state(): SignedSyncDeviceRegistry | undefined {
     const registry = readDeviceRegistry(this.session.rootDir, this.readKeys());
     return registry ? structuredClone(registry) : undefined;
@@ -1366,7 +1364,7 @@ export class SyncDeviceManager {
       }
       if (!DEVICE_ID.test(deviceId)) throw new Error("Sync device ID must be a lowercase UUID.");
       const normalizedTime = canonicalTimestamp(now, "Device enrollment time");
-      const legacy = enrollmentLegacyChanges(this.session.rootDir, this.readKeys()).map((change) => change.id);
+      const legacy = enrollmentLegacyChanges(this.session.rootDir, this.syncKeys()).map((change) => change.id);
       const authority = crypto.generateKeyPairSync("ed25519");
       const device = crypto.generateKeyPairSync("ed25519");
       const agreement = generateAgreementKeyPair();
@@ -2450,10 +2448,16 @@ export class SyncChangeLog {
         mutation,
       };
       const body = registry
-        ? signAuthorizedChange(unsigned, registry, this.session.rootDir, this.key())
+        ? signAuthorizedChange(unsigned, registry, this.session.rootDir, this.readKeys())
         : validateSyncChangeBody(unsigned);
       const epoch = registry?.body.epoch ?? 1;
-      const contentKey = epoch === 1 ? this.key() : this.epochResolver()(epoch);
+      // Epoch 1 used to seal under the bare documents key, which made a
+      // change's identity depend on a key `vbrain rekey` rotates. The resolver
+      // hands back the structured pair instead, so the id comes from the
+      // permanent syncChange key and only the body key rotates. Changes an
+      // earlier build wrote keep their old ids and still open through the
+      // resolver's legacyKey.
+      const contentKey = this.epochResolver()(epoch);
       const envelope = sealSyncChange(body, contentKey, epoch);
       const change = openSyncChange(envelope, this.epochResolver());
       current.push(change);
@@ -2488,10 +2492,16 @@ export class SyncChangeLog {
         mutation,
       };
       const body = registry
-        ? signAuthorizedChange(unsigned, registry, this.session.rootDir, this.key())
+        ? signAuthorizedChange(unsigned, registry, this.session.rootDir, this.readKeys())
         : validateSyncChangeBody(unsigned);
       const epoch = registry?.body.epoch ?? 1;
-      const contentKey = epoch === 1 ? this.key() : this.epochResolver()(epoch);
+      // Epoch 1 used to seal under the bare documents key, which made a
+      // change's identity depend on a key `vbrain rekey` rotates. The resolver
+      // hands back the structured pair instead, so the id comes from the
+      // permanent syncChange key and only the body key rotates. Changes an
+      // earlier build wrote keep their old ids and still open through the
+      // resolver's legacyKey.
+      const contentKey = this.epochResolver()(epoch);
       const envelope = sealSyncChange(body, contentKey, epoch);
       const change = openSyncChange(envelope, this.epochResolver());
       validateChangeSet([...current, change]);
