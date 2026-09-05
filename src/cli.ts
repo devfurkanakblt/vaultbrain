@@ -49,6 +49,7 @@ import { describeCapabilities, parsePluginManifest, type PluginCapability } from
 import { generatePluginSigningKey, signPluginPackage } from "./plugin-signatures.js";
 import { DocumentVault, type PropertyValue } from "./documents.js";
 import { OllamaLocalModelAdapter } from "./semantic.js";
+import { createBackup, restoreBackup, verifyBackup } from "./backup.js";
 import { exportVault } from "./export.js";
 import { importObsidianVault } from "./obsidian-import.js";
 import { readTextFileLimited, writeFileAtomic } from "./fs-safe.js";
@@ -1879,6 +1880,55 @@ program
     if (opts.report) console.log(`Full report written to ${path.resolve(opts.report)}.`);
     console.log("This copy is not encrypted. Anyone who can read that directory can read every note in it.");
     if (!report.ok) process.exitCode = 2;
+  });
+
+program
+  .command("backup <archive>")
+  .description("write a self-contained encrypted backup of this vault, and verify it")
+  .action(async (archive) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const report = createBackup(dir, archive, passphrase);
+
+    appendAudit(
+      dir,
+      { actor: "cli-direct", file: "vault", key: `backup:${report.files}` },
+      passphrase,
+    );
+
+    console.log(`Backed up ${report.files} files (${report.bytes} bytes) to ${report.archive}.`);
+    console.log(`Archive size: ${report.archiveBytes} bytes. Taken at ${report.createdAt}.`);
+    console.log("Verified: the archive was read back and every entry opened and matched.");
+    console.log(
+      "It opens with this vault's passphrase and nothing else. Store it somewhere that " +
+        "survives losing this machine, and remember that the passphrase is not in it."
+    );
+  });
+
+program
+  .command("restore <archive> <destination>")
+  .description("restore an encrypted backup into a new vault directory")
+  .option("--verify-only", "check the archive and write nothing")
+  .action(async (archive, destination, opts) => {
+    // The passphrase belongs to the archive, not to --vault: a restore usually
+    // runs when there is no vault at that path to ask about.
+    const passphrase = await getPassphrase({
+      prompt: "Passphrase of the backed-up vault (or set VBRAIN_PASSPHRASE): ",
+    });
+    if (opts.verifyOnly) {
+      const checked = verifyBackup(archive, passphrase);
+      console.log(`Verified ${checked.files} files (${checked.bytes} bytes) in ${checked.archive}.`);
+      console.log(`Taken at ${checked.createdAt} from a ${checked.formatVersion} vault. Nothing was written.`);
+      return;
+    }
+
+    const report = restoreBackup(archive, destination, passphrase);
+    console.log(`Restored ${report.files} files (${report.bytes} bytes) to ${report.destination}.`);
+    console.log(`The backup was taken at ${report.createdAt} from a ${report.formatVersion} vault.`);
+    console.log(
+      "Every entry was verified before anything was moved into place. The restored vault's " +
+        "audit chain ends where the backup was taken; nothing that happened after it is here."
+    );
   });
 
 program
