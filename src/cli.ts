@@ -49,6 +49,7 @@ import { describeCapabilities, parsePluginManifest, type PluginCapability } from
 import { generatePluginSigningKey, signPluginPackage } from "./plugin-signatures.js";
 import { DocumentVault, type PropertyValue } from "./documents.js";
 import { OllamaLocalModelAdapter } from "./semantic.js";
+import { exportVault } from "./export.js";
 import { importObsidianVault } from "./obsidian-import.js";
 import { readTextFileLimited, writeFileAtomic } from "./fs-safe.js";
 import {
@@ -1833,6 +1834,51 @@ program
       );
     }
     await startMcpServer(dir, opts.agent);
+  });
+
+program
+  .command("export <destination>")
+  .description("write the whole vault out as plain Markdown, JSON Canvas and attachment files")
+  .option("--report <file>", "write the complete export report as JSON")
+  .option("--assets <directory>", "folder the exported attachments are written to", "assets")
+  .action(async (destination, opts) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const report = exportVault(dir, destination, passphrase, { assetsDir: opts.assets });
+
+    // Counts, not the destination: this record stays in the vault, and where
+    // someone put a plaintext copy of it is not a fact worth storing there.
+    appendAudit(
+      dir,
+      {
+        actor: "cli-direct",
+        file: "documents",
+        key: `export:${report.notes.written}:${report.canvases.written}:${report.attachments.written}`,
+      },
+      passphrase,
+    );
+    if (opts.report) {
+      writeFileAtomic(path.resolve(opts.report), `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+    }
+
+    console.log(`Exported ${report.notes.written}/${report.notes.total} notes to ${report.destination}.`);
+    console.log(`Exported ${report.canvases.written}/${report.canvases.total} canvases.`);
+    console.log(
+      `Exported ${report.attachments.written}/${report.attachments.total} attachments ` +
+        `(${report.attachments.bytes} bytes) into ${opts.assets}/.`,
+    );
+    const errors = report.issues.filter((issue) => issue.severity === "error");
+    const warnings = report.issues.filter((issue) => issue.severity === "warning");
+    console.log(`Export report: ${errors.length} error(s), ${warnings.length} warning(s).`);
+    for (const issue of report.issues.slice(0, 20)) {
+      console.log(`  ${issue.severity.toUpperCase()} [${issue.code}] ${issue.path}: ${issue.message}`);
+    }
+    if (report.issues.length > 20) {
+      console.log(`  ... ${report.issues.length - 20} more issue(s); use --report <file> for the complete report.`);
+    }
+    if (opts.report) console.log(`Full report written to ${path.resolve(opts.report)}.`);
+    console.log("This copy is not encrypted. Anyone who can read that directory can read every note in it.");
+    if (!report.ok) process.exitCode = 2;
   });
 
 program

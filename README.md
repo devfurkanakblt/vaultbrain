@@ -297,6 +297,24 @@ you would any other migration log. The encrypted destination must be outside
 the source vault, preventing an import from recursively consuming its own
 output. Use `--include-hidden` only when hidden source content is intentional.
 
+The same shape comes back out. `vbrain export` writes every note as Markdown
+with frontmatter, every canvas as JSON Canvas, and every attachment into an
+assets folder beside them — the shape `import-obsidian` reads, so a vault can
+be exported and re-imported without losing note identity.
+
+```bash
+node dist/cli.js --vault ./vault/personal export ./plain-copy \
+  --report ./export-report.json
+```
+
+The export is plaintext: everything the vault encrypts is readable by anyone
+who can read that directory. It refuses a destination inside the vault, and
+refuses to merge into a directory that already holds files. Two things the
+vault permits that a filesystem does not — a note path such as `Q3: results.md`
+or `aux.md`, and two attachments sharing one filename — are renamed rather than
+dropped, and the report names every rename. The vault's audit chain records
+that an export happened and how much it carried, but not where it was written.
+
 ### Performance gates
 
 ```bash

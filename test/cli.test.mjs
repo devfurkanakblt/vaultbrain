@@ -195,3 +195,37 @@ test("the pre-rename SBRAIN_ environment names still work", () => {
     fs.rmSync(vaultDir, { recursive: true, force: true });
   }
 });
+
+test("vbrain export writes a plaintext copy, records it, and says what it is", () => {
+  const vaultDir = tempVault("export");
+  const outside = tempVault("export-out");
+  const destination = path.join(outside, "plain");
+  const env = { VBRAIN_PASSPHRASE: "cli-export-test-passphrase" };
+  const flags = ["--vault", vaultDir];
+
+  const source = path.join(outside, "Ada.md");
+  fs.writeFileSync(source, "---\ntitle: Ada\n---\n# Ada\n");
+  runCli([...flags, "docs", "import", "People/Ada.md", source], env);
+
+  const reportPath = path.join(outside, "export-report.json");
+  const output = runCli([...flags, "export", destination, "--report", reportPath], env);
+
+  assert.match(output, /Exported 1\/1 notes/u);
+  assert.match(output, /This copy is not encrypted/u);
+  assert.equal(fs.readFileSync(path.join(destination, "People", "Ada.md"), "utf8").includes("# Ada"), true);
+
+  const report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
+  assert.equal(report.ok, true);
+  assert.deepEqual(report.notes, { total: 1, written: 1 });
+
+  // The chain records that a plaintext copy was made, and not where it went.
+  const audit = fs.readFileSync(path.join(vaultDir, "audit.log"), "utf8");
+  assert.match(audit, /export:1:0:0/u);
+  assert.equal(audit.includes(destination), false);
+
+  // A second export into the same directory is refused rather than merged.
+  assert.throws(() => runCli([...flags, "export", destination], env), /not empty/u);
+
+  fs.rmSync(vaultDir, { recursive: true, force: true });
+  fs.rmSync(outside, { recursive: true, force: true });
+});

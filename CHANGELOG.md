@@ -5,6 +5,17 @@ Versioning once the encrypted storage format reaches 1.0.
 
 ## Unreleased
 
+- `vbrain export <destination>` writes the whole vault out as plain Markdown
+  with frontmatter, JSON Canvas boards and an assets folder of attachments —
+  the same shape `docs import-obsidian` reads, so export and import describe
+  one format and a round trip keeps note identity. Export previously worked one
+  note or one canvas at a time, which made "hand me back my data" a manual
+  exercise. Note paths a filesystem cannot take (`Q3: results.md`, `aux.md`)
+  and attachments that share a filename are renamed rather than dropped, and
+  the report names every rename. The copy is plaintext, so the command refuses
+  a destination inside the vault or one that already holds files, and the audit
+  chain records that an export happened without recording where it went.
+
 - The desktop application can now manage the keys that decide whether a vault
   survives. It shows what the keyring holds — every slot with its label,
   creation time and key-derivation cost — changes the passphrase, and writes a

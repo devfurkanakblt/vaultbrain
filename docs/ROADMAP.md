@@ -197,7 +197,7 @@ lock-in by another name. Export is one note or one canvas at a time. Backup is
 "copy the directory": the recovery drill does exactly that with `fs.cpSync`,
 and no command or documented procedure says so to a user.
 
-- [ ] `vbrain export`: the whole vault as a folder of Markdown with
+- [x] `vbrain export`: the whole vault as a folder of Markdown with
       frontmatter, attachments beside the notes that reference them, and
       canvases as JSON Canvas. The Obsidian importer already reads that shape,
       so export and import would describe one format rather than two.
