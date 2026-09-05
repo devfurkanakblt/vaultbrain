@@ -666,6 +666,16 @@ The rules, all enforced before any byte is transferred:
   `ATTACHMENT_CHUNK_SIZE` = 1 MiB. `size` is at least 1 because an empty
   attachment is refused at `prepareAttachmentPut`, so `chunks` is at least 1.
 
+**Blob sealing key.** A blob is sealed under a key derived from the permanent
+`syncChange` key, `HMAC-SHA256(syncChange, "secondbrain-vault:sync-blob-key:v1")`,
+not under the rotatable `documents` key. A blob id is the SHA-256 of the sealed
+bytes and the nonce is random, so a blob can never be reproduced under its own
+id: the staged bytes are the only copy that satisfies the manifest inside the
+version 3 change body that names them. Deriving from a key `vbrain rekey` never
+rotates is what keeps that manifest valid for the life of the vault. A reader
+also accepts the `documents` key, which is what a blob staged before this
+derivation existed was sealed under.
+
 **Blob identity.** A blob is one plaintext 1 MiB chunk sealed as a
 `DocumentPayload` under the vault's document key with AAD
 `attachmentChunkAad(attachmentId, index)` — the same key, the same AAD

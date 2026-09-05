@@ -53,7 +53,7 @@ import {
   type EpochKeyWrap,
 } from "./sync-epoch.js";
 import { SyncApplyEngine, planSyncApplication, type SyncApplyEffects } from "./sync/engine.js";
-import { SyncBlobStore, openAttachmentBlob, sealAttachmentBlobs } from "./sync-blobs.js";
+import { SyncBlobStore, deriveBlobKey, openAttachmentBlob, sealAttachmentBlobs } from "./sync-blobs.js";
 import {
   SyncApplyReceiptStore,
   SyncLocalTransaction,
@@ -1929,6 +1929,19 @@ function zeroBlobSession(session: DocumentKeySession): void {
  * Capture an attachment as blob references and stage the sealed chunks the
  * receiving device will need. The bytes never enter the change body.
  */
+/**
+ * Sealing uses the permanent blob key alone. Opening also accepts the two
+ * documents-key generations, because blobs staged by a build that predates
+ * `deriveBlobKey` are sealed under the documents key and must keep opening.
+ */
+function blobSealKey(session: DocumentKeySession): Buffer {
+  return deriveBlobKey(session.syncChangeKey);
+}
+
+function blobReadKeys(session: DocumentKeySession): Buffer[] {
+  return [blobSealKey(session), ...session.readKeys];
+}
+
 function attachmentSnapshot(
   data: Buffer,
   info: AttachmentInfo,
@@ -2947,7 +2960,7 @@ export class SyncedDocumentVault extends DocumentVault {
         ? super.getAttachment(operation.objectId)
         : undefined;
       const currentValue = existing
-        ? asSyncJson(attachmentSnapshot(existing.data, existing.info, this.blobSession.key, this.blobStore))
+        ? asSyncJson(attachmentSnapshot(existing.data, existing.info, blobSealKey(this.blobSession), this.blobStore))
         : null;
       if (operation.operation === "delete") {
         if (!existing) continue;
@@ -3053,7 +3066,7 @@ export class SyncedDocumentVault extends DocumentVault {
       const prepared = this.prepareAttachmentPut(data, filename, mime);
       const before = prepared.existed ? super.getAttachment(prepared.info.id) : undefined;
       const targetValue = prevalidateLocalCaptureSnapshot(
-        attachmentSnapshot(prepared.data, prepared.info, this.blobSession.key, this.blobStore),
+        attachmentSnapshot(prepared.data, prepared.info, blobSealKey(this.blobSession), this.blobStore),
         "Attachment snapshot",
       );
       const resolution = this.changeLog.resolve("attachment", prepared.info.id);
@@ -3069,7 +3082,7 @@ export class SyncedDocumentVault extends DocumentVault {
         targetStorageRevision: null,
         beforeValue: before
           ? prevalidateLocalCaptureSnapshot(
-              attachmentSnapshot(before.data, before.info, this.blobSession.key, this.blobStore),
+              attachmentSnapshot(before.data, before.info, blobSealKey(this.blobSession), this.blobStore),
               "Attachment snapshot",
             )
           : null,
@@ -3327,7 +3340,7 @@ export class SyncedDocumentVault extends DocumentVault {
     this.assertBlobsStaged(snapshot);
     const data = Buffer.concat(
       snapshot.blobs.map((id, index) =>
-        openAttachmentBlob(this.blobStore.read(id), objectId, index, this.blobSession.key),
+        openAttachmentBlob(this.blobStore.read(id), objectId, index, blobReadKeys(this.blobSession)),
       ),
     );
     if (data.length !== snapshot.size) throw new Error("Attachment sync size does not match its blobs.");

@@ -305,3 +305,34 @@ test("sync change bodies sealed before a re-key still open during one", async ()
   assert.equal(during.verify().heads.length, 1);
   during.close();
 });
+
+test("blob addressing is derived from a key a re-key never rotates", async () => {
+  const { deriveBlobKey, openAttachmentBlob, sealAttachmentBlobs } = await import("../dist/sync-blobs.js");
+  const { openDocumentKey } = await import("../dist/document-crypto.js");
+  const vaultDir = temporaryVault("rekey-blob-key");
+  const attachmentId = "b".repeat(64);
+
+  const before = openDocumentKey(vaultDir, PASSPHRASE);
+  const sealed = sealAttachmentBlobs(Buffer.from("attachment bytes"), attachmentId, blobKeyOf(before));
+  // A blob staged by a build that predates the permanent key is sealed under
+  // the documents key; it has to keep opening.
+  const legacy = sealAttachmentBlobs(Buffer.from("older bytes"), attachmentId, before.key);
+
+  stallMidRekey(vaultDir);
+
+  const after = openDocumentKey(vaultDir, PASSPHRASE);
+  assert.ok(blobKeyOf(after).equals(blobKeyOf(before)), "rotating documents must not move the blob key");
+  assert.notEqual(after.key.toString("hex"), before.key.toString("hex"));
+
+  // A blob id is the SHA-256 of the sealed bytes, and the nonce is random, so
+  // a blob can never be regenerated under its own id — the staged bytes are
+  // the only copy that satisfies the manifest inside a version 3 change body.
+  // That is exactly why the key that opens them must not rotate.
+  const readKeys = [blobKeyOf(after), ...after.readKeys];
+  assert.equal(openAttachmentBlob(sealed.payloads[0], attachmentId, 0, readKeys).toString("utf8"), "attachment bytes");
+  assert.equal(openAttachmentBlob(legacy.payloads[0], attachmentId, 0, readKeys).toString("utf8"), "older bytes");
+
+  function blobKeyOf(session) {
+    return deriveBlobKey(session.syncChangeKey);
+  }
+});

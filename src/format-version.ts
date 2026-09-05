@@ -51,6 +51,7 @@ export const AAD = {
   pluginPolicy: "secondbrain-vault:plugin-policy:v1",
   attachmentId: "secondbrain-vault:attachment-id:v1\0",
   syncChangeId: "secondbrain-vault:sync-change-id:v1",
+  syncBlobKey: "secondbrain-vault:sync-blob-key:v1",
   syncChangeKey: "secondbrain-vault:sync-change-key:v1",
   syncChangeKeyV2: "secondbrain-vault:sync-change-key:v2",
   syncChangePrefix: "secondbrain-vault:sync-change:v1:",

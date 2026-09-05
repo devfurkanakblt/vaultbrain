@@ -8,11 +8,28 @@ import {
   type DocumentReadKey,
 } from "./document-crypto.js";
 import { ATTACHMENT_CHUNK_SIZE } from "./documents.js";
-import { attachmentChunkAad } from "./format-version.js";
+import { AAD, attachmentChunkAad } from "./format-version.js";
 import { assertNotSymlink, writeFileAtomic } from "./fs-safe.js";
 import { resolveInside } from "./safety.js";
 
 export const MAX_BLOB_BYTES = 2 * 1024 * 1024;
+
+/**
+ * The key that seals transport blobs, derived from the permanent `syncChange`
+ * key rather than taken from the rotatable `documents` one.
+ *
+ * A blob's id is the SHA-256 of its sealed bytes, and those ids travel inside
+ * a version 3 change body, so they are part of the change's canonical JSON and
+ * therefore of its id. Sealing a blob under a key `vbrain rekey` rotates would
+ * rename every blob a re-key touched, leave every already-sealed manifest
+ * pointing at nothing, and make the manifest unfixable — correcting it would
+ * change the change id the causal DAG references. Deriving from a key that is
+ * never rotated is what keeps blob addressing stable for the life of the
+ * vault, exactly as `syncChange` keeps change ids stable.
+ */
+export function deriveBlobKey(syncChangeKey: Buffer): Buffer {
+  return crypto.createHmac("sha256", syncChangeKey).update(AAD.syncBlobKey).digest();
+}
 const BLOB_ID_PATTERN = /^[0-9a-f]{64}$/u;
 
 function assertBlobId(id: string): void {
