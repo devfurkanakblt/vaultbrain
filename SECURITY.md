@@ -33,9 +33,10 @@ Per-agent grants and redaction narrow how much an agent is handed. They are not
 a boundary against a model:
 
 - A redacted value still enters the calling model's context as a redacted value.
-- `SBRAIN_AGENT` is a name the agent chooses, not a credential; anything able to
-  start the MCP server can pick any name and inherit that name's grants.
-- The security boundary is the passphrase and the encrypted files. `sbrain get`
+- The MCP agent name is a label the process is started with (`vbrain mcp --agent
+  <name>`), not a credential; anything able to start the MCP server can pass any
+  name and inherit that name's grants.
+- The security boundary is the passphrase and the encrypted files. `vbrain get`
   (Mode 1) remains the only path that involves no model at all.
 
 Report a grant that can be bypassed *without* the passphrase — for example a

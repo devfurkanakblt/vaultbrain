@@ -264,7 +264,7 @@ export function decide(file: GrantFile | null, request: AccessRequest): GrantDec
   if (!file) {
     return {
       allowed: false,
-      reason: "This vault has no grant policy. Ask the vault owner to run: sbrain grant add.",
+      reason: "This vault has no grant policy. Ask the vault owner to run: vbrain grant add.",
       redact: "full",
       requiresConfirmation: false,
       ungoverned: true,

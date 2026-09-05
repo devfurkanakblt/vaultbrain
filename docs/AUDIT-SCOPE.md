@@ -113,9 +113,11 @@ weaknesses is worse than no scope document:
   redaction narrow what an agent is *handed*, but a redacted value still
   enters the calling model's context as a redacted value; the grant layer
   cannot stop the model from having seen it.
-- **`SBRAIN_AGENT` is a name the agent chooses, not a credential.** Anything
-  able to start the MCP server can pick any agent name and inherit that
-  name's grants.
+- **The MCP agent name is a label, not a credential.** The owner pins it on
+  the process command line (`vbrain mcp --agent <name>`) rather than it being
+  read from client-controlled request data, but nothing authenticates it:
+  anything able to start the MCP server can pass any agent name and inherit
+  that name's grants.
 - **Epoch rotation is forward-only.** Revoking a device advances the epoch
   and issues a fresh random content key wrapped only to remaining active
   devices — but a revoked device keeps every epoch key it already held, and
@@ -123,7 +125,7 @@ weaknesses is worse than no scope document:
   is everything sealed afterward. This is by design, not an oversight, but
   it means revocation is not equivalent to retroactively erasing a departed
   device's access to history.
-- **Only the Windows credential-store path is exercised by tests.** `sbrain
+- **Only the Windows credential-store path is exercised by tests.** `vbrain
   unlock --remember` can hand the passphrase to macOS Keychain or libsecret
   on Linux, but this project's test suite runs on and validates only the
   Windows DPAPI path.
@@ -236,7 +238,8 @@ rhetorical:
    underspecification in `docs/FORMAT-1.0.md`?
 5. Is there any path by which the grant layer (`src/grants.ts`) can be made
    to leak an unredacted value to an agent without the agent (or whoever
-   controls its `SBRAIN_AGENT` name) already holding the passphrase?
+   starts its MCP process under that `--agent` name) already holding the
+   passphrase?
 
 ## 9. Engagement shape and deliverables
 

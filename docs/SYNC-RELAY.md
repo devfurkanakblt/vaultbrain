@@ -4,7 +4,7 @@ The Phase 6 relay is a deliberately small, opaque transport. It accepts only enc
 
 ## Security boundary
 
-- A bearer token of at least 32 bytes protects every vault endpoint. Supply it only through `SBRAIN_RELAY_TOKEN`; it is never accepted as a CLI argument.
+- A bearer token of at least 32 bytes protects every vault endpoint. Supply it only through `VBRAIN_RELAY_TOKEN`; it is never accepted as a CLI argument. The pre-rename `SBRAIN_RELAY_TOKEN` is still read as a compatibility alias when the new name is unset, so an existing deployment keeps working, but new setups should use `VBRAIN_RELAY_TOKEN`.
 - Vault, change and artifact routes use 64-character opaque IDs. Writes are content-addressed and immutable.
 - Request size, total vault bytes, change count, pagination, header time and request time are bounded.
 - Storage paths are containment-checked and symbolic links are rejected.
@@ -46,7 +46,7 @@ Applying an attachment change whose chunks have not all arrived fails closed, na
 
 `sync relay push` and `sync relay pull` carry blobs on their own, so the common path needs no extra command: push uploads a change's blobs before the change, and pull fetches the blobs of the changes it admits. `sync relay pull`'s success JSON now reports what that cost — the object is `{ registryRevision, changes, blobs, checkpoint, checkpointWarning }`, where `blobs` is `{ fetched, skipped }`.
 
-The `sync blobs` group covers the recovery paths. Every command below needs the program-level `--experimental-trusted-sync` gate, and the two that talk to a relay need `SBRAIN_RELAY_TOKEN`:
+The `sync blobs` group covers the recovery paths. Every command below needs the program-level `--experimental-trusted-sync` gate, and the two that talk to a relay need `VBRAIN_RELAY_TOKEN`:
 
 ```bash
 # One line per attachment change that carries blob references, in change
@@ -82,7 +82,7 @@ A bundle export fails closed rather than shipping half an attachment: if a refer
 Generate a random token with a password manager or cryptographic random generator, then set it on both server and client:
 
 ```bash
-export SBRAIN_RELAY_TOKEN='<at-least-32-random-bytes>'
+export VBRAIN_RELAY_TOKEN='<at-least-32-random-bytes>'
 vbrain --experimental-trusted-sync sync relay serve ./relay-data --port 8787
 ```
 

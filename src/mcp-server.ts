@@ -109,7 +109,11 @@ export function resolveForAgent(
  * never invokes an LLM at all.
  */
 export async function startMcpServer(vaultDir: string, configuredAgent: string): Promise<void> {
-  const passphrase = process.env.SBRAIN_PASSPHRASE;
+  // Resolved the same way `getPassphrase` does: the vbrain name first, the
+  // pre-rename SBRAIN_PASSPHRASE as a read-only alias. Reading only the legacy
+  // name here contradicted the error message below, so setting the name the
+  // message asks for left the server refusing to start.
+  const passphrase = process.env.VBRAIN_PASSPHRASE ?? process.env.SBRAIN_PASSPHRASE;
   if (!passphrase) {
     console.error("VBRAIN_PASSPHRASE must be set to run the MCP server (no interactive prompt in agent contexts).");
     process.exit(1);
@@ -117,7 +121,7 @@ export async function startMcpServer(vaultDir: string, configuredAgent: string):
 
   if (!grantsExist(vaultDir)) {
     throw new Error(
-      "MCP access is disabled until the vault owner creates a grant with 'sbrain grant add'."
+      "MCP access is disabled until the vault owner creates a grant with 'vbrain grant add'."
     );
   }
 
@@ -136,7 +140,7 @@ export async function startMcpServer(vaultDir: string, configuredAgent: string):
     throw new Error(`No grant is configured for MCP agent "${agent}".`);
   }
 
-  // Reloaded per call rather than cached, so `sbrain grant revoke` takes effect
+  // Reloaded per call rather than cached, so `vbrain grant revoke` takes effect
   // on the agent's very next request instead of at its next restart.
   const policy = (): GrantFile | null => loadGrants(vaultDir, passphrase);
 

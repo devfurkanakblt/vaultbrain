@@ -66,7 +66,7 @@ export function SyncStatus({ status }: SyncStatusProps) {
 
       <footer className="sync-footer">
         <p>Sync is read-only in the desktop app. Run mutations from the CLI:</p>
-        <code>sbrain --experimental-trusted-sync sync devices list</code>
+        <code>vbrain --experimental-trusted-sync sync devices list</code>
       </footer>
     </>}
   </section>;

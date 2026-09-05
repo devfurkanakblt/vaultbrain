@@ -6,8 +6,8 @@ import path from "node:path";
 import { startSyncRelay, SyncRelayClient } from "../dist/sync-relay.js";
 import { SyncChangeLog, SyncDeviceManager } from "../dist/sync.js";
 
-const passphrase = process.env.SBRAIN_DRILL_PASSPHRASE ?? "throwaway-sync-recovery-drill-passphrase";
-const token = process.env.SBRAIN_RELAY_TOKEN ?? "throwaway-sync-recovery-drill-relay-token";
+const passphrase = process.env.VBRAIN_DRILL_PASSPHRASE ?? process.env.SBRAIN_DRILL_PASSPHRASE ?? "throwaway-sync-recovery-drill-passphrase";
+const token = process.env.VBRAIN_RELAY_TOKEN ?? process.env.SBRAIN_RELAY_TOKEN ?? "throwaway-sync-recovery-drill-relay-token";
 const deviceId = "11111111-1111-4111-8111-111111111111";
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "secondbrain-sync-recovery-drill-"));
 const sourceDir = path.join(root, "source");

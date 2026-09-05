@@ -34,7 +34,7 @@ personal data.
 
 This is the most important section in the README.
 
-|                                                 | Mode 1 — `sbrain get` (Direct)                | Mode 2 — `sbrain mcp` (AI-assisted)                                                                                                                                                                                                                    |
+|                                                 | Mode 1 — `vbrain get` (Direct)                | Mode 2 — `vbrain mcp` (AI-assisted)                                                                                                                                                                                                                    |
 | ----------------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Who's involved                                  | You, or a script. No LLM.                     | An AI agent (e.g. Claude) via MCP                                                                                                                                                                                                                      |
 | Exposure                                        | Zero — value never enters any model's context | Not zero — content **does** pass through the calling model's context, both when you tell the agent something worth saving (`store_note`) and when it resolves a value back (`resolve_key`) — that's inherent to how a conversational agent has to work |
@@ -109,7 +109,7 @@ BLOOD_TYPE="0 Rh+"
 - Files live as `vault/<name>.kv.enc` — AES-256-GCM encrypted, scrypt-derived
   key from your passphrase. The plaintext above never touches disk.
 - Key names and `@desc` comments are copied into encrypted `schema.enc` by
-  `sbrain index`; values are never included. Never put sensitive
+  `vbrain index`; values are never included. Never put sensitive
   information in a description — the tool can't enforce that for you.
 
 ## Quickstart
@@ -510,7 +510,7 @@ prototype-shaping keys are rejected before anything enters encrypted storage.
         "claude-code"
       ],
       "env": {
-        "SBRAIN_PASSPHRASE": "use-a-real-passphrase-here"
+        "VBRAIN_PASSPHRASE": "use-a-real-passphrase-here"
       }
     }
   }
@@ -566,53 +566,53 @@ once.
 
 ```bash
 # Initialize enrollment and pin the returned authority fingerprint.
-sbrain --experimental-trusted-sync sync devices init "Owner laptop" \
+vbrain --experimental-trusted-sync sync devices init "Owner laptop" \
   --device-id <device-id>
 
 # On a securely bootstrapped second device, create a proof-of-possession request.
-sbrain --experimental-trusted-sync sync devices request "Travel laptop" \
+vbrain --experimental-trusted-sync sync devices request "Travel laptop" \
   --device-id <second-device-id> > enrollment-request.json
 
 # The owner approves it, then transfers the newer encrypted registry back.
-sbrain --experimental-trusted-sync sync devices enroll enrollment-request.json
-sbrain --experimental-trusted-sync sync devices export > device-registry.json
-sbrain --experimental-trusted-sync sync devices import device-registry.json
+vbrain --experimental-trusted-sync sync devices enroll enrollment-request.json
+vbrain --experimental-trusted-sync sync devices export > device-registry.json
+vbrain --experimental-trusted-sync sync devices import device-registry.json
 
 # Removal is owner-signed at the last device sequence observed locally.
-sbrain --experimental-trusted-sync sync devices revoke <second-device-id>
+vbrain --experimental-trusted-sync sync devices revoke <second-device-id>
 
 # Record revision 1 of one logical object.
-sbrain --experimental-trusted-sync sync append <device-id> note <note-id> put \
+vbrain --experimental-trusted-sync sync append <device-id> note <note-id> put \
   --revision 1 --value '{"title":"Plan","body":"private"}'
 
 # Exchange opaque envelopes through files/stdout.
-sbrain --experimental-trusted-sync sync export > changes.json
-sbrain --experimental-trusted-sync sync import changes.json
+vbrain --experimental-trusted-sync sync export > changes.json
+vbrain --experimental-trusted-sync sync import changes.json
 
 # Validate the complete DAG, list/inspect concurrent heads, then apply a clean one.
-sbrain --experimental-trusted-sync sync verify
-sbrain --experimental-trusted-sync sync conflicts
-sbrain --experimental-trusted-sync sync resolve note <note-id>
-sbrain --experimental-trusted-sync sync apply note <note-id>
+vbrain --experimental-trusted-sync sync verify
+vbrain --experimental-trusted-sync sync conflicts
+vbrain --experimental-trusted-sync sync resolve note <note-id>
+vbrain --experimental-trusted-sync sync apply note <note-id>
 
 # Resolve manually by naming one preserved head. Plugin-policy conflicts can
 # instead use --safe, which only unions revocations and enables restricted mode.
-sbrain --experimental-trusted-sync --sync-device <device-id> \
+vbrain --experimental-trusted-sync --sync-device <device-id> \
   sync resolve note <note-id> --head <change-id>
-sbrain --experimental-trusted-sync --sync-device <device-id> \
+vbrain --experimental-trusted-sync --sync-device <device-id> \
   sync resolve vault plugin-policy --safe
 
 # Example automatically captured edit.
-sbrain --experimental-trusted-sync --sync-device <device-id> \
+vbrain --experimental-trusted-sync --sync-device <device-id> \
   docs put Plans/Launch.md --body "Ready"
 
 # Publish a known-good checkpoint and push it with the encrypted change log.
-export SBRAIN_RELAY_TOKEN='<at-least-32-random-bytes>'
-sbrain --experimental-trusted-sync sync checkpoint create
-sbrain --experimental-trusted-sync sync relay push https://relay.example
+export VBRAIN_RELAY_TOKEN='<at-least-32-random-bytes>'
+vbrain --experimental-trusted-sync sync checkpoint create
+vbrain --experimental-trusted-sync sync relay push https://relay.example
 
 # First contact pins fingerprints obtained through a trusted channel.
-sbrain --experimental-trusted-sync --vault ./restored-vault \
+vbrain --experimental-trusted-sync --vault ./restored-vault \
   sync relay pull https://relay.example \
   --authority <owner-authority-sha256> \
   --checkpoint <owner-checkpoint-sha256>
@@ -648,8 +648,8 @@ The product itself remains pre-1.0 pending independent review.
 
 ## The "fast find" layer
 
-`sbrain index` rebuilds encrypted `schema.enc` — key names + descriptions, no values —
-across the whole vault. `sbrain search` / the `find_key` MCP tool run a fuzzy
+`vbrain index` rebuilds encrypted `schema.enc` — key names + descriptions, no values —
+across the whole vault. `vbrain search` / the `find_key` MCP tool run a fuzzy
 match over that small, safe file instead of decrypting and scanning every
 vault file. This is the speed win over an Obsidian graph traversal: lookup
 cost scales with the number of _keys_, not the size of your notes.
@@ -659,7 +659,7 @@ cost scales with the number of _keys_, not the size of your notes.
 - Encryption protects data **at rest**. Once `vbrain get` or `resolve_key`
   decrypts a value, it's plaintext in that process's memory / stdout — treat
   it like any other secret in a terminal.
-- The passphrase prompt is masked on a real terminal, and `sbrain unlock
+- The passphrase prompt is masked on a real terminal, and `vbrain unlock
 --remember` can hand the passphrase to the OS credential store instead
   (Windows DPAPI, macOS Keychain, libsecret on Linux). Only the Windows path is
   exercised by this project's tests, because that is the platform it is

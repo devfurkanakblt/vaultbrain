@@ -151,7 +151,7 @@ program
     const passphrase = await getPassphrase({ vaultDir: dir });
     const schema = readSchema(dir, passphrase);
     if (!schema) {
-      console.log("No encrypted schema yet — run 'sbrain index' first.");
+      console.log("No encrypted schema yet — run 'vbrain index' first.");
       return;
     }
     const hits = filterNotesByDate(schema, { file: opts.category, from: opts.from, to: opts.to });
@@ -187,7 +187,7 @@ program
     const passphrase = await getPassphrase({ vaultDir: dir });
     const schema = readSchema(dir, passphrase);
     if (!schema) {
-      console.log("No encrypted schema yet — run 'sbrain index' first.");
+      console.log("No encrypted schema yet — run 'vbrain index' first.");
       return;
     }
     for (const [file, entries] of Object.entries(schema.files)) {
@@ -204,7 +204,7 @@ program
     const passphrase = await getPassphrase({ vaultDir: dir });
     const schema = readSchema(dir, passphrase);
     if (!schema) {
-      console.log("No encrypted schema yet — run 'sbrain index' first.");
+      console.log("No encrypted schema yet — run 'vbrain index' first.");
       return;
     }
     const hits = searchSchema(schema, query);
@@ -719,10 +719,13 @@ const sync = program
   .description("encrypted immutable change log and deterministic conflict inspection");
 
 function relayToken(): string {
-  const token = process.env.SBRAIN_RELAY_TOKEN;
-  if (!token) throw new Error("Set SBRAIN_RELAY_TOKEN to a random secret containing at least 32 bytes.");
+  // SBRAIN_RELAY_TOKEN was the public name before the vbrain rename. Kept as a
+  // read-only compatibility alias, the same way `getPassphrase` keeps
+  // SBRAIN_PASSPHRASE, so an existing relay deployment does not break.
+  const token = process.env.VBRAIN_RELAY_TOKEN ?? process.env.SBRAIN_RELAY_TOKEN;
+  if (!token) throw new Error("Set VBRAIN_RELAY_TOKEN to a random secret containing at least 32 bytes.");
   if (Buffer.byteLength(token, "utf8") < 32) {
-    throw new Error("SBRAIN_RELAY_TOKEN must contain at least 32 bytes.");
+    throw new Error("VBRAIN_RELAY_TOKEN must contain at least 32 bytes.");
   }
   return token;
 }
@@ -1024,7 +1027,7 @@ const syncRelay = sync
 
 syncRelay
   .command("serve <storage>")
-  .description("run a self-hosted relay; the bearer token is read from SBRAIN_RELAY_TOKEN")
+  .description("run a self-hosted relay; the bearer token is read from VBRAIN_RELAY_TOKEN")
   .option("--host <address>", "listen address", "127.0.0.1")
   .option("--port <number>", "listen port", "8787")
   .action(async (storage, opts) => {
@@ -1819,7 +1822,7 @@ program
     const dir = program.opts().vault;
     if (!grantsExist(dir)) {
       throw new Error(
-        "MCP access is disabled until you create a policy with 'sbrain grant add <agent> --scope ...'."
+        "MCP access is disabled until you create a policy with 'vbrain grant add <agent> --scope ...'."
       );
     }
     await startMcpServer(dir, opts.agent);

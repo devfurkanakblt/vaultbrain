@@ -6,7 +6,7 @@
  *   DOCTOR_NEXT_APPOINTMENT="2026-09-15"
  *
  * The `@desc` line is copied into the encrypted discovery catalog by
- * `sbrain index`. It must never itself contain the sensitive value because
+ * `vbrain index`. It must never itself contain the sensitive value because
  * agents with catalog discovery access may see it.
  */
 

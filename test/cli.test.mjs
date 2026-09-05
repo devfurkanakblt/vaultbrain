@@ -22,7 +22,7 @@ function tempVault(label) {
 
 test("sync devices list reports the active epoch and per-device state", () => {
   const vaultDir = tempVault("epoch");
-  const env = { SBRAIN_PASSPHRASE: "cli-epoch-test-passphrase" };
+  const env = { VBRAIN_PASSPHRASE: "cli-epoch-test-passphrase" };
   const flags = ["--vault", vaultDir, "--experimental-trusted-sync"];
 
   runCli([...flags, "sync", "devices", "init", "Owner laptop", "--device-id", DEVICE_A], env);
@@ -33,7 +33,7 @@ test("sync devices list reports the active epoch and per-device state", () => {
   fs.rmSync(vaultDir, { recursive: true, force: true });
 });
 
-test("sbrain format prints the frozen version matrix", () => {
+test("vbrain format prints the frozen version matrix", () => {
   const output = JSON.parse(runCli(["format"]));
   assert.equal(output.formatVersion, "1.0");
   assert.deepEqual(output.artifacts.encryptedEnvelope, {
@@ -100,7 +100,7 @@ function attachmentIdOf(output) {
 }
 
 test("sync export --bundle carries attachment blobs to another vault without a relay", () => {
-  const env = { SBRAIN_PASSPHRASE: "cli-bundle-test-passphrase" };
+  const env = { VBRAIN_PASSPHRASE: "cli-bundle-test-passphrase" };
   const sourceDir = tempVault("bundle-source");
   const source = ["--vault", sourceDir, "--experimental-trusted-sync"];
   runCli([...source, "sync", "devices", "init", "Owner laptop", "--device-id", DEVICE_A], env);
@@ -137,7 +137,7 @@ test("sync export --bundle carries attachment blobs to another vault without a r
 
 test("relay push and pull move blobs, and blobs prune and fetch reclaim and restore them", async () => {
   const token = "cli-relay-blob-token-with-at-least-32-bytes";
-  const env = { SBRAIN_PASSPHRASE: "cli-relay-blob-passphrase", SBRAIN_RELAY_TOKEN: token };
+  const env = { VBRAIN_PASSPHRASE: "cli-relay-blob-passphrase", VBRAIN_RELAY_TOKEN: token };
   const storageDir = tempVault("relay-storage");
   const relay = await startRelayProcess(storageDir, env);
   const scraps = [storageDir];
@@ -172,5 +172,26 @@ test("relay push and pull move blobs, and blobs prune and fetch reclaim and rest
   } finally {
     await relay.stop();
     for (const scrap of scraps) fs.rmSync(scrap, { recursive: true, force: true });
+  }
+});
+
+test("the pre-rename SBRAIN_ environment names still work", () => {
+  const vaultDir = tempVault("legacy-env");
+  try {
+    // getPassphrase and relayToken both keep the old names as read-only
+    // aliases. If this ever fails, an existing deployment breaks silently on
+    // upgrade, so the compatibility promise is pinned rather than assumed.
+    const legacy = { SBRAIN_PASSPHRASE: "cli-legacy-env-passphrase" };
+    const flags = ["--vault", vaultDir, "--experimental-trusted-sync"];
+    runCli([...flags, "sync", "devices", "init", "Owner laptop", "--device-id", DEVICE_A], legacy);
+    assert.match(runCli([...flags, "sync", "devices", "list"], legacy), /epoch 1/u);
+
+    // A short token must be rejected on its length, not fall through as unset.
+    assert.throws(
+      () => runCli([...flags, "sync", "relay", "push", "http://127.0.0.1:1"], { ...legacy, SBRAIN_RELAY_TOKEN: "too-short" }),
+      /VBRAIN_RELAY_TOKEN must contain at least 32 bytes/u,
+    );
+  } finally {
+    fs.rmSync(vaultDir, { recursive: true, force: true });
   }
 });

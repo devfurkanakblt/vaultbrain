@@ -44,7 +44,7 @@ describe("SyncStatus", () => {
   it("states that mutation is CLI-only and shows the command", () => {
     render(<SyncStatus status={base} />);
     expect(screen.getByText(/read-only/i)).toBeInTheDocument();
-    expect(screen.getByText(/sbrain --experimental-trusted-sync sync devices list/)).toBeInTheDocument();
+    expect(screen.getByText(/vbrain --experimental-trusted-sync sync devices list/)).toBeInTheDocument();
   });
 
   it("reports the recorded change count and the applied object count honestly", () => {
@@ -68,6 +68,6 @@ describe("SyncStatus", () => {
     render(<SyncStatus status={{ ...base, readable: false, registryVersion: 99 }} />);
     expect(screen.getByText(/newer format this build cannot display/i)).toBeInTheDocument();
     expect(screen.queryByText("Owner laptop")).not.toBeInTheDocument();
-    expect(screen.queryByText(/sbrain --experimental-trusted-sync/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/vbrain --experimental-trusted-sync/i)).not.toBeInTheDocument();
   });
 });
