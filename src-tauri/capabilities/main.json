@@ -55,6 +55,9 @@
     "allow-read-attachment",
     "allow-list-attachments",
     "allow-delete-attachment",
+    "allow-change-vault-passphrase",
+    "allow-create-recovery-kit",
+    "allow-keyring-status",
     "allow-sync-status",
     "allow-sync-verify-registry"
   ]
