@@ -28,6 +28,7 @@ export type FormatCompatibility = Readonly<Record<string, FormatArtifact>>;
 
 export const FORMAT_COMPATIBILITY: FormatCompatibility = {
   vaultKeyring: { path: "keyring.json", reads: [2], writes: [2] },
+  vaultKeyset: { path: "keyring.json (wrapped)", reads: [1, 2], writes: [1, 2] },
   encryptedEnvelope: { path: "*.kv.enc", reads: [0, 1], writes: [1] },
   documentManifest: { path: "documents/manifest.json", reads: [1, 2], writes: [1, 2] },
   documentPayload: { path: "documents/objects/*.enc", reads: [1], writes: [1] },

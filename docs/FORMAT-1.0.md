@@ -69,7 +69,7 @@ Concretely:
   writes without breaking _old_ readers (see the `encryptedEnvelope` entry,
   which still reads version `0` but only ever writes version `1`).
 
-**One carve-out, stated rather than assumed.** `documentManifest` version 2 is
+**Two carve-outs, stated rather than assumed.** `documentManifest` version 2 is
 in this format at 1.0, even though the policy above reserves artifact version
 bumps for 2.0. It is not a second generation of the manifest: a version 2
 manifest is a *tombstone* — the two fields `{"version": 2, "keyring": true}`
@@ -82,6 +82,16 @@ build fails closed on it, a version 1 manifest is still read exactly as before,
 and `vbrain migrate` is the migration path between them. A future artifact
 version that carried real data under a bumped number would still be a 2.0
 event.
+
+The second is `vaultKeyset` version 2, and it holds for the same reason. It is
+not a second generation of the keyset but a *transient* one: it exists only
+between the first and last object a `vbrain rekey` rewrites, and the operation
+drops it again on completion. Every build that predates it — including the Rust
+core until it is taught the field — rejects an unrecognized keyset version and
+refuses the vault, which is exactly the required behaviour: a vault caught
+mid-re-key must not be opened by a reader that would report success and then
+fail to decrypt every object the interrupted run had not reached. `vbrain rekey
+--resume` is the migration path out of it.
 
 There is no manual, periodic, or automatic rotation schedule for anything in
 this document. The one place content keys change — sync epoch rotation — is
@@ -304,6 +314,28 @@ Each value is 32 decoded bytes. `version` here is the *keyset* version
 changing the passphrase re-wraps one slot and rewrites nothing else — which is
 what keeps attachment content ids and sync change ids, both keyed HMACs and
 both permanent identities, byte-identical across a passphrase change.
+
+While a re-key is in flight the keyset carries the outgoing rotatable keys
+alongside the new ones and is written as version 2
+(`RETIRING_KEYSET_VERSION`):
+
+```ts
+{
+  version: 2,
+  keys: { documents, kv, attachmentId, syncChange, syncEnvelope, audit },
+  retiring: { documents, kv, syncEnvelope },
+}
+```
+
+`retiring` holds exactly `ROTATABLE_KEY_NAMES` — the three keys `vbrain rekey`
+replaces — and nothing else. `attachmentId`, `syncChange` and `audit` never
+appear there because they are never rotated: every content address, change id
+and audit link already in the vault is computed under them. A reader tries the
+key in force and falls back to the retiring one only on an authentication
+failure, which is safe because each object's AAD already binds its identity, so
+a fallback cannot succeed against the wrong object. When the last object has
+been rewritten the field is dropped and the keyset returns to version 1. A
+version 1 keyset carrying a `retiring` field is refused rather than ignored.
 
 A vault created before the keyring has no `keyring.json` at all; see
 `documentManifest` below and Section 4.
