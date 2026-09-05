@@ -311,6 +311,36 @@ you would any other migration log. The encrypted destination must be outside
 the source vault, preventing an import from recursively consuming its own
 output. Use `--include-hidden` only when hidden source content is intentional.
 
+### Deleting, and bounding history
+
+`docs remove` archives the outgoing revision before it unlinks a note, so a
+removed note is recoverable with `docs restore` — and its content is still in
+the vault. That is right for an editing mistake and wrong for "this should
+never have been written down".
+
+```bash
+# A preview: prints what would go, changes nothing, exits non-zero.
+node dist/cli.js --vault ./vault/personal purge note "Health/Results.md"
+node dist/cli.js --vault ./vault/personal purge note "Health/Results.md" --yes
+
+# Bound how much history every object keeps, and apply it to what is already there.
+node dist/cli.js --vault ./vault/personal retention set --keep-revisions 10 --keep-days 365
+node dist/cli.js --vault ./vault/personal retention show
+```
+
+A purge removes the object and every archived revision of it, and records the
+id in the audit chain. It is not recoverable from that vault. It also does not
+reach backups taken earlier, this vault's own sync change log, a relay the
+changes were pushed to, or a device that already pulled them — and a purge does
+not propagate to other devices, which was a decision rather than an omission.
+
+**Read [`docs/DELETION.md`](docs/DELETION.md) before relying on any of this.**
+It states each of those limits, and records why 1.x ships no deletion tombstone.
+
+Retention defaults to unlimited: a new build must not silently discard history
+someone already has. Both cores honour the policy the vault carries, so the
+desktop application prunes to the same bound the command line set.
+
 ### Performance gates
 
 ```bash
