@@ -177,3 +177,96 @@ describe("KeyringStatus passphrase form", () => {
     );
   });
 });
+
+describe("KeyringStatus recovery kit", () => {
+  afterEach(cleanup);
+
+  const bare = {
+    format: "keyring",
+    version: 2,
+    recommendedScryptN: 131072,
+    recoveryConfigured: false,
+    slots: [
+      {
+        id: "00000000-0000-4000-8000-000000000001",
+        type: "passphrase",
+        label: "primary",
+        createdAt: "2026-09-01T09:00:00.000Z",
+        recovery: false,
+        kdf: { name: "scrypt", N: 131072, r: 8, p: 1, cost: "default" as const },
+      },
+    ],
+  };
+
+  const issued = {
+    slotId: "00000000-0000-4000-8000-00000000000f",
+    kitPath: "/elsewhere/vaultbrain-recovery-kit.json",
+    recoveryCode: "vbr1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA_deadbeef",
+  };
+
+  it("shows the code once, with where the kit landed and why they stay apart", async () => {
+    render(<KeyringStatus status={bare} onCreateRecoveryKit={async () => issued} />);
+    fireEvent.change(screen.getByLabelText(/confirm your passphrase/i), {
+      target: { value: "the original passphrase" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /create a recovery kit/i }));
+
+    await waitFor(() => expect(screen.getByText(issued.recoveryCode)).toBeTruthy());
+    expect(screen.getByText(/shown once and stored nowhere/i)).toBeTruthy();
+    expect(screen.getByText(issued.kitPath)).toBeTruthy();
+
+    // Dismissing it takes the code off the screen; nothing re-renders it.
+    fireEvent.click(screen.getByRole("button", { name: /i have saved the code/i }));
+    expect(screen.queryByText(issued.recoveryCode)).toBeNull();
+  });
+
+  it("treats a dismissed save dialog as a cancellation, not a failure", async () => {
+    const notice = vi.fn();
+    const refresh = vi.fn();
+    render(
+      <KeyringStatus
+        status={bare}
+        onCreateRecoveryKit={async () => null}
+        onChanged={refresh}
+        onNotice={notice}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText(/confirm your passphrase/i), {
+      target: { value: "the original passphrase" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /create a recovery kit/i }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /create a recovery kit/i }).hasAttribute("disabled")).toBe(true),
+    );
+    expect(notice).not.toHaveBeenCalled();
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a refusal from the core rather than pretending a kit exists", async () => {
+    const notice = vi.fn();
+    render(
+      <KeyringStatus
+        status={bare}
+        onCreateRecoveryKit={async () => {
+          throw new Error("a recovery kit must not be written inside the vault it recovers");
+        }}
+        onNotice={notice}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText(/confirm your passphrase/i), {
+      target: { value: "the original passphrase" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /create a recovery kit/i }));
+    await waitFor(() =>
+      expect(notice).toHaveBeenCalledWith(expect.stringMatching(/inside the vault/i), "error"),
+    );
+    expect(screen.queryByText(/shown once/i)).toBeNull();
+  });
+
+  it("names the operations it deliberately does not offer", () => {
+    render(<KeyringStatus status={bare} />);
+    expect(screen.getByText("vbrain keyring recovery restore")).toBeTruthy();
+    expect(screen.getByText("vbrain rekey")).toBeTruthy();
+    expect(screen.getByText(/cannot open the vault at all/i)).toBeTruthy();
+  });
+});

@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AttachmentContent, AttachmentInfo, Backlink, Bookmark, CanvasDocument, CanvasInput, CanvasSummary, DailyNote, DeletedNote, KeyringStatusData, KnowledgeGraph, PassphraseChangeReport, NoteDocument, NoteSummary, PluginCallContext, PluginPackage, PluginSecurityPolicy, PluginSummary, PropertyRow, RevisionInfo, SavedView, SearchHit, SyncStatusData, UnlinkedMention, VaultInfo, WorkspaceState } from "./types";
+import type { AttachmentContent, AttachmentInfo, Backlink, Bookmark, CanvasDocument, CanvasInput, CanvasSummary, DailyNote, DeletedNote, KeyringStatusData, KnowledgeGraph, PassphraseChangeReport, RecoveryKitReport, NoteDocument, NoteSummary, PluginCallContext, PluginPackage, PluginSecurityPolicy, PluginSummary, PropertyRow, RevisionInfo, SavedView, SearchHit, SyncStatusData, UnlinkedMention, VaultInfo, WorkspaceState } from "./types";
 
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -734,6 +734,18 @@ export const vaultBridge = {
    * Re-wraps the keyset under a new passphrase. Re-encrypts nothing, so the
    * session stays valid and no note has to be reloaded.
    */
+  /**
+   * Writes a recovery kit through the native save dialog. Resolves to null
+   * when the dialog is dismissed, which is a cancellation and not a failure.
+   */
+  async createRecoveryKit(passphrase: string): Promise<RecoveryKitReport | null> {
+    if (isTauri) return call<RecoveryKitReport | null>("create_recovery_kit", { passphrase });
+    return {
+      slotId: "00000000-0000-4000-8000-00000000000f",
+      kitPath: "/demo/vaultbrain-recovery-kit.json",
+      recoveryCode: "vbr1_ZGVtby1vbmx5LW5ldmVyLWEtcmVhbC1yZWNvdmVyeS1jb2Rl_00000000",
+    };
+  },
   async changeVaultPassphrase(current: string, next: string): Promise<PassphraseChangeReport> {
     if (isTauri) return call<PassphraseChangeReport>("change_vault_passphrase", { current, next });
     return { slotsRewritten: 1, slotsPreserved: 0, previousN: 32768, newN: 131072 };

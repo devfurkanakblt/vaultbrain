@@ -5476,6 +5476,95 @@ fn change_vault_passphrase(
     }
 }
 
+/// Write a recovery kit for this vault, and add its slot to the keyring.
+///
+/// Without a kit, the keyring holds the only wrapped copies of the data keys,
+/// so one forgotten passphrase or one damaged `keyring.json` is the permanent
+/// loss of every note. The passphrase is asked for again rather than taken
+/// from the session: this adds a second way into the vault, and that should
+/// cost the person doing it a deliberate act.
+///
+/// The kit's destination is chosen through the native save dialog, and the
+/// core refuses a path inside the vault it recovers.
+#[tauri::command(async)]
+fn create_recovery_kit(
+    passphrase: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<keyring::RecoveryKitReport>, String> {
+    let guard = state
+        .session
+        .lock()
+        .map_err(|_| "vault session lock poisoned")?;
+    let session = guard.as_ref().ok_or("vault is locked")?;
+    if vault_format(&session.vault_dir) != "keyring" {
+        return Err(
+            "this vault is not in the keyring format yet; run 'vbrain migrate' first".into(),
+        );
+    }
+
+    let chosen = app
+        .dialog()
+        .file()
+        .set_title("Save the recovery kit outside this vault")
+        .set_file_name("vaultbrain-recovery-kit.json")
+        .blocking_save_file();
+    let Some(chosen) = chosen else {
+        return Ok(None);
+    };
+    let output = chosen.into_path().map_err(|error| error.to_string())?;
+
+    let _write = VaultWriteGuard::acquire(&session.vault_dir)?;
+    let operation = format!("recovery-create:{}", Uuid::new_v4());
+    let audit_key = session.audit_key.clone();
+    if let Some(key) = audit_key.as_ref() {
+        audit::append_locked(
+            &session.vault_dir,
+            audit::AuditRecord {
+                actor: "desktop-keyring",
+                file: "keyring".into(),
+                key: operation.clone(),
+                outcome: Some("pending"),
+            },
+            key.as_ref(),
+            now(),
+        )?;
+    }
+
+    match keyring::create_recovery_kit_locked(&session.vault_dir, &passphrase, &output) {
+        Ok((report, chain_key)) => {
+            audit::append_locked(
+                &session.vault_dir,
+                audit::AuditRecord {
+                    actor: "desktop-keyring",
+                    file: "keyring".into(),
+                    key: operation,
+                    outcome: Some("allowed"),
+                },
+                chain_key.as_ref(),
+                now(),
+            )?;
+            Ok(Some(report))
+        }
+        Err(error) => {
+            if let Some(key) = audit_key.as_ref() {
+                audit::append_locked(
+                    &session.vault_dir,
+                    audit::AuditRecord {
+                        actor: "desktop-keyring",
+                        file: "keyring".into(),
+                        key: operation,
+                        outcome: Some("denied"),
+                    },
+                    key.as_ref(),
+                    now(),
+                )?;
+            }
+            Err(error)
+        }
+    }
+}
+
 /// The three states `detectVaultFormat` distinguishes in `src/keyring.ts`.
 fn vault_format(vault_dir: &Path) -> &'static str {
     if keyring::keyring_path(vault_dir).exists() {
@@ -5635,6 +5724,7 @@ pub fn run() {
             list_attachments,
             delete_attachment,
             change_vault_passphrase,
+            create_recovery_kit,
             keyring_status,
             sync_status,
             sync_verify_registry,

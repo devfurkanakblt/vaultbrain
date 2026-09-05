@@ -253,6 +253,11 @@ description = "Allows re-wrapping the vault keyset under a new passphrase after 
 commands.allow = ["change_vault_passphrase"]
 
 [[permission]]
+identifier = "allow-create-recovery-kit"
+description = "Allows writing a recovery kit outside the vault and adding its slot to the keyring, after re-entering the passphrase. Without a kit the keyring holds the only wrapped copies of the data keys."
+commands.allow = ["create_recovery_kit"]
+
+[[permission]]
 identifier = "allow-keyring-status"
 description = "Allows reading the vault keyring's slot headers after unlock: id, label, creation time and key-derivation cost. Unwraps nothing and needs no passphrase."
 commands.allow = ["keyring_status"]

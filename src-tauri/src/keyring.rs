@@ -14,11 +14,15 @@ use aes_gcm::{
     aead::{AeadInPlace, KeyInit},
     Aes256Gcm, Nonce, Tag,
 };
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{
+    engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD as BASE64_URL},
+    Engine,
+};
 use chrono::{SecondsFormat, Utc};
 use rand::{rngs::OsRng, RngCore};
 use scrypt::{scrypt, Params as ScryptParams};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -365,6 +369,20 @@ pub(crate) fn wrap_key_set(
     passphrase: &str,
     log_n: u8,
 ) -> Result<KeyringSlot, String> {
+    wrap_key_set_slot(keys, passphrase, log_n, "primary")
+}
+
+/// Wrap the keyset in a named slot. The label is display metadata and sits
+/// outside the slot AAD, exactly as it does in `wrapKeySetSlot` on the
+/// TypeScript side; the authenticated slot `type` stays `passphrase` for a
+/// recovery slot too, which is what kept the phase 7.1 format unchanged when
+/// recovery kits arrived.
+pub(crate) fn wrap_key_set_slot(
+    keys: &KeySet,
+    passphrase: &str,
+    log_n: u8,
+    label: &str,
+) -> Result<KeyringSlot, String> {
     if passphrase.is_empty() {
         return Err("passphrase cannot be empty".into());
     }
@@ -378,7 +396,7 @@ pub(crate) fn wrap_key_set(
     let mut slot = KeyringSlot {
         id: Uuid::new_v4().to_string(),
         kind: "passphrase".into(),
-        label: "primary".into(),
+        label: label.to_string(),
         kdf: SlotKdf {
             name: "scrypt".into(),
             n: 1u32 << log_n,
@@ -559,6 +577,170 @@ pub(crate) fn change_passphrase_locked(
     ))
 }
 
+/// The recovery kit's file marker and the recovery code's shape, both defined
+/// by `src/keyring-recovery.ts`. A kit written here has to be one the CLI can
+/// restore from, and the other way round.
+const RECOVERY_PREFIX: &str = "vbr1";
+const RECOVERY_KIT_KIND: &str = "vaultbrain-recovery-kit";
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RecoveryKit {
+    version: u8,
+    kind: String,
+    #[serde(rename = "createdAt")]
+    created_at: String,
+    slot: KeyringSlot,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RecoveryKitReport {
+    pub(crate) slot_id: String,
+    pub(crate) kit_path: String,
+    /// Shown once and never stored. Possession of both this and the kit file
+    /// is equivalent to knowing the passphrase, which is why they are told to
+    /// live apart.
+    pub(crate) recovery_code: String,
+}
+
+fn code_checksum(secret: &[u8]) -> String {
+    let digest = Sha256::digest(secret);
+    let mut out = String::with_capacity(8);
+    for byte in &digest[..4] {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+/// A 256-bit secret with a checksum, so a code mistyped off paper is refused
+/// rather than silently failing to open anything.
+pub(crate) fn generate_recovery_code() -> Zeroizing<String> {
+    let mut secret = [0u8; 32];
+    OsRng.fill_bytes(&mut secret);
+    let encoded = BASE64_URL.encode(secret);
+    let code = format!("{RECOVERY_PREFIX}_{encoded}_{}", code_checksum(&secret));
+    secret.zeroize();
+    Zeroizing::new(code)
+}
+
+/// Refuses a code whose checksum does not match its secret. Mirrors
+/// `parseRecoveryCode`.
+pub(crate) fn recovery_code_is_well_formed(code: &str) -> bool {
+    // The base64url alphabet contains `_`, so the secret cannot be found by
+    // splitting on it — the checksum is taken from the end instead. This is
+    // what `parseRecoveryCode`'s anchored regex does on the other side.
+    let Some(rest) = code.strip_prefix(&format!("{RECOVERY_PREFIX}_")) else {
+        return false;
+    };
+    let Some((encoded, checksum)) = rest.rsplit_once('_') else {
+        return false;
+    };
+    if encoded.len() != 43 || checksum.len() != 8 {
+        return false;
+    }
+    if !checksum
+        .bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return false;
+    }
+    let Ok(secret) = BASE64_URL.decode(encoded) else {
+        return false;
+    };
+    secret.len() == 32 && code_checksum(&secret) == checksum
+}
+
+/// A kit inside the vault it recovers is not a backup. Both cores refuse it.
+fn assert_outside_vault(vault_dir: &Path, target: &Path) -> Result<(), String> {
+    let vault = vault_dir
+        .canonicalize()
+        .unwrap_or_else(|_| vault_dir.to_path_buf());
+    let parent = target.parent().unwrap_or(target);
+    let resolved = parent
+        .canonicalize()
+        .unwrap_or_else(|_| parent.to_path_buf());
+    if resolved == vault || resolved.starts_with(&vault) {
+        return Err("a recovery kit must not be written inside the vault it recovers".into());
+    }
+    Ok(())
+}
+
+/// Writes an independently usable wrapped copy of the keyset outside the
+/// vault, and adds the matching slot to the keyring.
+///
+/// This is the answer to the single worst failure this product has: without a
+/// kit, one forgotten passphrase or one damaged `keyring.json` is the
+/// permanent loss of every note, because the keyring holds the only wrapped
+/// copies of the data keys.
+///
+/// The caller must already hold the vault write lock.
+pub(crate) fn create_recovery_kit_locked(
+    vault_dir: &Path,
+    passphrase: &str,
+    output_path: &Path,
+) -> Result<(RecoveryKitReport, Zeroizing<[u8; KEY_LENGTH]>), String> {
+    if passphrase.is_empty() {
+        return Err("a non-empty vault passphrase is required".into());
+    }
+    assert_outside_vault(vault_dir, output_path)?;
+    if output_path.exists() {
+        return Err("refusing to overwrite an existing recovery kit".into());
+    }
+
+    let file = read(vault_dir)?.ok_or("this vault has no keyring")?;
+    if file.slots.iter().any(|slot| slot.label == RECOVERY_LABEL) {
+        return Err("this vault already has a recovery slot".into());
+    }
+    if file.slots.len() >= MAX_SLOTS {
+        return Err("this vault keyring already has the maximum number of slots".into());
+    }
+
+    let keys = unwrap_keyring(&file, passphrase)?;
+    let code = generate_recovery_code();
+    if !recovery_code_is_well_formed(&code) {
+        return Err("generated an invalid recovery code".into());
+    }
+
+    let slot = wrap_key_set_slot(&keys, &code, DEFAULT_SCRYPT_LOG_N, RECOVERY_LABEL)?;
+    // Prove the slot opens to this vault's keyset before it is written
+    // anywhere. A kit that does not open is worse than no kit: it is a kit
+    // someone believes in.
+    let check = unwrap_slot(&slot, &code)?;
+    if !same_key_set(&check, &keys) {
+        return Err("the recovery slot does not carry the vault's keyset".into());
+    }
+
+    let kit = RecoveryKit {
+        version: 1,
+        kind: RECOVERY_KIT_KIND.to_string(),
+        created_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        slot: slot.clone(),
+    };
+    let mut encoded = serde_json::to_vec_pretty(&kit).map_err(|error| error.to_string())?;
+    encoded.push(b'\n');
+    write_atomic(output_path, &encoded)?;
+
+    let mut slots = file.slots.clone();
+    slots.push(slot.clone());
+    write(
+        vault_dir,
+        &KeyringFile {
+            version: KEYRING_VERSION,
+            slots,
+        },
+    )?;
+
+    Ok((
+        RecoveryKitReport {
+            slot_id: slot.id,
+            kit_path: output_path.to_string_lossy().into_owned(),
+            recovery_code: code.to_string(),
+        },
+        keys.audit.clone(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -665,6 +847,95 @@ mod tests {
         }
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The kit is the answer to this product's worst failure: without one, the
+    /// keyring holds the only wrapped copies of the data keys, so a forgotten
+    /// passphrase is the permanent loss of every note.
+    #[test]
+    fn a_recovery_kit_opens_the_vault_and_survives_a_passphrase_change() {
+        let dir = std::env::temp_dir().join(format!("vbrain-kit-{}", Uuid::new_v4()));
+        let outside = std::env::temp_dir().join(format!("vbrain-kit-out-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let kit_path = outside.join("kit.json");
+        let keys = random_key_set();
+        let documents = keys.documents.clone();
+        write(
+            &dir,
+            &KeyringFile {
+                version: KEYRING_VERSION,
+                slots: vec![wrap_key_set(&keys, "the original passphrase", 14).unwrap()],
+            },
+        )
+        .unwrap();
+
+        let (report, _chain) =
+            create_recovery_kit_locked(&dir, "the original passphrase", &kit_path).unwrap();
+        assert!(recovery_code_is_well_formed(&report.recovery_code));
+
+        // The code opens the vault on its own, which is the whole point.
+        let file = read(&dir).unwrap().unwrap();
+        assert_eq!(file.slots.len(), 2);
+        let by_code = unwrap_keyring(&file, &report.recovery_code).unwrap();
+        assert_eq!(by_code.documents.as_ref(), documents.as_ref());
+
+        // And it still does after the passphrase changes, because a slot the
+        // current passphrase cannot open is preserved rather than dropped.
+        change_passphrase_locked(&dir, "the original passphrase", "a replacement passphrase")
+            .unwrap();
+        let after = read(&dir).unwrap().unwrap();
+        let still = unwrap_keyring(&after, &report.recovery_code).unwrap();
+        assert_eq!(still.documents.as_ref(), documents.as_ref());
+
+        // A second kit is refused: two recovery slots would mean two secrets
+        // to protect and no way to tell which one leaked.
+        assert!(create_recovery_kit_locked(
+            &dir,
+            "a replacement passphrase",
+            &outside.join("second.json")
+        )
+        .is_err());
+
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&outside).ok();
+    }
+
+    #[test]
+    fn a_recovery_kit_is_refused_inside_the_vault_it_recovers() {
+        let dir = std::env::temp_dir().join(format!("vbrain-kit-inside-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let keys = random_key_set();
+        write(
+            &dir,
+            &KeyringFile {
+                version: KEYRING_VERSION,
+                slots: vec![wrap_key_set(&keys, "the original passphrase", 14).unwrap()],
+            },
+        )
+        .unwrap();
+
+        // A kit stored in the vault it recovers is not a backup: whatever
+        // destroys the keyring destroys the kit beside it.
+        let inside = dir.join("kit.json");
+        assert!(create_recovery_kit_locked(&dir, "the original passphrase", &inside).is_err());
+        assert!(!inside.exists());
+        assert_eq!(read(&dir).unwrap().unwrap().slots.len(), 1);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_recovery_code_with_a_bad_checksum_is_refused() {
+        let code = generate_recovery_code();
+        assert!(recovery_code_is_well_formed(&code));
+        // One character off paper is a typo, not a wrong vault.
+        let mut broken = code.to_string();
+        broken.pop();
+        broken.push(if code.ends_with('a') { 'b' } else { 'a' });
+        assert!(!recovery_code_is_well_formed(&broken));
+        assert!(!recovery_code_is_well_formed("vbr1_short_deadbeef"));
+        assert!(!recovery_code_is_well_formed("not-a-code"));
     }
 
     #[test]

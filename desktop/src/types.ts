@@ -291,6 +291,13 @@ export interface KeyringStatusSlot {
   kdf: { name: string; N: number; r: number; p: number; cost: KeyringCostStatus };
 }
 
+export interface RecoveryKitReport {
+  slotId: string;
+  kitPath: string;
+  /** Shown once and never stored anywhere by the application. */
+  recoveryCode: string;
+}
+
 export interface PassphraseChangeReport {
   slotsRewritten: number;
   slotsPreserved: number;

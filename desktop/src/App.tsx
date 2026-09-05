@@ -1080,6 +1080,7 @@ export function App() {
       : workspaceView === "keys" ? <KeyringStatus
         status={keyringStatus}
         onChangePassphrase={(current, next) => vaultBridge.changeVaultPassphrase(current, next)}
+        onCreateRecoveryKit={(passphrase) => vaultBridge.createRecoveryKit(passphrase)}
         onChanged={async () => setKeyringStatus(await vaultBridge.keyringStatus())}
         onNotice={report}
       />
