@@ -74,10 +74,16 @@ Sync is desktop-to-desktop. Vault Brain stays local-first: the passphrase — th
 vault's only real security boundary — never leaves a machine the owner controls,
 and no hosted service is ever required.
 
-- [x] Immutable encrypted change protocol and conflict resolution
+- [ ] Immutable encrypted change protocol and conflict resolution
   - [x] Content-addressed encrypted envelopes, device chains, causal DAG validation and deterministic conflict inspection
   - [x] Emit changes automatically from note/canvas/attachment transactions and apply resolved remote changes to live storage
   - [x] Capture plugin package and plugin-policy transactions
+  - [ ] Portable workspace state. The Phase 6 plan defines portable state as
+    notes, canvases, attachments, plugin packages, `plugin-policy`,
+    `saved-views` and `workspace` including bookmarks. Only `plugin-policy` is
+    captured. Saved views, bookmarks and layouts live solely in the Rust core's
+    `workspace.enc`, which the TypeScript core — the one that owns sync —
+    cannot read at all, so a second device silently loses them.
 - [x] Owner-signed device enrollment and sequence-bounded removal
   - [x] Ed25519 proof-of-possession requests, signed certificates and encrypted registry exchange
   - [x] Per-change device signatures, authority pinning, rollback rejection and revocation cutoffs
@@ -159,4 +165,118 @@ can be raised per vault. Design contract:
   - [ ] An audit entry for `rekey`. `migrate` and `passphrase change` now append
         to the chain; the command that replaces every key still appends nothing,
         so "when were this vault's keys last replaced" has no answer.
-- [ ] Desktop passphrase-change and re-key interface
+
+## Phase 8 — Key management the desktop can reach
+
+Every command that decides whether a vault survives — create a recovery kit,
+look at what the keyring holds, change the passphrase, re-key after a leak —
+exists only in the CLI. The desktop application is the product's primary
+surface, so for the people who use it "I forgot my passphrase" still means the
+permanent loss of every note, even though 7.5 shipped the answer. This phase
+absorbs the desktop passphrase-change and re-key interface Phase 7 listed.
+
+- [ ] Recovery-kit creation and restore in the application, with first-run
+      guidance that asks for one before the vault holds anything worth losing.
+      A recovery slot nobody is told about protects nobody.
+- [ ] `keyring status` in the application: every slot with its id, label,
+      creation time and key-derivation cost, so a user can see a slot they did
+      not add and can learn their vault still sits at the old work factor.
+- [ ] Passphrase change from the application, including the key-derivation cost
+      upgrade the CLI command already performs.
+- [ ] Re-key from the application, which `vbrain rekey` now backs. Re-key rewrites
+      the whole vault, so the interface has to report progress and survive an
+      interruption rather than appear hung.
+- [ ] Decide and record how the desktop performs these. A second signing and
+      key-wrapping implementation in Rust doubles the surface an audit has to
+      cover; delegating to the TypeScript core is the alternative to weigh, and
+      the same question blocks desktop-driven sync mutation in Phase 6.
+
+## Phase 9 — Getting the data out, and back
+
+A local-first product that cannot hand back a plain copy of its contents is
+lock-in by another name. Export is one note or one canvas at a time. Backup is
+"copy the directory": the recovery drill does exactly that with `fs.cpSync`,
+and no command or documented procedure says so to a user.
+
+- [ ] `vbrain export`: the whole vault as a folder of Markdown with
+      frontmatter, attachments beside the notes that reference them, and
+      canvases as JSON Canvas. The Obsidian importer already reads that shape,
+      so export and import would describe one format rather than two.
+- [ ] `vbrain backup` and `vbrain restore`: a verified, self-contained
+      encrypted copy carrying the key-derivation metadata a restore needs, and
+      a restore that refuses a backup it cannot open rather than replacing a
+      working vault with one.
+- [ ] A stated backup procedure in the documentation, and a drill that restores
+      from that artifact rather than from a directory copy.
+
+## Phase 10 — Deletion that deletes, and history that ends
+
+`remove` archives a revision before it unlinks the object, so a deleted note's
+content stays under `documents/history/` for the life of the vault. For a
+product that invites medical, financial and identity data, "I need this gone"
+has no answer. Nothing prunes revisions either, so a note edited daily grows a
+file per edit forever.
+
+- [ ] `vbrain purge`: permanent removal of a note, canvas or attachment and
+      every revision of it. Distinct from `remove`, and refusing to run without
+      an explicit confirmation.
+- [ ] A revision retention policy the vault carries and both cores honour, with
+      a command that applies it to history that already exists.
+- [ ] Say plainly what a purge cannot reach: a purged object still exists in any
+      backup taken before it, in any sync change already pushed to a relay, and
+      on any device that pulled it. Whether a purge propagates as a tombstone is
+      a separate decision, and this phase records which one is taken.
+
+## Phase 11 — macOS and Linux
+
+The desktop bundles only `msi` and `nsis`, the Rust job runs only on
+`windows-latest`, and `docs/AUDIT-SCOPE.md` records as an accepted risk that
+only the Windows credential-store path is exercised by tests. The macOS and
+Linux keychain backends are written but unproven.
+
+- [ ] Bundle and test the desktop application on macOS and Linux.
+- [ ] Run the Rust suite on all three platforms in CI, and exercise the
+      `security` and `secret-tool` keychain backends where they are real.
+- [ ] Verify path handling, permissions and atomic replacement per platform.
+      The vault's durability guarantees are filesystem-specific and are
+      currently demonstrated on one filesystem only.
+
+## Phase 12 — Actually shipping
+
+The release workflow signs, checksums, produces an SPDX SBOM and attests build
+provenance, then uploads the result as a workflow artifact, which expires.
+Nothing is published, and there is no update path, so a security fix cannot
+reach anyone who already installed a build.
+
+- [ ] Publish signed installers with their checksums, SBOM and provenance as
+      release assets.
+- [ ] An update path, with a recorded decision about whether it is automatic.
+      An updater is also a code-delivery channel into a vault holding the
+      user's secrets, so that choice is a security decision, not a convenience.
+- [ ] Put the evidence that matters into CI. `recovery:drill` runs nowhere, and
+      only the 1,000-note benchmark gates a change while the roadmap claims 10k
+      and 100k gates.
+
+## Phase 13 — One implementation of each thing
+
+Every protocol defect this project has found in itself came from two pieces of
+code that were meant to agree and did not. The TypeScript and Rust cores are a
+deliberate, audited pair. These three are not.
+
+- [ ] Retire `src/sync/change-log.ts`. `src/sync.ts` has its own change log and
+      is the one in use; the extracted copy is reached only by tests. The
+      epoch 1 change-identity defect existed precisely because
+      `sync/protocol.ts` sealed under the right key while `sync.ts` did not,
+      and nothing compared them.
+- [ ] Complete the frozen domain-separation inventory.
+      `secondbrain-vault:kv:v2` (`src/crypto.ts`),
+      `secondbrain-vault:sync-local-transaction:v1` and
+      `secondbrain-vault:sync-apply-receipt:v1` (`src/sync/transaction.ts`)
+      live outside `src/format-version.ts`, so
+      `test/format-conformance.test.mjs` does not freeze them and a refactor
+      could change one without failing a test — the exact accident the
+      inventory exists to prevent.
+- [ ] Close the format catalogue gap `docs/AUDIT-SCOPE.md` already records:
+      `documents/index.enc` and `documents/plugin-policy.enc` are real
+      encrypted artifacts with no entry in `FORMAT_COMPATIBILITY`, and so sit
+      outside the 1.x compatibility policy that covers everything beside them.
