@@ -210,3 +210,21 @@ test("the keyed envelope helper takes the same ordered list", async () => {
   // A short key inside the list is still refused, not skipped over silently.
   assert.throws(() => decryptWithKey(payload, [crypto.randomBytes(16)], "workspace"), /256-bit key/u);
 });
+
+test("the sync device registry still opens during a re-key", async () => {
+  const { SyncDeviceManager } = await import("../dist/sync.js");
+  const vaultDir = temporaryVault("rekey-sync");
+
+  const devices = new SyncDeviceManager(vaultDir, PASSPHRASE);
+  devices.initializeOwner("Owner laptop");
+  const fingerprint = devices.fingerprint();
+  devices.close();
+
+  stallMidRekey(vaultDir);
+
+  // devices.enc is sealed directly under the documents key, so reading it back
+  // is what proves the sync read paths were given the fallback list too.
+  const after = new SyncDeviceManager(vaultDir, PASSPHRASE);
+  assert.equal(after.fingerprint(), fingerprint);
+  after.close();
+});

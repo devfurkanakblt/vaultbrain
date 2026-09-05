@@ -65,6 +65,11 @@ export interface SyncChangeKeys {
   syncChangeKey: Buffer;
   /** Keys the body's encryption. Rotatable. */
   syncEnvelopeKey: Buffer;
+  /**
+   * The outgoing body key of a re-key that has not finished re-sealing every
+   * change. Tried only after the key in force, and only for reading.
+   */
+  retiringSyncEnvelopeKey?: Buffer;
 }
 
 function assertUnicode(value: string, label: string): void {
@@ -253,12 +258,15 @@ export function validateEncryptedSyncChange(value: unknown): EncryptedSyncChange
 
 export function openSyncChange(value: unknown, keys: SyncChangeKeys): SyncChange {
   const envelope = validateEncryptedSyncChange(value);
-  const envelopeKey = changeEncryptionKey(keys.syncEnvelopeKey, envelope.id);
+  const envelopeKeys = [changeEncryptionKey(keys.syncEnvelopeKey, envelope.id)];
+  if (keys.retiringSyncEnvelopeKey && keys.retiringSyncEnvelopeKey !== keys.syncEnvelopeKey) {
+    envelopeKeys.push(changeEncryptionKey(keys.retiringSyncEnvelopeKey, envelope.id));
+  }
   let plaintext: string;
   try {
-    plaintext = decryptDocument(envelope.payload, envelopeKey, `${CHANGE_AAD_PREFIX}${envelope.id}`);
+    plaintext = decryptDocument(envelope.payload, envelopeKeys, `${CHANGE_AAD_PREFIX}${envelope.id}`);
   } finally {
-    envelopeKey.fill(0);
+    for (const key of envelopeKeys) key.fill(0);
   }
   if (Buffer.byteLength(plaintext, "utf8") > MAX_CHANGE_BYTES) throw new Error("Sync change exceeds 8 MiB.");
   const body = validateSyncChangeBody(JSON.parse(plaintext));

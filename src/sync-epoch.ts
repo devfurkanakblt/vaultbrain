@@ -1,7 +1,12 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { decryptDocument, encryptDocument, type DocumentPayload } from "./document-crypto.js";
+import {
+  decryptDocument,
+  encryptDocument,
+  type DocumentPayload,
+  type DocumentReadKey,
+} from "./document-crypto.js";
 import { assertNotSymlink, readTextFileLimited, writeFileAtomic } from "./fs-safe.js";
 import { resolveInside } from "./safety.js";
 import { AAD, canonicalBase64, syncEpochKeyAad } from "./format-version.js";
@@ -182,7 +187,7 @@ export function hasEpochKey(rootDir: string, epoch: number): boolean {
  * epoch's key; when the question is only whether it is present, use
  * `hasEpochKey` and decrypt nothing.
  */
-export function readEpochKey(rootDir: string, vaultKey: Buffer, epoch: number): Buffer | undefined {
+export function readEpochKey(rootDir: string, vaultKey: DocumentReadKey, epoch: number): Buffer | undefined {
   const filePath = epochKeyPath(rootDir, epoch);
   if (!fs.existsSync(filePath)) return undefined;
   assertNotSymlink(filePath);

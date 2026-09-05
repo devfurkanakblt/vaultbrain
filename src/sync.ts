@@ -7,6 +7,7 @@ import {
   openDocumentKey,
   type DocumentKeySession,
   type DocumentPayload,
+  type DocumentReadKey,
 } from "./document-crypto.js";
 import {
   assertNoSymlinkComponents,
@@ -117,6 +118,11 @@ export interface SyncChangeKeys {
   syncChangeKey: Buffer;
   /** Rotatable key used only to derive the per-change encryption key. */
   syncEnvelopeKey: Buffer;
+  /**
+   * The outgoing envelope key of a re-key that has not finished re-sealing
+   * every change body. Read-only, like `legacyKey`.
+   */
+  retiringSyncEnvelopeKey?: Buffer;
   /** Optional pre-keyring key used only while reading already-written changes. */
   legacyKey?: Buffer;
 }
@@ -961,7 +967,7 @@ function agreementKeyPath(rootDir: string, deviceId: string): string {
   return resolveInside(identityDir(rootDir), `${deviceId}.x25519.key.enc`);
 }
 
-function readAgreementKey(rootDir: string, vaultKey: Buffer, deviceId: string): crypto.KeyObject {
+function readAgreementKey(rootDir: string, vaultKey: DocumentReadKey, deviceId: string): crypto.KeyObject {
   const filePath = agreementKeyPath(rootDir, deviceId);
   if (!fs.existsSync(filePath)) {
     throw new Error(`This device has no sync key agreement key; re-enroll device ${deviceId}.`);
@@ -999,7 +1005,7 @@ function encryptPrivateKey(key: crypto.KeyObject, vaultKey: Buffer, aad: string)
   return encryptDocument(exportPrivateKey(key), vaultKey, aad);
 }
 
-function readPrivateKey(filePath: string, vaultKey: Buffer, aad: string, label: string): crypto.KeyObject {
+function readPrivateKey(filePath: string, vaultKey: DocumentReadKey, aad: string, label: string): crypto.KeyObject {
   if (!fs.existsSync(filePath)) throw new Error(`${label} is not available on this device.`);
   assertNotSymlink(filePath);
   const payload = JSON.parse(readTextFileLimited(filePath, 64 * 1024, label)) as DocumentPayload;
@@ -1010,7 +1016,7 @@ function savePrivateKey(filePath: string, key: crypto.KeyObject, vaultKey: Buffe
   writeFileAtomic(filePath, JSON.stringify(encryptPrivateKey(key, vaultKey, aad)), { mode: 0o600 });
 }
 
-function readDeviceRegistry(rootDir: string, vaultKey: Buffer): SignedSyncDeviceRegistry | undefined {
+function readDeviceRegistry(rootDir: string, vaultKey: DocumentReadKey): SignedSyncDeviceRegistry | undefined {
   const filePath = registryPath(rootDir);
   if (!fs.existsSync(filePath)) return undefined;
   assertNotSymlink(filePath);
@@ -1071,7 +1077,24 @@ function validateAuthorizedChanges(changes: readonly SyncChange[], registry: Sig
   }
 }
 
-function enrollmentLegacyChanges(rootDir: string, vaultKey: Buffer): SyncChange[] {
+/**
+ * Pre-enrollment changes are sealed under the bare vault key rather than the
+ * structured pair, so each generation has to be offered as its own material.
+ */
+function openLegacyChange(envelope: unknown, keys: readonly Buffer[]): SyncChange {
+  let failure: unknown;
+  for (const key of keys) {
+    try {
+      return openSyncChange(envelope, key);
+    } catch (error) {
+      failure = error;
+    }
+  }
+  throw failure;
+}
+
+function enrollmentLegacyChanges(rootDir: string, vaultKey: DocumentReadKey): SyncChange[] {
+  const candidates = Buffer.isBuffer(vaultKey) ? [vaultKey] : vaultKey;
   const changesDir = resolveInside(rootDir, path.join("sync", "changes"));
   if (!fs.existsSync(changesDir)) return [];
   assertNoSymlinkComponents(rootDir, changesDir);
@@ -1096,7 +1119,7 @@ function enrollmentLegacyChanges(rootDir: string, vaultKey: Buffer): SyncChange[
       JSON.parse(readTextFileLimited(filePath, MAX_ENVELOPE_BYTES, `Sync envelope ${id}`)),
     );
     if (envelope.id !== id) throw new Error(`Sync change filename does not match its envelope: ${id}`);
-    const change = openSyncChange(envelope, vaultKey);
+    const change = openLegacyChange(envelope, candidates);
     if (change.version !== 1) {
       throw new Error("A signed sync change cannot exist before device enrollment is initialized.");
     }
@@ -1110,7 +1133,7 @@ function signAuthorizedChange(
   body: Omit<SyncChangeBody, "authorization">,
   registry: SignedSyncDeviceRegistry,
   rootDir: string,
-  vaultKey: Buffer,
+  vaultKey: DocumentReadKey,
 ): SyncChangeBody {
   const record = registry.body.devices.find((candidate) => candidate.certificate.deviceId === body.deviceId);
   if (!record) throw new Error(`Sync device ${body.deviceId} is not enrolled.`);
@@ -1234,7 +1257,7 @@ function encryptedCheckpoint(
 
 function readCheckpoint(
   rootDir: string,
-  vaultKey: Buffer,
+  vaultKey: DocumentReadKey,
   registry: SignedSyncDeviceRegistry,
 ): SignedSyncFreshnessCheckpoint | undefined {
   const filePath = checkpointPath(rootDir);
@@ -1313,8 +1336,14 @@ export class SyncDeviceManager {
     return this.session.key;
   }
 
+  /** The write key, then the retiring one of an unfinished re-key. */
+  private readKeys(): readonly Buffer[] {
+    if (this.closed) throw new Error("Sync device manager is closed.");
+    return this.session.readKeys;
+  }
+
   state(): SignedSyncDeviceRegistry | undefined {
-    const registry = readDeviceRegistry(this.session.rootDir, this.key());
+    const registry = readDeviceRegistry(this.session.rootDir, this.readKeys());
     return registry ? structuredClone(registry) : undefined;
   }
 
@@ -1329,7 +1358,7 @@ export class SyncDeviceManager {
     now = new Date().toISOString(),
   ): SignedSyncDeviceRegistry {
     return withVaultLock(this.vaultDir, () => {
-      if (readDeviceRegistry(this.session.rootDir, this.key())) {
+      if (readDeviceRegistry(this.session.rootDir, this.readKeys())) {
         throw new Error("Sync device enrollment is already initialized.");
       }
       if (fs.existsSync(authorityKeyPath(this.session.rootDir))) {
@@ -1337,7 +1366,7 @@ export class SyncDeviceManager {
       }
       if (!DEVICE_ID.test(deviceId)) throw new Error("Sync device ID must be a lowercase UUID.");
       const normalizedTime = canonicalTimestamp(now, "Device enrollment time");
-      const legacy = enrollmentLegacyChanges(this.session.rootDir, this.key()).map((change) => change.id);
+      const legacy = enrollmentLegacyChanges(this.session.rootDir, this.readKeys()).map((change) => change.id);
       const authority = crypto.generateKeyPairSync("ed25519");
       const device = crypto.generateKeyPairSync("ed25519");
       const agreement = generateAgreementKeyPair();
@@ -1386,7 +1415,7 @@ export class SyncDeviceManager {
     now = new Date().toISOString(),
   ): SyncEnrollmentRequest {
     return withVaultLock(this.vaultDir, () => {
-      const registry = readDeviceRegistry(this.session.rootDir, this.key());
+      const registry = readDeviceRegistry(this.session.rootDir, this.readKeys());
       if (!registry) throw new Error("Initialize or import a trusted sync device registry first.");
       if (!DEVICE_ID.test(deviceId)) throw new Error("Sync device ID must be a lowercase UUID.");
       if (registry.body.devices.some((record) => record.certificate.deviceId === deviceId)) {
@@ -1432,7 +1461,7 @@ export class SyncDeviceManager {
 
   enroll(requestValue: unknown, now = new Date().toISOString()): SignedSyncDeviceRegistry {
     return withVaultLock(this.vaultDir, () => {
-      const registry = readDeviceRegistry(this.session.rootDir, this.key());
+      const registry = readDeviceRegistry(this.session.rootDir, this.readKeys());
       if (!registry) throw new Error("Sync device enrollment is not initialized.");
       const request = validateEnrollmentRequest(requestValue);
       if (registry.body.devices.some((record) => record.certificate.deviceId === request.deviceId)) {
@@ -1477,7 +1506,7 @@ export class SyncDeviceManager {
 
   revoke(deviceId: string, revokedAfterSequence: number, now = new Date().toISOString()): SignedSyncDeviceRegistry {
     return withVaultLock(this.vaultDir, () => {
-      const registry = readDeviceRegistry(this.session.rootDir, this.key());
+      const registry = readDeviceRegistry(this.session.rootDir, this.readKeys());
       if (!registry) throw new Error("Sync device enrollment is not initialized.");
       const record = registry.body.devices.find((candidate) => candidate.certificate.deviceId === deviceId);
       if (!record) throw new Error(`Sync device ${deviceId} is not enrolled.`);
@@ -1560,7 +1589,7 @@ export class SyncDeviceManager {
   }
 
   exportRegistry(): EncryptedSyncDeviceRegistry {
-    const registry = readDeviceRegistry(this.session.rootDir, this.key());
+    const registry = readDeviceRegistry(this.session.rootDir, this.readKeys());
     if (!registry) throw new Error("Sync device enrollment is not initialized.");
     return encryptedRegistry(registry, this.key());
   }
@@ -1571,9 +1600,9 @@ export class SyncDeviceManager {
       throw new Error("Unsupported or invalid encrypted sync device registry bundle.");
     }
     const incoming = validateSignedDeviceRegistry(
-      JSON.parse(decryptDocument(envelope.payload, this.key(), AAD.syncDeviceRegistry)),
+      JSON.parse(decryptDocument(envelope.payload, this.readKeys(), AAD.syncDeviceRegistry)),
     );
-    const current = readDeviceRegistry(this.session.rootDir, this.key());
+    const current = readDeviceRegistry(this.session.rootDir, this.readKeys());
     if (current && current.body.authorityPublicKey !== incoming.body.authorityPublicKey) {
       throw new Error("Incoming sync registry uses a different enrollment authority.");
     }
@@ -1587,9 +1616,9 @@ export class SyncDeviceManager {
         throw new Error("Unsupported or invalid encrypted sync device registry bundle.");
       }
       const incoming = validateSignedDeviceRegistry(
-        JSON.parse(decryptDocument(envelope.payload, this.key(), AAD.syncDeviceRegistry)),
+        JSON.parse(decryptDocument(envelope.payload, this.readKeys(), AAD.syncDeviceRegistry)),
       );
-      const current = readDeviceRegistry(this.session.rootDir, this.key());
+      const current = readDeviceRegistry(this.session.rootDir, this.readKeys());
       const fingerprint = syncRegistryFingerprint(incoming);
       if (current) {
         if (current.body.authorityPublicKey !== incoming.body.authorityPublicKey) {
@@ -1620,7 +1649,7 @@ export class SyncDeviceManager {
       ) {
         for (const wrap of incoming.body.epochKeys) {
           if (!fs.existsSync(agreementKeyPath(this.session.rootDir, wrap.deviceId))) continue;
-          const privateKey = readAgreementKey(this.session.rootDir, this.key(), wrap.deviceId);
+          const privateKey = readAgreementKey(this.session.rootDir, this.readKeys(), wrap.deviceId);
           const epochKey = unwrapEpochKey(wrap, incoming.body.epoch, wrap.deviceId, privateKey);
           try {
             saveEpochKey(this.session.rootDir, this.key(), incoming.body.epoch, epochKey);
@@ -1640,7 +1669,7 @@ export class SyncDeviceManager {
     now = new Date().toISOString(),
   ): SignedSyncFreshnessCheckpoint {
     return withVaultLock(this.vaultDir, () => {
-      const registry = readDeviceRegistry(this.session.rootDir, this.key());
+      const registry = readDeviceRegistry(this.session.rootDir, this.readKeys());
       if (!registry) throw new Error("Sync device enrollment is not initialized.");
       validateChangeSet(changes);
       validateAuthorizedChanges(changes, registry);
@@ -1650,7 +1679,7 @@ export class SyncDeviceManager {
         AAD.syncAuthorityKey,
         "Sync enrollment authority private key",
       );
-      const current = readCheckpoint(this.session.rootDir, this.key(), registry);
+      const current = readCheckpoint(this.session.rootDir, this.readKeys(), registry);
       const parentIds = new Set(changes.flatMap((change) => change.parents));
       const body: SyncFreshnessCheckpointBody = {
         version: 1,
@@ -1675,22 +1704,22 @@ export class SyncDeviceManager {
   }
 
   exportCheckpoint(): EncryptedSyncFreshnessCheckpoint {
-    const registry = readDeviceRegistry(this.session.rootDir, this.key());
+    const registry = readDeviceRegistry(this.session.rootDir, this.readKeys());
     if (!registry) throw new Error("Sync device enrollment is not initialized.");
-    const checkpoint = readCheckpoint(this.session.rootDir, this.key(), registry);
+    const checkpoint = readCheckpoint(this.session.rootDir, this.readKeys(), registry);
     if (!checkpoint) throw new Error("No sync freshness checkpoint has been created.");
     return encryptedCheckpoint(checkpoint, this.key());
   }
 
   checkpoint(): SignedSyncFreshnessCheckpoint | undefined {
-    const registry = readDeviceRegistry(this.session.rootDir, this.key());
+    const registry = readDeviceRegistry(this.session.rootDir, this.readKeys());
     if (!registry) return undefined;
-    const checkpoint = readCheckpoint(this.session.rootDir, this.key(), registry);
+    const checkpoint = readCheckpoint(this.session.rootDir, this.readKeys(), registry);
     return checkpoint ? structuredClone(checkpoint) : undefined;
   }
 
   inspectCheckpoint(value: unknown): SignedSyncFreshnessCheckpoint {
-    const registry = readDeviceRegistry(this.session.rootDir, this.key());
+    const registry = readDeviceRegistry(this.session.rootDir, this.readKeys());
     if (!registry) throw new Error("Sync device enrollment is not initialized.");
     const envelope = value as EncryptedSyncFreshnessCheckpoint | undefined;
     if (!envelope || envelope.version !== 1 || !envelope.payload) {
@@ -1698,7 +1727,7 @@ export class SyncDeviceManager {
     }
     return structuredClone(
       validateSignedCheckpoint(
-        JSON.parse(decryptDocument(envelope.payload, this.key(), AAD.syncFreshnessCheckpoint)),
+        JSON.parse(decryptDocument(envelope.payload, this.readKeys(), AAD.syncFreshnessCheckpoint)),
         registry,
       ),
     );
@@ -1710,18 +1739,18 @@ export class SyncDeviceManager {
     expectedCheckpointId?: string,
   ): SignedSyncFreshnessCheckpoint {
     return withVaultLock(this.vaultDir, () => {
-      const registry = readDeviceRegistry(this.session.rootDir, this.key());
+      const registry = readDeviceRegistry(this.session.rootDir, this.readKeys());
       if (!registry) throw new Error("Sync device enrollment is not initialized.");
       const envelope = value as EncryptedSyncFreshnessCheckpoint | undefined;
       if (!envelope || envelope.version !== 1 || !envelope.payload) {
         throw new Error("Unsupported or invalid encrypted freshness checkpoint bundle.");
       }
       const incoming = validateSignedCheckpoint(
-        JSON.parse(decryptDocument(envelope.payload, this.key(), AAD.syncFreshnessCheckpoint)),
+        JSON.parse(decryptDocument(envelope.payload, this.readKeys(), AAD.syncFreshnessCheckpoint)),
         registry,
       );
       assertCheckpointHistory(incoming, changes);
-      const current = readCheckpoint(this.session.rootDir, this.key(), registry);
+      const current = readCheckpoint(this.session.rootDir, this.readKeys(), registry);
       if (!current) {
         if (!expectedCheckpointId || !CHANGE_ID.test(expectedCheckpointId)) {
           throw new Error("First checkpoint import requires the expected 64-character checkpoint ID.");
@@ -1746,10 +1775,10 @@ export class SyncDeviceManager {
   }
 
   verifyCheckpoint(changes: readonly SyncChange[]): SignedSyncFreshnessCheckpoint {
-    const registry = readDeviceRegistry(this.session.rootDir, this.key());
+    const registry = readDeviceRegistry(this.session.rootDir, this.readKeys());
     if (!registry) throw new Error("Sync device enrollment is not initialized.");
     validateAuthorizedChanges(changes, registry);
-    const checkpoint = readCheckpoint(this.session.rootDir, this.key(), registry);
+    const checkpoint = readCheckpoint(this.session.rootDir, this.readKeys(), registry);
     if (!checkpoint) throw new Error("No sync freshness checkpoint is pinned.");
     assertCheckpointHistory(checkpoint, changes);
     return structuredClone(checkpoint);
@@ -1771,27 +1800,39 @@ export function openSyncChange(
     }
     material = key;
   }
-  const { syncChangeKey, syncEnvelopeKey, legacyKey } = splitSyncKeys(material);
+  const { syncChangeKey, syncEnvelopeKey, retiringSyncEnvelopeKey, legacyKey } = splitSyncKeys(material);
+  // Ordered: the key in force, then the outgoing key of an unfinished re-key,
+  // then the pre-keyring key that opens changes written before migration. Only
+  // the last of those changes how the change's identity is recomputed.
+  const candidates: { key: Buffer; legacy: boolean }[] = [{ key: syncEnvelopeKey, legacy: false }];
+  if (retiringSyncEnvelopeKey && retiringSyncEnvelopeKey !== syncEnvelopeKey) {
+    candidates.push({ key: retiringSyncEnvelopeKey, legacy: false });
+  }
+  if (legacyKey && legacyKey !== syncEnvelopeKey) candidates.push({ key: legacyKey, legacy: true });
+
   let encryptionKey = syncEnvelopeKey;
-  let envelopeKey = changeEncryptionKey(encryptionKey, envelope.id, epoch);
-  let plaintext: string;
-  try {
+  let usedLegacyKey = false;
+  let plaintext: string | undefined;
+  let failure: unknown;
+  for (const candidate of candidates) {
+    const envelopeKey = changeEncryptionKey(candidate.key, envelope.id, epoch);
     try {
       plaintext = decryptDocument(envelope.payload, envelopeKey, syncChangeAad(envelope.id));
+      encryptionKey = candidate.key;
+      usedLegacyKey = candidate.legacy;
+      failure = undefined;
+      break;
     } catch (error) {
-      if (!legacyKey || legacyKey === syncEnvelopeKey) throw error;
+      failure = error;
+    } finally {
       envelopeKey.fill(0);
-      encryptionKey = legacyKey;
-      envelopeKey = changeEncryptionKey(encryptionKey, envelope.id, epoch);
-      plaintext = decryptDocument(envelope.payload, envelopeKey, syncChangeAad(envelope.id));
     }
-  } finally {
-    envelopeKey.fill(0);
   }
+  if (plaintext === undefined) throw failure;
   if (Buffer.byteLength(plaintext, "utf8") > MAX_CHANGE_BYTES) throw new Error("Sync change exceeds 8 MiB.");
   const body = validateSyncChangeBody(JSON.parse(plaintext));
-  const identityKey = encryptionKey === legacyKey ? encryptionKey : syncChangeKey;
-  const modernId = changeId(body, identityKey, Buffer.isBuffer(material) || encryptionKey === legacyKey ? epoch : 1);
+  const identityKey = usedLegacyKey ? encryptionKey : syncChangeKey;
+  const modernId = changeId(body, identityKey, Buffer.isBuffer(material) || usedLegacyKey ? epoch : 1);
   const legacyId =
     epoch > 1 && !Buffer.isBuffer(material)
       ? changeId(body, syncEnvelopeKey, epoch)
@@ -2213,6 +2254,12 @@ export class SyncChangeLog {
     return this.session.key;
   }
 
+  /** The write key, then the retiring one of an unfinished re-key. */
+  private readKeys(): readonly Buffer[] {
+    if (this.closed) throw new Error("Sync change log is closed.");
+    return this.session.readKeys;
+  }
+
   private epochResolver(): SyncEpochKeyResolver {
     const vaultKey = this.key();
     const rootDir = this.session.rootDir;
@@ -2221,6 +2268,7 @@ export class SyncChangeLog {
         return {
           syncChangeKey: this.session.syncChangeKey,
           syncEnvelopeKey: this.session.syncEnvelopeKey,
+          retiringSyncEnvelopeKey: this.session.syncEnvelopeReadKeys[1],
           legacyKey: vaultKey,
         };
       }
@@ -2241,7 +2289,7 @@ export class SyncChangeLog {
     const payload = JSON.parse(
       readTextFileLimited(this.appliedPath, 64 * 1024 * 1024, "Sync application state")
     ) as DocumentPayload;
-    const parsed = JSON.parse(decryptDocument(payload, this.key(), AAD.syncApplied)) as SyncAppliedState;
+    const parsed = JSON.parse(decryptDocument(payload, this.readKeys(), AAD.syncApplied)) as SyncAppliedState;
     if (parsed?.version !== 1 || !parsed.objects || typeof parsed.objects !== "object") {
       throw new Error("Unsupported or invalid sync application state.");
     }
@@ -2334,14 +2382,14 @@ export class SyncChangeLog {
     const envelopes = this.readEnvelopes();
     const changes = envelopes.map((envelope) => openSyncChange(envelope, this.epochResolver()));
     validateChangeSet(changes);
-    validateAuthorizedChanges(changes, readDeviceRegistry(this.session.rootDir, this.key()));
+    validateAuthorizedChanges(changes, readDeviceRegistry(this.session.rootDir, this.readKeys()));
     return structuredClone(envelopes);
   }
 
   changes(): SyncChange[] {
     const changes = this.readEnvelopes().map((envelope) => openSyncChange(envelope, this.epochResolver()));
     validateChangeSet(changes);
-    validateAuthorizedChanges(changes, readDeviceRegistry(this.session.rootDir, this.key()));
+    validateAuthorizedChanges(changes, readDeviceRegistry(this.session.rootDir, this.readKeys()));
     return parentFirstChanges(changes);
   }
 
@@ -2384,7 +2432,7 @@ export class SyncChangeLog {
   ): EncryptedSyncChange[] {
     const current = this.changes();
     const prepared: EncryptedSyncChange[] = [];
-    const registry = readDeviceRegistry(this.session.rootDir, this.key());
+    const registry = readDeviceRegistry(this.session.rootDir, this.readKeys());
     for (const mutation of mutations) {
       const verification = validateChangeSet(current);
       const previous = current
@@ -2429,7 +2477,7 @@ export class SyncChangeLog {
         .sort((left, right) => left.sequence - right.sequence);
       const previous = deviceChanges.at(-1);
       const parents = [...new Set([...verification.heads, ...(previous ? [previous.id] : [])])].sort();
-      const registry = readDeviceRegistry(this.session.rootDir, this.key());
+      const registry = readDeviceRegistry(this.session.rootDir, this.readKeys());
       const unsigned: Omit<SyncChangeBody, "authorization"> = {
         version: changeBodyVersion(mutation, Boolean(registry)),
         deviceId,
@@ -2462,7 +2510,7 @@ export class SyncChangeLog {
       validateChangeSet([...current, ...additions]);
       validateAuthorizedChanges(
         [...current, ...additions],
-        readDeviceRegistry(this.session.rootDir, this.key()),
+        readDeviceRegistry(this.session.rootDir, this.readKeys()),
       );
       const incomingEnvelope = new Map(envelopes.map((envelope) => [envelope.id, envelope]));
       const additionIds = new Set(additions.map((change) => change.id));

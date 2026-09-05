@@ -2,7 +2,11 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { decryptDocumentBytes, encryptDocumentBytes } from "./document-crypto.js";
+import {
+  decryptDocumentBytes,
+  encryptDocumentBytes,
+  type DocumentReadKey,
+} from "./document-crypto.js";
 import { ATTACHMENT_CHUNK_SIZE } from "./documents.js";
 import { attachmentChunkAad } from "./format-version.js";
 import { assertNotSymlink, writeFileAtomic } from "./fs-safe.js";
@@ -48,7 +52,7 @@ export function openAttachmentBlob(
   payload: Buffer,
   attachmentId: string,
   index: number,
-  key: Buffer
+  key: DocumentReadKey
 ): Buffer {
   return decryptDocumentBytes(
     JSON.parse(payload.toString("utf8")) as never,

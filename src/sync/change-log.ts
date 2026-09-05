@@ -205,13 +205,23 @@ export class SyncChangeLog {
     return this.session.key;
   }
 
+  /** The write key, then the retiring one of an unfinished re-key. */
+  private readKeys(): readonly Buffer[] {
+    if (this.closed) throw new Error("Sync change log is closed.");
+    return this.session.readKeys;
+  }
+
   /**
    * Change identity (permanent) and body encryption (rotatable) are two
    * different keys; sealing/opening a change always needs both.
    */
   private syncKeys(): SyncChangeKeys {
     if (this.closed) throw new Error("Sync change log is closed.");
-    return { syncChangeKey: this.session.syncChangeKey, syncEnvelopeKey: this.session.syncEnvelopeKey };
+    return {
+      syncChangeKey: this.session.syncChangeKey,
+      syncEnvelopeKey: this.session.syncEnvelopeKey,
+      retiringSyncEnvelopeKey: this.session.syncEnvelopeReadKeys[1],
+    };
   }
 
   private readAppliedState(): SyncAppliedState {
@@ -219,7 +229,7 @@ export class SyncChangeLog {
     if (!fs.existsSync(this.appliedPath)) return { version: 1, objects: {} };
     assertNotSymlink(this.appliedPath);
     const payload = JSON.parse(fs.readFileSync(this.appliedPath, "utf8")) as DocumentPayload;
-    const parsed = JSON.parse(decryptDocument(payload, this.key(), APPLIED_AAD)) as SyncAppliedState;
+    const parsed = JSON.parse(decryptDocument(payload, this.readKeys(), APPLIED_AAD)) as SyncAppliedState;
     if (parsed?.version !== 1 || !parsed.objects || typeof parsed.objects !== "object")
       throw new Error("Unsupported or invalid sync application state.");
     for (const [key, entry] of Object.entries(parsed.objects)) {

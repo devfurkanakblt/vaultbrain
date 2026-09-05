@@ -286,6 +286,12 @@ export class SyncLocalTransaction {
     return this.session.key;
   }
 
+  /** The write key, then the retiring one of an unfinished re-key. */
+  private readKeys(): readonly Buffer[] {
+    if (this.closed) throw new Error("Sync local transaction store is closed.");
+    return this.session.readKeys;
+  }
+
   private fault(phase: SyncTransactionPhase, timing: SyncTransactionFaultPoint["timing"]): void {
     this.options.faultInjector?.({ phase, timing });
   }
@@ -315,7 +321,7 @@ export class SyncLocalTransaction {
       throw new Error("The encrypted pending sync transaction is invalid or too large.");
     }
     const payload = JSON.parse(fs.readFileSync(this.pendingPath, "utf8")) as DocumentPayload;
-    const plaintext = decryptDocument(payload, this.key(), LOCAL_TRANSACTION_AAD);
+    const plaintext = decryptDocument(payload, this.readKeys(), LOCAL_TRANSACTION_AAD);
     if (Buffer.byteLength(plaintext, "utf8") > MAX_LOCAL_TRANSACTION_BYTES) {
       throw new Error("The pending sync transaction is too large.");
     }
@@ -453,6 +459,12 @@ export class SyncApplyReceiptStore {
     return this.session.key;
   }
 
+  /** The write key, then the retiring one of an unfinished re-key. */
+  private readKeys(): readonly Buffer[] {
+    if (this.closed) throw new Error("Sync apply receipt store is closed.");
+    return this.session.readKeys;
+  }
+
   fault(phase: SyncApplyPhase, timing: SyncApplyFaultPoint["timing"]): void {
     this.options.applyFaultInjector?.({ phase, timing });
   }
@@ -470,7 +482,7 @@ export class SyncApplyReceiptStore {
     if (!fs.existsSync(this.receiptPath)) return undefined;
     assertNotSymlink(this.receiptPath);
     const payload = JSON.parse(fs.readFileSync(this.receiptPath, "utf8")) as DocumentPayload;
-    return validateApplyReceipt(JSON.parse(decryptDocument(payload, this.key(), APPLY_RECEIPT_AAD)));
+    return validateApplyReceipt(JSON.parse(decryptDocument(payload, this.readKeys(), APPLY_RECEIPT_AAD)));
   }
 
   begin(change: SyncChange, expectedLive: SyncApplyLiveIdentity): SyncApplyReceipt {
