@@ -113,10 +113,14 @@ The restored directory must come from an encrypted vault backup and therefore co
 
 `npm run recovery:drill` performs a disposable end-to-end exercise:
 
-1. create an enrolled source vault and an encrypted offline backup;
+1. create an enrolled source vault and take a `vbrain backup` archive of it;
 2. add a later change and owner-signed checkpoint;
 3. upload only opaque ciphertext to a temporary relay;
-4. restore the offline backup, catch up from the relay and verify the pinned checkpoint;
+4. restore that archive into a new directory, catch up from the relay and verify the pinned checkpoint;
 5. assert that the relay files do not contain the test plaintext.
+
+Step 4 restores from the artifact the documented backup procedure produces, not
+from a directory copy. A copy cannot be verified before it is trusted, and it
+carries whatever half-written state the source directory happened to hold.
 
 Run this gate before a release and retain the command output as drill evidence. It is an automated engineering drill, not a substitute for an independent security audit or a human-operated disaster-recovery exercise.
