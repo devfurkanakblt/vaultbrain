@@ -30,12 +30,14 @@ import {
   openVaultKeys,
   randomKeySet,
   readKeyring,
+  unwrapSlotKeySet,
   wrapKeySet,
   writeKeyring,
 } from "../dist/keyring.js";
+import { changeVaultPassphrase } from "../dist/keyring-passphrase.js";
 import { loadVaultFile, upsertEntry } from "../dist/store.js";
 import { saveGrants, emptyGrantFile } from "../dist/grants.js";
-import { SyncChangeLog } from "../dist/sync.js";
+import { SyncChangeLog, SyncDeviceManager } from "../dist/sync.js";
 import { VaultBusyError, lockHolder } from "../dist/vault-lock.js";
 
 const PASSPHRASE = "phase-74-current-passphrase";
@@ -1239,6 +1241,255 @@ test("a re-key re-seals a sync change under the new envelope key without moving 
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+// --- Merge finding: Critical 1 — main's sync device registry, identity keys
+// and epoch keys, unknown to the classification table this branch shipped
+// with. A minimal owner-init + enroll + revoke vault holds every artifact the
+// finding named: sync/devices.enc, two devices' identity and agreement keys,
+// the enrollment authority key, and (once the second device is revoked) an
+// epoch 2 content key file.
+
+const SYNC_DEVICE_A = "44444444-4444-4444-8444-444444444444";
+const SYNC_DEVICE_B = "55555555-5555-4555-8555-555555555555";
+
+/**
+ * A vault that has actually run device init, enroll and revoke: registry at
+ * epoch 2, an enrollment authority key, identity and agreement keys for both
+ * devices (one of them revoked), and a stored epoch 2 content key.
+ */
+function seedSyncEnabledVault(passphrase = PASSPHRASE) {
+  const dir = tempDir("sync-enabled");
+  const owner = new SyncDeviceManager(dir, passphrase);
+  owner.initializeOwner("Owner laptop", SYNC_DEVICE_A);
+
+  const requester = new SyncDeviceManager(dir, passphrase);
+  const request = requester.createEnrollmentRequest("Second device", SYNC_DEVICE_B);
+  requester.close();
+  owner.enroll(request);
+
+  owner.revoke(SYNC_DEVICE_B, 0);
+  owner.close();
+  forgetVaultKeys();
+  return { dir };
+}
+
+test("planRekey classifies every sync device-registry, identity and epoch-key artifact with the AAD that wrote it", () => {
+  const { dir } = seedSyncEnabledVault();
+
+  const items = planRekey(dir);
+  const byPath = new Map(items.map((item) => [item.path, item]));
+
+  assert.deepEqual(byPath.get("documents/sync/devices.enc"), {
+    path: "documents/sync/devices.enc",
+    kind: "document",
+    identity: "secondbrain-vault:sync-device-registry:v1",
+  });
+  assert.deepEqual(byPath.get("documents/sync/identity/authority.key.enc"), {
+    path: "documents/sync/identity/authority.key.enc",
+    kind: "document",
+    identity: "secondbrain-vault:sync-authority-key:v1",
+  });
+  assert.deepEqual(byPath.get(`documents/sync/identity/${SYNC_DEVICE_A}.key.enc`), {
+    path: `documents/sync/identity/${SYNC_DEVICE_A}.key.enc`,
+    kind: "document",
+    identity: `secondbrain-vault:sync-device-key:v1:${SYNC_DEVICE_A}`,
+  });
+  assert.deepEqual(byPath.get(`documents/sync/identity/${SYNC_DEVICE_A}.x25519.key.enc`), {
+    path: `documents/sync/identity/${SYNC_DEVICE_A}.x25519.key.enc`,
+    kind: "document",
+    identity: `secondbrain-vault:sync-agreement-key:v1:${SYNC_DEVICE_A}`,
+  });
+  assert.deepEqual(byPath.get(`documents/sync/identity/${SYNC_DEVICE_B}.key.enc`), {
+    path: `documents/sync/identity/${SYNC_DEVICE_B}.key.enc`,
+    kind: "document",
+    identity: `secondbrain-vault:sync-device-key:v1:${SYNC_DEVICE_B}`,
+  });
+  assert.deepEqual(byPath.get(`documents/sync/identity/${SYNC_DEVICE_B}.x25519.key.enc`), {
+    path: `documents/sync/identity/${SYNC_DEVICE_B}.x25519.key.enc`,
+    kind: "document",
+    identity: `secondbrain-vault:sync-agreement-key:v1:${SYNC_DEVICE_B}`,
+  });
+  assert.deepEqual(byPath.get("documents/sync/identity/epochs/2.key.enc"), {
+    path: "documents/sync/identity/epochs/2.key.enc",
+    kind: "document",
+    identity: "secondbrain-vault:sync-epoch-key:v1:2",
+  });
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// A blob store id is content-addressed by its own sealed bytes and keyed by
+// `deriveBlobKey(syncChangeKey)` — a function of the PINNED syncChange key —
+// so it must be enumerated (it is real vault content the walk must not fail
+// closed on) but never re-encrypted (there is no key rotating under it).
+test("a sync blob is enumerated but never scheduled for re-encryption", () => {
+  const { dir } = seedSyncEnabledVault();
+  const blobDir = path.join(dir, "documents", "sync", "blobs");
+  fs.mkdirSync(blobDir, { recursive: true });
+  const body = Buffer.from("sealed attachment chunk bytes");
+  const blobId = crypto.createHash("sha256").update(body).digest("hex");
+  fs.writeFileSync(path.join(blobDir, blobId), body);
+
+  const items = planRekey(dir);
+  assert.equal(
+    items.some((item) => item.path === `documents/sync/blobs/${blobId}`),
+    false,
+    "a sync blob must never be scheduled for re-encryption",
+  );
+
+  const before = fs.readFileSync(path.join(blobDir, blobId));
+  const report = rekeyVault(dir, PASSPHRASE, NEW_PASSPHRASE);
+  assert.ok(report.passphraseChanged);
+  assert.deepEqual(fs.readFileSync(path.join(blobDir, blobId)), before, "a sync blob must survive byte for byte");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a full re-key succeeds on a vault with device init, enroll and revoke, and sync state stays usable", () => {
+  const { dir } = seedSyncEnabledVault();
+
+  const report = rekeyVault(dir, PASSPHRASE, NEW_PASSPHRASE);
+  assert.equal(report.passphraseChanged, true);
+
+  forgetVaultKeys();
+  const manager = new SyncDeviceManager(dir, NEW_PASSPHRASE);
+  const registry = manager.state();
+  assert.equal(registry.body.epoch, 2);
+  assert.equal(
+    registry.body.devices.find((record) => record.certificate.deviceId === SYNC_DEVICE_B)?.revokedAt !== undefined,
+    true,
+    "device B must still show as revoked after the re-key",
+  );
+  manager.close();
+
+  // The epoch 2 content key file must itself have round-tripped: a fresh
+  // epoch 2 change appended after the re-key still has to open under it.
+  const log = new SyncChangeLog(dir, NEW_PASSPHRASE);
+  const change = log.append(SYNC_DEVICE_A, {
+    objectType: "note",
+    objectId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+    operation: "put",
+    baseRevision: null,
+    revision: 1,
+    value: { title: "After re-key", body: "epoch 2 body after re-key" },
+  });
+  assert.equal(change.mutation.value.body, "epoch 2 body after re-key");
+  log.close();
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// --- Merge finding: Critical 2 — epoch >= 2 sync changes. An epoch 1 change
+// re-seals (already covered above); a vault whose next change landed at
+// epoch 2 (right after the revoke that bumped it) must refuse the whole
+// re-key up front, with `resealSyncChange`'s own wording, rather than crash
+// on a key formula that could never have matched it.
+test("a vault holding an epoch 2 sync change refuses the whole re-key, by design, rather than corrupting or silently skipping it", () => {
+  const { dir } = seedSyncEnabledVault();
+  const log = new SyncChangeLog(dir, PASSPHRASE);
+  const change = log.append(SYNC_DEVICE_A, {
+    objectType: "note",
+    objectId: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+    operation: "put",
+    baseRevision: null,
+    revision: 1,
+    value: { title: "Plan", body: "epoch 2 body" },
+  });
+  log.close();
+  const changeFile = `documents/sync/changes/${change.id}.change.enc`;
+  const onDisk = JSON.parse(fs.readFileSync(path.join(dir, ...changeFile.split("/")), "utf8"));
+  assert.equal(onDisk.version, 2, "the seeded fixture must actually produce an epoch 2 envelope");
+  assert.equal(onDisk.epoch, 2);
+
+  const before = hashVault(dir);
+
+  assert.throws(
+    () => rekeyVault(dir, PASSPHRASE, NEW_PASSPHRASE),
+    /Only an epoch 1 sync change is re-sealed; later epochs keep their epoch key/u,
+  );
+
+  assertVaultUnchanged(dir, before);
+  forgetVaultKeys();
+  assert.ok(openVaultKeys(dir, PASSPHRASE), "a refused re-key must leave the old passphrase working");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// --- Merge finding: Critical 3 — `legacyChangeIdentity` must survive a later
+// passphrase change. A re-key is the first thing that ever writes the field
+// (it records the documents key it just replaced), so the drop in
+// `changeVaultPassphrase` only becomes observable once a re-key has run.
+test("legacyChangeIdentity set by a re-key survives a later passphrase change", () => {
+  const { dir } = seedVault();
+  rekeyVault(dir, PASSPHRASE, NEW_PASSPHRASE);
+
+  forgetVaultKeys();
+  const afterRekey = unwrapSlotKeySet(readKeyring(dir).slots[0], NEW_PASSPHRASE);
+  assert.ok(afterRekey.legacyChangeIdentity, "a re-key must record a legacy change identity key");
+  const legacyBytes = Buffer.from(afterRekey.legacyChangeIdentity);
+
+  const THIRD_PASSPHRASE = "phase-74-third-passphrase";
+  changeVaultPassphrase(dir, NEW_PASSPHRASE, THIRD_PASSPHRASE);
+
+  forgetVaultKeys();
+  const afterPassphraseChange = unwrapSlotKeySet(readKeyring(dir).slots[0], THIRD_PASSPHRASE);
+  assert.ok(
+    afterPassphraseChange.legacyChangeIdentity,
+    "a passphrase change must not drop the legacy change identity key a re-key recorded",
+  );
+  assert.equal(
+    afterPassphraseChange.legacyChangeIdentity.equals(legacyBytes),
+    true,
+    "the legacy identity key itself must survive a passphrase change unchanged",
+  );
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// --- Merge finding: Important 6 — a failed settle write must not misreport a
+// successful re-key. The settle write is call number `items.length + 4`:
+// `withVaultLock`'s own record (1), one write per staged item, the journal,
+// and the commit-point keyring write, all before the settle write this test
+// fails.
+test("a failed settle write reports the truth instead of a failure that did not happen", () => {
+  const { dir } = seedVault();
+  const items = planRekey(dir);
+  const settleWriteNumber = items.length + 4;
+
+  const realWriteFileSync = fs.writeFileSync;
+  let writes = 0;
+  let report;
+  try {
+    fs.writeFileSync = (destination, data, options) => {
+      writes += 1;
+      if (writes === settleWriteNumber) {
+        const full = new Error("ENOSPC: no space left on device, write");
+        full.code = "ENOSPC";
+        throw full;
+      }
+      return realWriteFileSync(destination, data, options);
+    };
+    report = rekeyVault(dir, PASSPHRASE, NEW_PASSPHRASE);
+  } finally {
+    fs.writeFileSync = realWriteFileSync;
+  }
+
+  assert.equal(writes, settleWriteNumber, "the injected failure must land on the settle write, not before it");
+  assert.equal(report.settled, false, "a failed settle write must be visible in the report");
+  assert.equal(report.passphraseChanged, true, "the re-key itself succeeded past the commit point");
+  assert.equal(report.resumed, false);
+
+  // The vault is fully readable and writable under the new passphrase, and
+  // the keyring on disk still names the retiring keys the settle write
+  // failed to drop.
+  forgetVaultKeys();
+  const vault = new DocumentVault(dir, NEW_PASSPHRASE);
+  vault.lock();
+  const opened = unwrapSlotKeySet(readKeyring(dir).slots[0], NEW_PASSPHRASE);
+  assert.ok(opened.retiring, "an unsettled keyring must still carry the retiring keys");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 // Kills the mutation "skip recovery and go straight to staging": an
 // interrupted re-key whose keyring was already replaced must be finished, not
 // restaged, and the run that finishes it must say so rather than claim a
@@ -1406,6 +1657,16 @@ test("a failure partway through the installs leaves the journal for recovery", (
 function exitedPid() {
   const finished = spawnSync(process.execPath, ["-e", ""]);
   assert.equal(finished.status, 0, "the probe process must exit cleanly");
+  // A live pid the OS has since recycled to an unrelated process would
+  // silently invert the assertions this pid is planted for: `process.kill`
+  // with signal 0 sends nothing but throws ESRCH exactly when no process
+  // holds the pid, so this proves the probe is actually dead before it is
+  // trusted as a stale holder.
+  assert.throws(
+    () => process.kill(finished.pid, 0),
+    (error) => error && error.code === "ESRCH",
+    "the probe pid must actually be dead before being planted as a stale lock holder",
+  );
   return finished.pid;
 }
 

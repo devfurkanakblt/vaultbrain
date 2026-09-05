@@ -8,11 +8,14 @@ import {
   readKeyring,
   unwrapKeyring,
   unwrapSlot,
+  unwrapSlotKeySet,
   wrapKeySet,
   writeKeyring,
   zeroKeySet,
+  zeroRetiringKeys,
   type KeyringSlot,
   type KeySet,
+  type RetiringKeys,
 } from "./keyring.js";
 import { withVaultLock } from "./vault-lock.js";
 import { appendKeyringAudit, appendKeyringAuditWithKey, newKeyringAuditKey } from "./keyring-audit.js";
@@ -85,6 +88,14 @@ export function changeVaultPassphrase(
     if (!file) throw new Error("This vault has no keyring to change.");
 
     let opened: KeySet | undefined;
+    // Carried across from whichever slot first opened, and threaded into
+    // every freshly wrapped slot below: a re-wrap that dropped these would
+    // silently discard the retiring keys of a re-key this passphrase change
+    // interrupts, or the legacy identity key that recomputes the ids of sync
+    // changes an older build derived from a documents key a re-key already
+    // replaced. Neither is decrypted or interpreted here — only carried.
+    let retiring: RetiringKeys | null = null;
+    let legacyChangeIdentity: Buffer | null = null;
     let previousN = 0;
     let slotsPreserved = 0;
     const preserved: PreservedSlot[] = [];
@@ -95,9 +106,14 @@ export function changeVaultPassphrase(
 
     try {
       for (const slot of file.slots) {
-        let keys: KeySet;
+        let candidate: KeySet;
+        let candidateRetiring: RetiringKeys | null;
+        let candidateLegacy: Buffer | null;
         try {
-          keys = unwrapSlot(slot, currentPassphrase);
+          const unwrapped = unwrapSlotKeySet(slot, currentPassphrase);
+          candidate = unwrapped.keys;
+          candidateRetiring = unwrapped.retiring;
+          candidateLegacy = unwrapped.legacyChangeIdentity;
         } catch {
           // Not this passphrase's slot. Preserving it is what keeps a recovery
           // slot alive across a passphrase change.
@@ -107,18 +123,24 @@ export function changeVaultPassphrase(
           continue;
         }
         if (opened) {
-          if (!sameKeySet(keys, opened)) {
-            zeroKeySet(keys);
+          if (!sameKeySet(candidate, opened)) {
+            zeroKeySet(candidate);
+            if (candidateRetiring) zeroRetiringKeys(candidateRetiring);
+            candidateLegacy?.fill(0);
             throw new Error(
               "A second slot this passphrase opens carries a different keyset; refusing to write the keyring.",
             );
           }
-          zeroKeySet(keys);
+          zeroKeySet(candidate);
+          if (candidateRetiring) zeroRetiringKeys(candidateRetiring);
+          candidateLegacy?.fill(0);
         } else {
-          opened = keys;
+          opened = candidate;
+          retiring = candidateRetiring;
+          legacyChangeIdentity = candidateLegacy;
           previousN = slot.kdf.N;
         }
-        const wrapped = wrapKeySet(opened, newPassphrase);
+        const wrapped = wrapKeySet(opened, newPassphrase, DEFAULT_SCRYPT_N, retiring, legacyChangeIdentity);
         slots.push(wrapped);
         newlyWrapped.push(wrapped);
       }
@@ -178,6 +200,8 @@ export function changeVaultPassphrase(
       throw error;
     } finally {
       if (opened) zeroKeySet(opened);
+      if (retiring) zeroRetiringKeys(retiring);
+      legacyChangeIdentity?.fill(0);
     }
   });
 }

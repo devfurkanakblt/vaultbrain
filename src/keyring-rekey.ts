@@ -11,10 +11,12 @@ import {
   noteAad,
   pluginAad,
   pluginStoreAad,
+  syncAgreementKeyAad,
+  syncDeviceKeyAad,
+  syncEpochKeyAad,
 } from "./format-version.js";
 import { decryptWithKey, encryptWithKey, type KeyedEncryptedPayload } from "./crypto.js";
 import {
-  decryptDocument,
   decryptDocumentBytes,
   encryptDocument,
   encryptDocumentBytes,
@@ -43,12 +45,8 @@ import {
 } from "./keyring.js";
 import { MIN_PASSPHRASE_LENGTH } from "./keyring-passphrase.js";
 import { resolveInside } from "./safety.js";
-import {
-  APPLIED_AAD,
-  CHANGE_AAD_PREFIX,
-  changeEncryptionKey,
-  validateEncryptedSyncChange,
-} from "./sync/protocol.js";
+import { canonicalSyncJson, openSyncChange, type SyncChangeKeys, type SyncJson } from "./sync.js";
+import { CHANGE_AAD_PREFIX, changeEncryptionKey } from "./sync/protocol.js";
 import { APPLY_RECEIPT_AAD, LOCAL_TRANSACTION_AAD } from "./sync/transaction.js";
 import { withVaultLock } from "./vault-lock.js";
 
@@ -107,10 +105,22 @@ const CONTENT_ID = /^[a-f0-9]{64}$/u;
 const WRITER_TEMP_FILE = /^\..+\.tmp$/u;
 
 const SYNC_STATE_AAD: Record<string, string> = {
-  "applied.enc": APPLIED_AAD,
+  "applied.enc": AAD.syncApplied,
   "pending-local.enc": LOCAL_TRANSACTION_AAD,
   "apply-receipt.enc": APPLY_RECEIPT_AAD,
+  "devices.enc": AAD.syncDeviceRegistry,
+  "checkpoint.enc": AAD.syncFreshnessCheckpoint,
 };
+
+// `sync/identity/*` filenames, mirroring the loose 36-character convention
+// `DOCUMENT_ID` already uses for note/canvas/attachment ids: these are device
+// ids, never re-validated as a strict UUID here because the walk only has to
+// reproduce the AAD a device id feeds into, not police the id's shape.
+const SYNC_DEVICE_KEY_FILE = /^([a-f0-9-]{36})\.key\.enc$/u;
+const SYNC_AGREEMENT_KEY_FILE = /^([a-f0-9-]{36})\.x25519\.key\.enc$/u;
+// `sync/identity/epochs/*`: the epoch number, same round-trip-safe shape as
+// `HISTORY_FILE`'s revision.
+const SYNC_EPOCH_KEY_FILE = /^(0|[1-9]\d*)\.key\.enc$/u;
 
 /**
  * Every AAD is a pure function of the file's own path, which is what makes a
@@ -171,6 +181,30 @@ function classifyDocument(relative: string): RekeyItem | null {
   if (segments.length === 3 && segments[0] === "sync" && segments[1] === "changes") {
     const match = CHANGE_FILE.exec(segments[2]);
     if (match) return item("sync-change", match[1]);
+  }
+
+  // `sync/blobs/<64hex>`: sealed by `deriveBlobKey(syncChangeKey)`
+  // (src/sync-blobs.ts), a key derived from the PINNED `syncChange` key. A
+  // blob's id is the SHA-256 of its own sealed bytes, and that id is baked
+  // into every manifest and change body that references it — re-encrypting
+  // one under a fresh IV would rename it out from under everything pointing
+  // at it. There is nothing to rotate here, so the walk enumerates it and
+  // then leaves it alone rather than throwing on it as unclassifiable.
+  if (segments.length === 3 && segments[0] === "sync" && segments[1] === "blobs" && CONTENT_ID.test(segments[2])) {
+    return null;
+  }
+
+  if (segments.length === 3 && segments[0] === "sync" && segments[1] === "identity") {
+    if (segments[2] === "authority.key.enc") return item("document", AAD.syncAuthorityKey);
+    const agreementMatch = SYNC_AGREEMENT_KEY_FILE.exec(segments[2]);
+    if (agreementMatch) return item("document", syncAgreementKeyAad(agreementMatch[1]));
+    const deviceMatch = SYNC_DEVICE_KEY_FILE.exec(segments[2]);
+    if (deviceMatch) return item("document", syncDeviceKeyAad(deviceMatch[1]));
+  }
+
+  if (segments.length === 4 && segments[0] === "sync" && segments[1] === "identity" && segments[2] === "epochs") {
+    const match = SYNC_EPOCH_KEY_FILE.exec(segments[3]);
+    if (match) return item("document", syncEpochKeyAad(Number(match[1])));
   }
 
   throw new Error(`Refusing to re-key: cannot classify documents/${relative}.`);
@@ -243,10 +277,33 @@ export function planRekey(vaultDir: string): RekeyItem[] {
  * re-encryption preserved content, and that comparison must not care which
  * envelope produced it.
  */
+/** The two keys `openSyncChange` (src/sync.ts) needs to open a version 1 change. */
+function syncChangeMaterial(keys: KeySet): SyncChangeKeys {
+  return { syncChangeKey: keys.syncChange, syncEnvelopeKey: keys.syncEnvelope };
+}
+
+/**
+ * `sync/devices.enc` and `sync/checkpoint.enc` (`encryptedRegistry` /
+ * `encryptedCheckpoint` in src/sync.ts) each wrap their `DocumentPayload` one
+ * level deeper than every other `document`-kind artifact on disk: the file is
+ * `{version: 1, payload: {version, iv, authTag, ciphertext}}`, not the
+ * `DocumentPayload` itself at the top level. Every other document-kind file
+ * IS its `DocumentPayload` directly, so this is the one place the walk has to
+ * know the on-disk shape as well as the AAD.
+ */
+const WRAPPED_DOCUMENT_AAD = new Set<string>([AAD.syncDeviceRegistry, AAD.syncFreshnessCheckpoint]);
+
 export function decryptItem(item: RekeyItem, keys: KeySet, raw: Buffer): Buffer {
   const parsed = JSON.parse(raw.toString("utf8")) as unknown;
 
   if (item.kind === "document") {
+    if (WRAPPED_DOCUMENT_AAD.has(item.identity)) {
+      const outer = parsed as { version?: unknown; payload?: DocumentPayload };
+      if (outer.version !== 1 || !outer.payload) {
+        throw new Error(`${item.path} is not a supported encrypted sync control artifact.`);
+      }
+      return decryptDocumentBytes(outer.payload, keys.documents, item.identity);
+    }
     return decryptDocumentBytes(parsed as DocumentPayload, keys.documents, item.identity);
   }
 
@@ -254,17 +311,27 @@ export function decryptItem(item: RekeyItem, keys: KeySet, raw: Buffer): Buffer 
     return Buffer.from(decryptWithKey(parsed as KeyedEncryptedPayload, keys.kv, item.identity), "utf8");
   }
 
-  const envelope = validateEncryptedSyncChange(parsed);
-  if (envelope.id !== item.identity) throw new Error(`Sync change filename does not match its envelope: ${item.identity}`);
-  const envelopeKey = changeEncryptionKey(keys.syncEnvelope, envelope.id);
-  try {
-    return Buffer.from(
-      decryptDocument(envelope.payload, envelopeKey, `${CHANGE_AAD_PREFIX}${envelope.id}`),
-      "utf8",
-    );
-  } finally {
-    envelopeKey.fill(0);
+  // sync-change: delegated to `openSyncChange` (src/sync.ts), the format's
+  // real, epoch-aware implementation — not the partially-extracted duplicate
+  // in src/sync/protocol.ts, which hard-rejects any envelope but version 1
+  // and, worse, would derive the body key with the epoch-1 formula against
+  // whatever version it was handed if that rejection were ever loosened.
+  // `resealSyncChange` (src/sync.ts) is what a re-key applies to the change
+  // log, and it refuses epoch 2 and above by design: their bodies are sealed
+  // under an epoch key a re-key never rotates — only the file holding that
+  // key is rewritten (classified above as `sync/identity/epochs/<n>.key.enc`)
+  // — so there is nothing for a re-key to re-seal here. This mirrors that
+  // same refusal, in its own words, before spending a decrypt attempt on a
+  // key formula that could not have matched a later epoch anyway.
+  const envelope = parsed as { version?: unknown };
+  if (envelope.version !== 1) {
+    throw new Error("Only an epoch 1 sync change is re-sealed; later epochs keep their epoch key.");
   }
+  const { id, ...body } = openSyncChange(envelope, syncChangeMaterial(keys));
+  if (id !== item.identity) {
+    throw new Error(`Sync change filename does not match its envelope: ${item.identity}`);
+  }
+  return Buffer.from(canonicalSyncJson(body as unknown as SyncJson), "utf8");
 }
 
 /**
@@ -276,6 +343,9 @@ export function decryptItem(item: RekeyItem, keys: KeySet, raw: Buffer): Buffer 
 export function encryptItem(item: RekeyItem, keys: KeySet, plaintext: Buffer): Buffer {
   if (item.kind === "document") {
     const payload = encryptDocumentBytes(plaintext, keys.documents, item.identity);
+    if (WRAPPED_DOCUMENT_AAD.has(item.identity)) {
+      return Buffer.from(JSON.stringify({ version: 1, payload }), "utf8");
+    }
     return Buffer.from(JSON.stringify(payload), "utf8");
   }
 
@@ -599,6 +669,16 @@ export interface RekeyReport {
   droppedSlots: DroppedSlot[];
   passphraseChanged: boolean;
   resumed: boolean;
+  /**
+   * False only when the re-key itself succeeded — every object installed
+   * under the new keyset, past the commit point `commitRekey` crosses — but
+   * the best-effort cleanup write that drops the outgoing keys from
+   * `keyring.json` afterward failed (a full disk, most plausibly). The vault
+   * is fully readable and writable under the new passphrase either way; an
+   * unsettled keyring just still carries the retiring keys, harmlessly, until
+   * the next re-key or passphrase change clears them.
+   */
+  settled: boolean;
 }
 
 function emptyReport(overrides: Partial<RekeyReport>): RekeyReport {
@@ -609,6 +689,7 @@ function emptyReport(overrides: Partial<RekeyReport>): RekeyReport {
     droppedSlots: [],
     passphraseChanged: false,
     resumed: false,
+    settled: true,
     ...overrides,
   };
 }
@@ -708,6 +789,15 @@ export function rekeyVault(
           kv: Buffer.from(oldKeys.kv),
           syncEnvelope: Buffer.from(oldKeys.syncEnvelope),
         };
+        // This and the settle-time wrap below each pay `DEFAULT_SCRYPT_N`
+        // (2**17) once. They cannot share a single derivation: `wrapKeySet`
+        // generates a fresh random salt per call, and reusing one across the
+        // committed slot and the settled slot would mean two ciphertexts
+        // published to disk under one salt — the very thing a fresh salt per
+        // wrap exists to avoid. `wrapKeySetSlot` (src/keyring.ts) has no entry
+        // point that takes an already-derived key and a caller-chosen salt, so
+        // avoiding the second scrypt run would mean widening that surface
+        // rather than fixing this call site; left as is.
         let slot: KeyringSlot;
         try {
           slot = wrapKeySet(newKeys, wrapPassphrase, DEFAULT_SCRYPT_N, retiring, oldKeys.documents);
@@ -727,17 +817,36 @@ export function rekeyVault(
         // key, and it outlives the re-key by design. A crash between the two
         // writes leaves the retiring copy in place, which is readable and is
         // cleared by the next run.
-        writeKeyring(vaultDir, {
-          version: KEYRING_VERSION,
-          slots: [wrapKeySet(newKeys, wrapPassphrase, DEFAULT_SCRYPT_N, null, oldKeys.documents)],
-        });
+        //
+        // This write is past `commitRekey`'s point of no return: the re-key
+        // itself already succeeded, so a failure here (a full disk, most
+        // plausibly) must not be reported as one. It is best-effort cleanup,
+        // not part of what makes the re-key atomic — that is `commitRekey`'s
+        // job alone — so it gets its own try/catch instead of falling into
+        // the outer one below, which exists to decide whether the *staging*
+        // half of a refused run may still be cleared.
+        let settled = true;
+        try {
+          writeKeyring(vaultDir, {
+            version: KEYRING_VERSION,
+            slots: [wrapKeySet(newKeys, wrapPassphrase, DEFAULT_SCRYPT_N, null, oldKeys.documents)],
+          });
+        } catch {
+          settled = false;
+        }
+        // The keyset just committed is what every reader must use from here
+        // on, whether or not settling landed: a process cache still holding
+        // the outgoing keys would otherwise keep serving them after this
+        // function returns success.
         forgetVaultKeys(vaultDir);
 
         // Prove the vault on disk opens under the passphrase the user was just
         // given before reporting success. `unwrapKeyring` rather than
         // `openVaultKeys`, because the latter would leave the brand-new keyset
         // resident and un-zeroized in the process key cache — the very cache
-        // the `forgetVaultKeys` above just cleared.
+        // the `forgetVaultKeys` above just cleared. This still passes when
+        // settling failed: `commitRekey`'s slot and the settled slot are both
+        // wrapped under `wrapPassphrase`, so whichever one is on disk opens.
         const written = readKeyring(vaultDir);
         if (!written) throw new Error("The re-keyed vault could not be reopened.");
         zeroKeySet(unwrapKeyring(written, wrapPassphrase));
@@ -754,6 +863,7 @@ export function rekeyVault(
           droppedSlots,
           passphraseChanged: !keepPassphrase,
           resumed: false,
+          settled,
         };
       } catch (error) {
         // Fail closed, but only on this side of the commit point. A journal

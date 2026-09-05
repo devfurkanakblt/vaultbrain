@@ -119,9 +119,26 @@ program
  * `keychain-status` is exempt as well: it only reads `detectVaultFormat` and
  * envelope versions and never decrypts anything.
  */
+/**
+ * The full command path, root program excluded, so a leaf name shared by two
+ * commands (`init`, `sync devices init`) is never confused for the other.
+ * `actionCommand.name()` alone is the bare leaf — matching on it exempted
+ * every subcommand that happens to share a name with a top-level exemption,
+ * which is exactly the bug this guards against.
+ */
+function commandPath(actionCommand: Command): string {
+  const parts: string[] = [];
+  for (let current: Command | null = actionCommand; current && current !== program; current = current.parent) {
+    parts.unshift(current.name());
+  }
+  return parts.join(" ");
+}
+
 program.hook("preAction", (_thisCommand, actionCommand) => {
-  const name = actionCommand.name();
-  if (name === "rekey" || name === "init" || name === "lock" || name === "keychain-status") return;
+  const fullCommand = commandPath(actionCommand);
+  if (fullCommand === "rekey" || fullCommand === "init" || fullCommand === "lock" || fullCommand === "keychain-status") {
+    return;
+  }
   const dir = program.opts().vault as string;
   if (fs.existsSync(journalPath(dir))) {
     throw new Error(
@@ -2139,6 +2156,14 @@ program
       for (const slot of report.droppedSlots) {
         console.log(`  ${slot.id} (${slot.label}), created ${slot.createdAt}.`);
       }
+    }
+
+    if (!report.settled) {
+      console.error(
+        "Warning: the re-key itself succeeded, but the cleanup write that drops the outgoing keys from " +
+          "keyring.json failed. The vault is fully readable and writable under the new passphrase; run " +
+          "'vbrain rekey' again when there is disk space to clear the retiring keys.",
+      );
     }
 
     if (report.passphraseChanged) {
