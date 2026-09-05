@@ -468,18 +468,30 @@ export class SyncRelayClient {
    * Upload every staged blob the relay does not already hold. Idempotent: a
    * re-run after an interruption re-sends only what is genuinely missing.
    */
+  /**
+   * Whether the relay already holds this blob. This is a `HEAD` on an id the
+   * caller must already know, not a listing: it discloses nothing that a change
+   * the caller could already decrypt had not told it. There is deliberately no
+   * route that enumerates blobs.
+   */
+  async hasBlob(id: string): Promise<boolean> {
+    if (!OPAQUE_ID.test(id)) throw new Error("A blob id must be 64 lowercase hexadecimal characters.");
+    const probe = await this.blobRequest(id, "HEAD");
+    await probe.body?.cancel();
+    if (probe.status === 200) return true;
+    if (probe.status === 404) return false;
+    throw new Error(`Relay rejected the request: HTTP ${probe.status}`);
+  }
+
   async pushBlobs(ids: readonly string[]): Promise<{ uploaded: number; skipped: number }> {
     const store = this.blobs();
     let uploaded = 0;
     let skipped = 0;
     for (const id of new Set(ids)) {
-      const probe = await this.blobRequest(id, "HEAD");
-      await probe.body?.cancel();
-      if (probe.status === 200) {
+      if (await this.hasBlob(id)) {
         skipped += 1;
         continue;
       }
-      if (probe.status !== 404) throw new Error(`Relay rejected the request: HTTP ${probe.status}`);
       const result = (await responseJson(await this.blobRequest(id, "PUT", store.read(id)))) as {
         stored?: unknown;
       };

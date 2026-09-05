@@ -748,23 +748,6 @@ function referencedBlobIds(changes: readonly SyncChange[]): string[] {
  * `sync blobs prune` asks over the wire itself. Constructing the client first
  * reuses its URL, token and vault-ID validation before any request is made.
  */
-function relayBlobProbe(url: string, vaultId: string, token: string): (id: string) => Promise<boolean> {
-  new SyncRelayClient(url, token, vaultId);
-  const origin = new URL(url).origin;
-  return async (id: string): Promise<boolean> => {
-    const response = await fetch(`${origin}/v1/vaults/${vaultId}/blobs/${id}`, {
-      method: "HEAD",
-      headers: { Authorization: `Bearer ${token}` },
-      redirect: "error",
-      signal: AbortSignal.timeout(15_000),
-    });
-    await response.body?.cancel();
-    if (response.status === 200) return true;
-    if (response.status === 404) return false;
-    throw new Error(`Relay rejected the request: HTTP ${response.status}`);
-  };
-}
-
 sync.hook("preAction", () => {
   if (!program.opts().experimentalTrustedSync) {
     throw new Error(
@@ -1228,7 +1211,7 @@ syncBlobs
     const manager = new SyncDeviceManager(dir, passphrase);
     const log = new SyncChangeLog(dir, passphrase);
     try {
-      const held = relayBlobProbe(url, relayVaultId(manager), relayToken());
+      const client = new SyncRelayClient(url, relayToken(), relayVaultId(manager), dir);
       const store = new SyncBlobStore(dir);
       let pruned = 0;
       let kept = 0;
@@ -1236,7 +1219,7 @@ syncBlobs
         if (!store.has(id)) continue;
         // A blob the relay does not hold is never dropped locally: that would
         // leave the change unappliable on every device that still needs it.
-        if (await held(id)) {
+        if (await client.hasBlob(id)) {
           store.remove(id);
           pruned += 1;
         } else kept += 1;
