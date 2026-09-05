@@ -384,7 +384,19 @@ export function detectVaultFormat(vaultDir: string): VaultFormat {
  * in-process session; neither it nor the keyset is ever written to disk. This
  * is the pattern `audit.ts` already uses for its chain key.
  */
-const keySetCache = new Map<string, KeySet>();
+const keySetCache = new Map<string, VaultKeySet>();
+
+function copyVaultKeySet(opened: VaultKeySet): VaultKeySet {
+  return {
+    keys: copyKeySet(opened.keys),
+    retiring: opened.retiring ? copyRetiringKeys(opened.retiring) : null,
+  };
+}
+
+function zeroVaultKeySet(opened: VaultKeySet): void {
+  zeroKeySet(opened.keys);
+  if (opened.retiring) zeroRetiringKeys(opened.retiring);
+}
 
 function cacheId(vaultDir: string, passphrase: string, file: KeyringFile): string {
   const fingerprint = crypto
@@ -403,26 +415,55 @@ function cacheId(vaultDir: string, passphrase: string, file: KeyringFile): strin
  * they lock, and that must not blind the next caller.
  */
 export function openVaultKeys(vaultDir: string, passphrase: string): KeySet | null {
+  const opened = openVaultKeySet(vaultDir, passphrase);
+  if (!opened) return null;
+  if (opened.retiring) zeroRetiringKeys(opened.retiring);
+  return opened.keys;
+}
+
+/**
+ * `openVaultKeys`, surfacing the retiring keys of a vault whose re-key has not
+ * finished. Callers that read stored objects want this one: until the last
+ * object has been rewritten, some of them still hold ciphertext under the
+ * outgoing key.
+ */
+export function openVaultKeySet(vaultDir: string, passphrase: string): VaultKeySet | null {
   const file = readKeyring(vaultDir);
   if (!file) return null;
   if (!passphrase) throw new Error("A non-empty vault passphrase is required.");
 
   const id = cacheId(vaultDir, passphrase, file);
   const cached = keySetCache.get(id);
-  if (cached) return copyKeySet(cached);
+  if (cached) return copyVaultKeySet(cached);
 
   const opened = unwrapKeyringKeySet(file, passphrase);
+  keySetCache.set(id, opened);
+  return copyVaultKeySet(opened);
+}
+
+/**
+ * The ordered list a reader should try for one rotatable key: the key in
+ * force, then the retiring one when a re-key is still in flight. Returns null
+ * for a vault with no keyring, exactly like `openVaultKeys`.
+ */
+export function openVaultReadKeys(
+  vaultDir: string,
+  passphrase: string,
+  name: RotatableKeyName,
+): Buffer[] | null {
+  const opened = openVaultKeySet(vaultDir, passphrase);
+  if (!opened) return null;
+  const wanted = [opened.keys[name]];
   if (opened.retiring) {
-    // Nothing here can read an object still holding old ciphertext, so say so
-    // rather than hand back keys that will fail halfway through the vault.
-    zeroRetiringKeys(opened.retiring);
-    zeroKeySet(opened.keys);
-    throw new Error(
-      "This vault has an unfinished re-key. Run 'vbrain rekey --resume' to complete it before opening the vault.",
-    );
+    wanted.push(opened.retiring[name]);
+    for (const other of ROTATABLE_KEY_NAMES) {
+      if (other !== name) opened.retiring[other].fill(0);
+    }
   }
-  keySetCache.set(id, opened.keys);
-  return copyKeySet(opened.keys);
+  for (const other of KEY_NAMES) {
+    if (other !== name) opened.keys[other].fill(0);
+  }
+  return wanted;
 }
 
 /**
@@ -448,14 +489,14 @@ export function openVaultKey(vaultDir: string, passphrase: string, name: KeyName
 /** Drops cached key material, for one vault or for all of them. */
 export function forgetVaultKeys(vaultDir?: string): void {
   if (vaultDir === undefined) {
-    for (const keys of keySetCache.values()) zeroKeySet(keys);
+    for (const opened of keySetCache.values()) zeroVaultKeySet(opened);
     keySetCache.clear();
     return;
   }
   const prefix = `${resolveInside(vaultDir, ".")}\0`;
-  for (const [id, keys] of keySetCache) {
+  for (const [id, opened] of keySetCache) {
     if (!id.startsWith(prefix)) continue;
-    zeroKeySet(keys);
+    zeroVaultKeySet(opened);
     keySetCache.delete(id);
   }
 }
@@ -502,7 +543,15 @@ function writeManifestTombstone(vaultDir: string): void {
  * cannot happen is migration's job, not this function's.
  */
 export function openOrCreateVaultKeys(vaultDir: string, passphrase: string): KeySet | null {
-  const existing = openVaultKeys(vaultDir, passphrase);
+  const opened = openOrCreateVaultKeySet(vaultDir, passphrase);
+  if (!opened) return null;
+  if (opened.retiring) zeroRetiringKeys(opened.retiring);
+  return opened.keys;
+}
+
+/** `openOrCreateVaultKeys`, surfacing the retiring keys of an unfinished re-key. */
+export function openOrCreateVaultKeySet(vaultDir: string, passphrase: string): VaultKeySet | null {
+  const existing = openVaultKeySet(vaultDir, passphrase);
   if (existing) return existing;
   if (!passphrase) throw new Error("A non-empty vault passphrase is required.");
   if (detectVaultFormat(vaultDir) === "legacy") return null;
@@ -512,7 +561,7 @@ export function openOrCreateVaultKeys(vaultDir: string, passphrase: string): Key
     // Re-checked under the lock: two processes racing on the same fresh vault
     // must not each write a keyset of their own, or whichever lost the race
     // would have encrypted its first write under keys nobody keeps.
-    const raced = openVaultKeys(vaultDir, passphrase);
+    const raced = openVaultKeySet(vaultDir, passphrase);
     if (raced) return raced;
     if (detectVaultFormat(vaultDir) === "legacy") return null;
 
@@ -527,7 +576,7 @@ export function openOrCreateVaultKeys(vaultDir: string, passphrase: string): Key
     // Read back rather than returning what we just generated: this proves the
     // keyring on disk really unwraps before one byte is encrypted under it,
     // and it populates the process cache every other caller expects.
-    const created = openVaultKeys(vaultDir, passphrase);
+    const created = openVaultKeySet(vaultDir, passphrase);
     if (!created) throw new Error("Failed to create a vault keyring.");
     return created;
   });

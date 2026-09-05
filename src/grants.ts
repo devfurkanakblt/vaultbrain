@@ -11,7 +11,7 @@ import {
   type KeyedEncryptedPayload,
 } from "./crypto.js";
 import { assertNotSymlink, readTextFileLimited, writeFileAtomic } from "./fs-safe.js";
-import { openOrCreateVaultKey, openVaultKey } from "./keyring.js";
+import { openOrCreateVaultKey, openVaultReadKeys } from "./keyring.js";
 import { isRedactionLevel, type RedactionLevel } from "./redaction.js";
 import { normalizeVaultName, resolveInside } from "./safety.js";
 
@@ -147,7 +147,7 @@ export function loadGrants(vaultDir: string, passphrase: string): GrantFile | nu
     envelopeVersion(payload) === KEYED_ENVELOPE_VERSION
       ? decryptWithKey(
           payload as KeyedEncryptedPayload,
-          requireGrantsKey(vaultDir, passphrase),
+          requireGrantsReadKeys(vaultDir, passphrase),
           GRANTS_FILE_IDENTITY,
         )
       : decrypt(payload, passphrase),
@@ -158,10 +158,11 @@ export function loadGrants(vaultDir: string, passphrase: string): GrantFile | nu
   return { version: 1, grants: parsed.grants, requests: parsed.requests ?? [] };
 }
 
-function requireGrantsKey(vaultDir: string, passphrase: string): Buffer {
-  const key = openVaultKey(vaultDir, passphrase, "kv");
-  if (!key) throw new Error("The grant file is keyring-encrypted but the vault has no readable keyring.");
-  return key;
+/** The `kv` key in force, then the retiring one of an unfinished re-key. */
+function requireGrantsReadKeys(vaultDir: string, passphrase: string): Buffer[] {
+  const keys = openVaultReadKeys(vaultDir, passphrase, "kv");
+  if (!keys) throw new Error("The grant file is keyring-encrypted but the vault has no readable keyring.");
+  return keys;
 }
 
 export function saveGrants(vaultDir: string, file: GrantFile, passphrase: string): GrantFile {

@@ -12,8 +12,10 @@ import {
   ROTATABLE_KEY_NAMES,
   copyRetiringKeys,
   forgetVaultKeys,
-  openVaultKeys,
+  openVaultKeySet,
+  openVaultReadKeys,
   randomKeySet,
+  readKeyring,
   unwrapSlot,
   unwrapSlotKeySet,
   wrapKeySet,
@@ -92,15 +94,85 @@ test("zeroizing the retiring keys leaves nothing behind", () => {
   }
 });
 
-test("opening a vault whose re-key never finished fails closed with an instruction", () => {
-  const vaultDir = temporaryVault("rekey-unfinished");
-  const keys = randomKeySet();
+/**
+ * Puts a vault into the state an interrupted re-key leaves behind: the keyring
+ * holds fresh rotatable keys with the ones every stored object was written
+ * under carried alongside as `retiring`.
+ */
+function stallMidRekey(vaultDir) {
+  const file = readKeyring(vaultDir);
+  const current = unwrapSlot(file.slots[0], PASSPHRASE);
+  const next = {};
+  const retiring = {};
+  for (const name of KEY_NAMES) next[name] = current[name];
+  for (const name of ROTATABLE_KEY_NAMES) {
+    retiring[name] = Buffer.from(current[name]);
+    next[name] = crypto.randomBytes(32);
+  }
   writeKeyring(vaultDir, {
     version: 2,
-    slots: [wrapKeySet(keys, PASSPHRASE, LOW_COST_N, retiringKeys())],
+    slots: [wrapKeySet(next, PASSPHRASE, LOW_COST_N, retiring)],
   });
   forgetVaultKeys(vaultDir);
-  assert.throws(() => openVaultKeys(vaultDir, PASSPHRASE), /unfinished re-key/u);
+  return { next, retiring };
+}
+
+test("a vault caught mid-re-key still opens, and reports both key generations", () => {
+  const vaultDir = temporaryVault("rekey-open");
+  writeKeyring(vaultDir, {
+    version: 2,
+    slots: [wrapKeySet(randomKeySet(), PASSPHRASE, LOW_COST_N)],
+  });
+  forgetVaultKeys(vaultDir);
+  assert.equal(openVaultKeySet(vaultDir, PASSPHRASE).retiring, null);
+
+  const { next, retiring } = stallMidRekey(vaultDir);
+  const opened = openVaultKeySet(vaultDir, PASSPHRASE);
+  assert.ok(opened.retiring, "a stalled re-key must surface its retiring keys");
+  for (const name of ROTATABLE_KEY_NAMES) {
+    assert.ok(opened.keys[name].equals(next[name]));
+    assert.ok(opened.retiring[name].equals(retiring[name]));
+  }
+});
+
+test("a read offers the key in force first and the retiring one behind it", () => {
+  const vaultDir = temporaryVault("rekey-read-keys");
+  writeKeyring(vaultDir, {
+    version: 2,
+    slots: [wrapKeySet(randomKeySet(), PASSPHRASE, LOW_COST_N)],
+  });
+  forgetVaultKeys(vaultDir);
+  assert.equal(openVaultReadKeys(vaultDir, PASSPHRASE, "kv").length, 1);
+
+  const { next, retiring } = stallMidRekey(vaultDir);
+  const keys = openVaultReadKeys(vaultDir, PASSPHRASE, "kv");
+  assert.equal(keys.length, 2);
+  assert.ok(keys[0].equals(next.kv), "the key in force must be tried first");
+  assert.ok(keys[1].equals(retiring.kv));
+});
+
+test("notes, attachments and key-value files written before a re-key still read during one", async () => {
+  const { DocumentVault } = await import("../dist/documents.js");
+  const { loadVaultFile, saveVaultFile } = await import("../dist/store.js");
+  const vaultDir = temporaryVault("rekey-read-through");
+
+  const before = new DocumentVault(vaultDir, PASSPHRASE);
+  const note = before.put({ path: "before.md", title: "written before the re-key", body: "still readable" });
+  const attachment = before.putAttachment(Buffer.from("attachment bytes"), "a.txt", "text/plain");
+  before.lock();
+  saveVaultFile(vaultDir, "health", [{ key: "BLOOD_TYPE", value: "0 Rh+", desc: "blood group" }], PASSPHRASE);
+
+  stallMidRekey(vaultDir);
+
+  // Nothing has been rewritten yet, so every object here authenticates only
+  // under the retiring key. Reading it proves the fallback is wired through.
+  const during = new DocumentVault(vaultDir, PASSPHRASE);
+  assert.equal(during.get(note.id).body, "still readable");
+  assert.equal(during.getAttachment(attachment.id).data.toString("utf8"), "attachment bytes");
+  during.lock();
+  assert.deepEqual(loadVaultFile(vaultDir, "health", PASSPHRASE), [
+    { key: "BLOOD_TYPE", value: "0 Rh+", desc: "blood group" },
+  ]);
 });
 
 test("a decrypt helper offered a list tries each key in order", async () => {

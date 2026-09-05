@@ -12,7 +12,7 @@ import {
   type AnyEncryptedPayload,
   type KeyedEncryptedPayload,
 } from "./crypto.js";
-import { openOrCreateVaultKey, openVaultKey } from "./keyring.js";
+import { openOrCreateVaultKey, openVaultKey, openVaultReadKeys } from "./keyring.js";
 import { parseKV, serializeKV, type KVEntry } from "./format.js";
 import { assertNotSymlink, readTextFileLimited, writeFileAtomic } from "./fs-safe.js";
 import {
@@ -63,15 +63,19 @@ export function loadVaultFile(
   assertNotSymlink(filePath);
   const payload: AnyEncryptedPayload = JSON.parse(readTextFileLimited(filePath, 64 * 1024 * 1024, "Vault file"));
   const plaintext = envelopeVersion(payload) === KEYED_ENVELOPE_VERSION
-    ? decryptWithKey(payload as KeyedEncryptedPayload, requireKvKey(vaultDir, passphrase), normalizeVaultName(name))
+    ? decryptWithKey(payload as KeyedEncryptedPayload, requireKvReadKeys(vaultDir, passphrase), normalizeVaultName(name))
     : decrypt(payload, passphrase);
   return parseKV(plaintext);
 }
 
-function requireKvKey(vaultDir: string, passphrase: string): Buffer {
-  const key = kvKey(vaultDir, passphrase);
-  if (!key) throw new Error("This file is keyring-encrypted but the vault has no readable keyring.");
-  return key;
+/**
+ * The keys a read may try: the `kv` key in force, and behind it the retiring
+ * one while a re-key has not yet rewritten every file.
+ */
+function requireKvReadKeys(vaultDir: string, passphrase: string): Buffer[] {
+  const keys = openVaultReadKeys(vaultDir, passphrase, "kv");
+  if (!keys) throw new Error("This file is keyring-encrypted but the vault has no readable keyring.");
+  return keys;
 }
 
 export interface MigrationReport {

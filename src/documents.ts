@@ -497,6 +497,10 @@ export class DocumentVault {
     this.session.attachmentIdKey.fill(0);
     this.session.syncChangeKey.fill(0);
     this.session.syncEnvelopeKey.fill(0);
+    // Entry 0 of each list is the key already wiped above; the rest are the
+    // retiring keys of an unfinished re-key and must not outlive the session.
+    for (const key of this.session.readKeys) key.fill(0);
+    for (const key of this.session.syncEnvelopeReadKeys) key.fill(0);
     forgetVaultKeys(this.vaultDir);
     this.indexCache = undefined;
     this.notesCache = undefined;
@@ -562,7 +566,7 @@ export class DocumentVault {
       readTextFileLimited(manifestPath, 1024 * 1024, "Attachment manifest")
     ) as DocumentPayload;
     const info = JSON.parse(
-      decryptDocument(payload, this.session.key, attachmentManifestAad(id))
+      decryptDocument(payload, this.session.readKeys, attachmentManifestAad(id))
     ) as AttachmentInfo;
     if (info.id !== id || !Number.isSafeInteger(info.chunks) || info.chunks < 1) {
       throw new Error("Invalid attachment manifest.");
@@ -580,7 +584,7 @@ export class DocumentVault {
       readTextFileLimited(indexPath, 512 * 1024 * 1024, "Document index")
     ) as DocumentPayload;
     const parsed = JSON.parse(
-      decryptDocument(payload, this.session.key, AAD.documentIndex)
+      decryptDocument(payload, this.session.readKeys, AAD.documentIndex)
     ) as DocumentIndex | LegacyDocumentIndex;
     if (!Number.isInteger(parsed.version) || parsed.version < 1 || parsed.version > 2) {
       throw new Error("Unsupported or invalid document index.");
@@ -764,7 +768,7 @@ export class DocumentVault {
     const payload = JSON.parse(
       readTextFileLimited(filePath, 40 * 1024 * 1024, "Note object")
     ) as DocumentPayload;
-    const note = JSON.parse(decryptDocument(payload, this.session.key, noteAad(id))) as NoteDocument;
+    const note = JSON.parse(decryptDocument(payload, this.session.readKeys, noteAad(id))) as NoteDocument;
     if (note.version !== 1 || note.id !== id) throw new Error(`Invalid note object: ${id}`);
     return note;
   }
@@ -778,7 +782,7 @@ export class DocumentVault {
       readTextFileLimited(filePath, 12 * 1024 * 1024, "Canvas object")
     ) as DocumentPayload;
     const canvas = JSON.parse(
-      decryptDocument(payload, this.session.key, canvasAad(id))
+      decryptDocument(payload, this.session.readKeys, canvasAad(id))
     ) as CanvasDocument;
     if (canvas.version !== 1 || canvas.id !== id) throw new Error(`Invalid canvas object: ${id}`);
     return canvas;
@@ -835,7 +839,7 @@ export class DocumentVault {
       readTextFileLimited(historyPath, 40 * 1024 * 1024, "Note revision")
     ) as DocumentPayload;
     const note = JSON.parse(
-      decryptDocument(payload, this.session.key, noteHistoryAad(id, revision))
+      decryptDocument(payload, this.session.readKeys, noteHistoryAad(id, revision))
     ) as NoteDocument;
     if (note.id !== id || note.revision !== revision) throw new Error("Invalid revision object.");
     return note;
@@ -851,7 +855,7 @@ export class DocumentVault {
       readTextFileLimited(historyPath, 12 * 1024 * 1024, "Canvas revision")
     ) as DocumentPayload;
     const canvas = JSON.parse(
-      decryptDocument(payload, this.session.key, canvasHistoryAad(id, revision)),
+      decryptDocument(payload, this.session.readKeys, canvasHistoryAad(id, revision)),
     ) as CanvasDocument;
     if (canvas.version !== 1 || canvas.id !== id || canvas.revision !== revision) {
       throw new Error("Invalid canvas revision object.");
@@ -1422,7 +1426,7 @@ export class DocumentVault {
       readTextFileLimited(filePath, 4 * 1024 * 1024, "Plugin package")
     ) as DocumentPayload;
     const plugin = JSON.parse(
-      decryptDocument(payload, this.session.key, pluginAad(id))
+      decryptDocument(payload, this.session.readKeys, pluginAad(id))
     ) as PluginPackage;
     if (plugin.id !== id || plugin.version !== 1) throw new Error("Plugin identity check failed.");
     // Re-validated on the way out, not only on the way in: a manifest this
@@ -1448,7 +1452,7 @@ export class DocumentVault {
       readTextFileLimited(filePath, 4 * 1024 * 1024, "Plugin policy")
     ) as DocumentPayload;
     const raw = JSON.parse(
-      decryptDocument(payload, this.session.key, AAD.pluginPolicy)
+      decryptDocument(payload, this.session.readKeys, AAD.pluginPolicy)
     ) as Partial<PluginSecurityPolicy>;
     if (raw.version !== 1 || typeof raw.restrictedMode !== "boolean" || !Array.isArray(raw.revokedSigners)) {
       throw new Error("Invalid plugin security policy.");
@@ -1678,7 +1682,7 @@ export class DocumentVault {
     const payload = JSON.parse(
       readTextFileLimited(filePath, 1024 * 1024, "Plugin storage")
     ) as DocumentPayload;
-    const parsed = JSON.parse(decryptDocument(payload, this.session.key, pluginStoreAad(id))) as unknown;
+    const parsed = JSON.parse(decryptDocument(payload, this.session.readKeys, pluginStoreAad(id))) as unknown;
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, string>) : {};
   }
 
@@ -2225,7 +2229,7 @@ export class DocumentVault {
       const payload = JSON.parse(
         readTextFileLimited(chunkPath, 2 * 1024 * 1024, "Attachment chunk")
       ) as DocumentPayload;
-      parts.push(decryptDocumentBytes(payload, this.session.key, attachmentChunkAad(id, index)));
+      parts.push(decryptDocumentBytes(payload, this.session.readKeys, attachmentChunkAad(id, index)));
     }
     const data = Buffer.concat(parts);
     const actualId = crypto

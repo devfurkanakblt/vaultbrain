@@ -5,7 +5,7 @@ import { assertNoSymlinkComponents, assertNotSymlink, readTextFileLimited, write
 import { resolveInside } from "./safety.js";
 import { assertStrongPassphrase } from "./passphrase-policy.js";
 import { AAD } from "./format-version.js";
-import { openOrCreateVaultKeys } from "./keyring.js";
+import { openOrCreateVaultKeySet } from "./keyring.js";
 
 const SCRYPT_N = 2 ** 16;
 const SUPPORTED_SCRYPT_N = new Set([2 ** 15, SCRYPT_N]);
@@ -26,14 +26,22 @@ export interface DocumentPayload {
 
 export interface DocumentKeySession {
   rootDir: string;
-  /** Encrypts every object under `documents/`. */
+  /** Encrypts every object under `documents/`. Writers use this one. */
   key: Buffer;
+  /**
+   * What readers under `documents/` try, in order: `key`, and behind it the
+   * retiring key of a re-key that has not finished rewriting every object.
+   * Its first entry is `key` itself, not a copy.
+   */
+  readKeys: readonly Buffer[];
   /** Keys the content address of an attachment. Never rotated. */
   attachmentIdKey: Buffer;
   /** Keys sync change IDs. Never rotated: the causal DAG references them. */
   syncChangeKey: Buffer;
   /** Keys sync change body encryption (the envelope subkey). Rotatable. */
   syncEnvelopeKey: Buffer;
+  /** `readKeys` for the sync envelope key. Its first entry is `syncEnvelopeKey`. */
+  syncEnvelopeReadKeys: readonly Buffer[];
   /** The legacy manifest, or null when the keys came from the vault keyring. */
   manifest: DocumentManifest | null;
 }
@@ -56,14 +64,19 @@ export function openDocumentKey(vaultDir: string, passphrase: string): DocumentK
   assertNoSymlinkComponents(vaultDir, rootDir);
   fs.mkdirSync(rootDir, { recursive: true, mode: 0o700 });
 
-  const vaultKeys = openOrCreateVaultKeys(vaultDir, passphrase);
+  const vaultKeys = openOrCreateVaultKeySet(vaultDir, passphrase);
   if (vaultKeys) {
+    const { keys, retiring } = vaultKeys;
     return {
       rootDir,
-      key: vaultKeys.documents,
-      attachmentIdKey: vaultKeys.attachmentId,
-      syncChangeKey: vaultKeys.syncChange,
-      syncEnvelopeKey: vaultKeys.syncEnvelope,
+      key: keys.documents,
+      readKeys: retiring ? [keys.documents, retiring.documents] : [keys.documents],
+      attachmentIdKey: keys.attachmentId,
+      syncChangeKey: keys.syncChange,
+      syncEnvelopeKey: keys.syncEnvelope,
+      syncEnvelopeReadKeys: retiring
+        ? [keys.syncEnvelope, retiring.syncEnvelope]
+        : [keys.syncEnvelope],
       manifest: null,
     };
   }
@@ -91,12 +104,15 @@ export function openDocumentKey(vaultDir: string, passphrase: string): DocumentK
       key.fill(0);
       throw new Error("Unable to unlock document vault: wrong passphrase or damaged manifest.");
     }
+    const syncEnvelopeKey = Buffer.from(key);
     return {
       rootDir,
       key,
+      readKeys: [key],
       attachmentIdKey: Buffer.from(key),
       syncChangeKey: Buffer.from(key),
-      syncEnvelopeKey: Buffer.from(key),
+      syncEnvelopeKey,
+      syncEnvelopeReadKeys: [syncEnvelopeKey],
       manifest,
     };
   } else {
@@ -112,12 +128,15 @@ export function openDocumentKey(vaultDir: string, passphrase: string): DocumentK
 
   const key = derive(passphrase, Buffer.from(manifest.kdf.salt, "base64"), manifest.kdf.N);
   writeFileAtomic(manifestPath, JSON.stringify(manifest, null, 2), { mode: 0o600 });
+  const syncEnvelopeKey = Buffer.from(key);
   return {
     rootDir,
     key,
+    readKeys: [key],
     attachmentIdKey: Buffer.from(key),
     syncChangeKey: Buffer.from(key),
-    syncEnvelopeKey: Buffer.from(key),
+    syncEnvelopeKey,
+    syncEnvelopeReadKeys: [syncEnvelopeKey],
     manifest,
   };
 }
