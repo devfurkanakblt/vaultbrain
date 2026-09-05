@@ -814,6 +814,16 @@ export function rekeyVault(
           oldKeys,
           options.recovery,
         );
+        // The recovery slot is wrapped under the recovery code, not
+        // `currentPassphrase`, so the loop above could not open it and
+        // recorded it above as dropped, same as any stranger slot. It is
+        // about to be reinstalled (rewritten, but not discarded), so that
+        // false "dropped" entry is removed here rather than reported to the
+        // caller as something this re-key destroyed.
+        if (preparedRecovery) {
+          const droppedIndex = droppedSlots.findIndex((entry) => entry.id === preparedRecovery.slot.id);
+          if (droppedIndex !== -1) droppedSlots.splice(droppedIndex, 1);
+        }
 
         newKeys = randomKeySet();
         for (const { name } of PINNED_KEYS) {

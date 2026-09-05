@@ -27,12 +27,14 @@ import {
   DEFAULT_SCRYPT_N,
   KEYRING_VERSION,
   forgetVaultKeys,
+  openOrCreateVaultKeys,
   openVaultKeys,
   randomKeySet,
   readKeyring,
   unwrapSlotKeySet,
   wrapKeySet,
   writeKeyring,
+  zeroKeySet,
 } from "../dist/keyring.js";
 import { changeVaultPassphrase } from "../dist/keyring-passphrase.js";
 import {
@@ -1247,7 +1249,7 @@ test("a wrong recovery code and a mismatched kit are both refused, non-mutating"
   const { dir } = seedVault();
   const kitDir = fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-rekey-kit-"));
   const kit = path.join(kitDir, "recovery-kit.json");
-  const created = createRecoveryKit(dir, PASSPHRASE, kit);
+  createRecoveryKit(dir, PASSPHRASE, kit);
   forgetVaultKeys();
   const before = hashVault(dir);
 
@@ -1259,8 +1261,11 @@ test("a wrong recovery code and a mismatched kit are both refused, non-mutating"
   );
   assert.deepEqual(hashVault(dir), before, "a wrong recovery code must not touch a single live file");
 
-  const otherVault = fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-rekey-other-"));
-  const otherKit = path.join(otherVault, "other-recovery-kit.json");
+  const otherRoot = fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-rekey-other-"));
+  const otherVault = path.join(otherRoot, "vault");
+  const otherKit = path.join(otherRoot, "other-recovery-kit.json");
+  const otherPrimary = openOrCreateVaultKeys(otherVault, PASSPHRASE);
+  zeroKeySet(otherPrimary);
   const otherCreated = createRecoveryKit(otherVault, PASSPHRASE, otherKit);
   forgetVaultKeys();
 
@@ -1274,7 +1279,7 @@ test("a wrong recovery code and a mismatched kit are both refused, non-mutating"
 
   fs.rmSync(dir, { recursive: true, force: true });
   fs.rmSync(kitDir, { recursive: true, force: true });
-  fs.rmSync(otherVault, { recursive: true, force: true });
+  fs.rmSync(otherRoot, { recursive: true, force: true });
 });
 
 test("a vault with no recovery slot re-keys exactly as before, reporting no recovery outcome", () => {
