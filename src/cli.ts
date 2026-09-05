@@ -24,6 +24,7 @@ import {
 import { startMcpServer } from "./mcp-server.js";
 import { migrateToKeyring } from "./keyring-migrate.js";
 import { changeVaultPassphrase, MIN_PASSPHRASE_LENGTH } from "./keyring-passphrase.js";
+import { journalPath, rekeyVault, stagingRoot } from "./keyring-rekey.js";
 import { detectVaultFormat } from "./keyring.js";
 import {
   addGrant,
@@ -67,6 +68,32 @@ program
   .description("Vault Brain — an .env-style, least-exposure personal data store for the AI age.")
   .option("--vault <dir>", "vault directory", DEFAULT_VAULT_DIR)
   .option("--sync-device <uuid>", "automatically capture document writes for this sync device");
+
+/**
+ * The one place every command passes through before its own action runs, so
+ * this is the one place the re-key journal is checked — not sprinkled across
+ * each command that happens to open the vault.
+ *
+ * A journal on disk means an earlier `vbrain rekey` crashed somewhere between
+ * staging and finishing the install: the keyring may already name a keyset
+ * some live objects are not yet sealed under, or the reverse. Nothing but
+ * `recoverRekey` — which only `rekeyVault` ever calls — may touch that state,
+ * so any other command must refuse outright rather than decrypt (or write)
+ * against a vault that might be mid-transition. `rekey` itself is exempt: it
+ * is the command that finishes or rolls the interruption back, and `init`
+ * needs no vault to exist yet.
+ */
+program.hook("preAction", (_thisCommand, actionCommand) => {
+  const name = actionCommand.name();
+  if (name === "rekey" || name === "init") return;
+  const dir = program.opts().vault as string;
+  if (fs.existsSync(journalPath(dir))) {
+    throw new Error(
+      `An interrupted re-key is still journaled for ${dir}. ` +
+        "Run 'vbrain rekey' to finish or roll it back before running any other command against this vault.",
+    );
+  }
+});
 
 program
   .command("init")
@@ -1277,7 +1304,7 @@ passphraseCommand
     }
 
     console.log("This does not re-encrypt anything: every note, attachment and sync change keeps its key.");
-    console.log("If the old passphrase leaked, run 'vbrain rekey' once it ships.");
+    console.log("If the old passphrase leaked, run 'vbrain rekey' instead: it replaces the keys as well.");
   });
 
 /** Two masked entries that have to agree, so a typo cannot become the new passphrase. */
@@ -1290,6 +1317,90 @@ async function readNewPassphrase(): Promise<string> {
   if (first !== second) throw new Error("The two entries did not match; nothing was changed.");
   return first;
 }
+
+const MALFORMED_JOURNAL_MESSAGE = "The re-key journal is malformed; refusing to touch the vault.";
+
+program
+  .command("rekey")
+  .description("replace the vault keyset and re-encrypt every object under it")
+  .option("--keep-passphrase", "rotate the keys but keep wrapping them under the current passphrase")
+  .action(async (opts) => {
+    const dir = program.opts().vault;
+    const keepPassphrase = Boolean(opts.keepPassphrase);
+    // Never taken from the OS credential store, for the same reason
+    // `passphrase change` does not: a stale or attacker-primed credential
+    // must not be able to authorize a re-key on its own.
+    const current = process.env.VBRAIN_PASSPHRASE ?? (await readSecret("Current vault passphrase: "));
+    if (!current) {
+      console.error("A passphrase is required.");
+      process.exit(1);
+    }
+    const next = keepPassphrase
+      ? ""
+      : (process.env.VBRAIN_NEW_PASSPHRASE ?? (await readNewPassphrase()));
+
+    let report;
+    try {
+      report = rekeyVault(dir, current, next, { keepPassphrase });
+    } catch (error) {
+      // `readJournal` (via `recoverRekey`) and `stageRekey` both refuse a
+      // malformed journal rather than guess at it, which otherwise leaves the
+      // operator with nowhere to go: recovery refuses for the same reason a
+      // fresh re-key does. The one thing that actually clears this is exactly
+      // what recovery already does automatically for a staging area that
+      // carries no journal at all — discard it, since nothing live is ever
+      // touched before the journal is written.
+      if (error instanceof Error && error.message === MALFORMED_JOURNAL_MESSAGE) {
+        console.error(
+          `${error.message} This cannot be repaired automatically. Back up ${stagingRoot(dir)} if you want a copy, ` +
+            `then delete that directory by hand — nothing live has been touched — and run 'vbrain rekey' again.`,
+        );
+        process.exit(1);
+      }
+      throw error;
+    }
+
+    if (report.resumed) {
+      console.log(`Finished an interrupted re-key of ${dir}.`);
+      return;
+    }
+
+    console.log(`Re-keyed ${dir}.`);
+    console.log(
+      `Rotated ${report.rotated.join(", ")} and re-encrypted ${report.reencrypted.total} file(s): ` +
+        `${report.reencrypted.documents} document object(s), ${report.reencrypted.kv} key-value file(s), ` +
+        `${report.reencrypted.syncChanges} sync change(s).`,
+    );
+    if (report.droppedSlots.length > 0) {
+      console.log(`Dropped ${report.droppedSlots.length} slot(s) this passphrase does not open:`);
+      for (const slot of report.droppedSlots) {
+        console.log(`  ${slot.id} (${slot.label}), created ${slot.createdAt}.`);
+      }
+    }
+
+    if (report.passphraseChanged) {
+      const keychainResult = updateRememberedPassphrase(dir, next);
+      if (keychainResult.updated) {
+        console.log(`Updated the remembered passphrase in the OS credential store (${keychainResult.backend}).`);
+      } else if (keychainResult.error) {
+        const credentialState = keychainResult.cleared
+          ? "The remembered credential was removed. Run 'vbrain unlock --remember' to store the new passphrase."
+          : "The remembered credential could not be removed either. Run 'vbrain lock' to clear it.";
+        console.error(
+          `Warning: the vault was re-keyed, but the OS credential store (${keychainResult.backend}) could not be updated (${keychainResult.error}). ` +
+            credentialState,
+        );
+      }
+    }
+
+    console.log("Attachment identities, sync change IDs and the audit chain are unchanged by design:");
+    for (const pinned of report.pinned) {
+      console.log(`  ${pinned.name} is pinned because ${pinned.reason}.`);
+    }
+    console.log(
+      "Someone who kept the old keyset can still confirm a guessed file is in this vault, though they cannot read it.",
+    );
+  });
 
 program
   .command("unlock")

@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { appendAudit, verifyAudit } from "../dist/audit.js";
 import { DocumentVault } from "../dist/documents.js";
@@ -1355,5 +1357,140 @@ test("a re-key's lock records its own stale window, and a short write honours it
   assert.equal(fs.existsSync(lockPath), false, "a windowless stale record is still reclaimed");
 
   vault.lock();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// --- Task 6: the `vbrain rekey` command ---------------------------------
+
+const cliPath = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
+
+function runCli(args, env) {
+  return spawnSync(process.execPath, [cliPath, ...args], {
+    encoding: "utf8",
+    env: { ...process.env, ...env },
+  });
+}
+
+test("the CLI re-keys a vault end to end", () => {
+  const { dir, noteId } = seedVault();
+
+  const result = runCli(["--vault", dir, "rekey"], {
+    VBRAIN_PASSPHRASE: PASSPHRASE,
+    VBRAIN_NEW_PASSPHRASE: NEW_PASSPHRASE,
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Re-keyed/u);
+  assert.match(result.stdout, /Attachment identities, sync change IDs and the audit chain are unchanged/u);
+  assert.match(result.stdout, /confirm a guessed file/u);
+
+  forgetVaultKeys();
+  assert.ok(openVaultKeys(dir, NEW_PASSPHRASE));
+  assert.throws(() => openVaultKeys(dir, PASSPHRASE), /wrong passphrase/iu);
+  const vault = new DocumentVault(dir, NEW_PASSPHRASE);
+  assert.match(vault.get(noteId).body, /second revision/u);
+  vault.lock();
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("the CLI refuses a short new passphrase and leaves the vault alone", () => {
+  const { dir } = seedVault();
+  const before = hashVault(dir);
+
+  const result = runCli(["--vault", dir, "rekey"], {
+    VBRAIN_PASSPHRASE: PASSPHRASE,
+    VBRAIN_NEW_PASSPHRASE: "short",
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /at least 12 characters/u);
+  assert.deepEqual(hashVault(dir), before);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("the CLI never takes the current passphrase from the credential store", () => {
+  const { dir } = seedVault();
+
+  const result = runCli(["--vault", dir, "rekey"], {
+    VBRAIN_PASSPHRASE: "",
+    VBRAIN_NEW_PASSPHRASE: NEW_PASSPHRASE,
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.equal(fs.existsSync(stagingRoot(dir)), false);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// Kills the mutation "delete the CLI's journal check": a vault-opening
+// command that runs while a re-key journal is present would otherwise open
+// objects sealed under a keyset the keyring no longer carries (mid-commit)
+// or race a resumable-but-not-yet-resumed re-key. `unlock` is deliberately
+// chosen here because it is the one command that opens the vault without
+// going through `getPassphrase` — proving the guard sits ahead of every
+// vault-opening command, not just the ones that share that helper.
+test("a vault-opening command refuses while a re-key journal is present", () => {
+  const { dir } = seedVault();
+  const { journal } = preparedRekey(dir);
+  fs.writeFileSync(journalPath(dir), `${JSON.stringify(journal)}\n`);
+
+  const result = runCli(["--vault", dir, "unlock"], { VBRAIN_PASSPHRASE: PASSPHRASE });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /interrupted re-key/iu);
+  assert.match(result.stderr, /vbrain rekey/u);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// The `rekey` command itself must stay exempt from that same guard: it is
+// the one command that resolves the interruption, so it has to be able to
+// open the vault while the journal it will finish or roll back is present.
+test("the rekey command itself is exempt from the journal guard and finishes an interrupted re-key", () => {
+  const { dir } = seedVault();
+  const { journal, keyring } = preparedRekey(dir);
+  // Simulate a crash after the commit point: the journal and the new keyring
+  // are both on disk, but nothing has been installed yet.
+  fs.writeFileSync(journalPath(dir), `${JSON.stringify(journal)}\n`);
+  writeKeyring(dir, keyring);
+
+  const result = runCli(["--vault", dir, "rekey"], {
+    VBRAIN_PASSPHRASE: NEW_PASSPHRASE,
+    VBRAIN_NEW_PASSPHRASE: "another-replacement-passphrase",
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Finished an interrupted re-key/u);
+  assert.equal(fs.existsSync(stagingRoot(dir)), false);
+
+  forgetVaultKeys();
+  assert.ok(openVaultKeys(dir, NEW_PASSPHRASE), "the interrupted re-key's passphrase must open the vault");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// A malformed journal leaves both `readJournal` and `stageRekey` refusing,
+// which previously sent the operator toward `vbrain rekey` recovery that
+// itself refuses for the same reason — a dead end with no in-product exit.
+// The CLI must instead say what actually resolves it: deleting the staging
+// directory by hand, exactly what recovery already does automatically for a
+// staging area that carries no journal at all.
+test("the CLI names the actual fix for a malformed re-key journal instead of pointing at recovery", () => {
+  const { dir } = seedVault();
+  const { journal } = preparedRekey(dir);
+  fs.writeFileSync(journalPath(dir), `${JSON.stringify(journal)}\n`.slice(0, 40));
+
+  const result = runCli(["--vault", dir, "rekey"], {
+    VBRAIN_PASSPHRASE: PASSPHRASE,
+    VBRAIN_NEW_PASSPHRASE: NEW_PASSPHRASE,
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /malformed/iu);
+  assert.match(result.stderr, /delete/iu);
+  assert.doesNotMatch(result.stderr, /run recovery before staging/u);
+
   fs.rmSync(dir, { recursive: true, force: true });
 });
