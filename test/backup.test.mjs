@@ -78,14 +78,19 @@ test("the archive is encrypted, and carries no session file", () => {
   assert.equal(bytes.includes(Buffer.from("Ship backup")), false);
   assert.equal(bytes.includes(Buffer.from("diagram bytes")), false);
 
-  // The header is readable, and names the keyring a restore needs.
-  const header = JSON.parse(bytes.subarray(0, bytes.indexOf(0x0a)).toString("utf8"));
-  assert.equal(header.kind, "vaultbrain-backup");
-  assert.equal(header.version, 1);
-  assert.equal(JSON.parse(header.keyring).version, 2);
-  assert.equal(header.files.some((entry) => entry.path === "keyring.json"), false);
-  assert.equal(header.files.some((entry) => entry.path === ".sbrain.lock"), false);
-  assert.ok(header.files.some((entry) => entry.path.startsWith("documents/objects/")));
+  // The preamble is readable, and carries the keyring a restore needs.
+  const preamble = JSON.parse(bytes.subarray(0, bytes.indexOf(0x0a)).toString("utf8"));
+  assert.equal(preamble.kind, "vaultbrain-backup");
+  assert.equal(preamble.version, 1);
+  assert.equal(JSON.parse(preamble.keyring).version, 2);
+
+  // And nothing else. An archive is meant to be stored somewhere its owner
+  // does not control, so the file list — how many objects the vault holds, how
+  // many revisions each one has, how large they are — is sealed with the rest.
+  assert.equal(preamble.files, undefined);
+  assert.equal(bytes.includes(Buffer.from("documents/objects/")), false);
+  assert.equal(bytes.includes(Buffer.from("documents/history/")), false);
+  assert.equal(bytes.includes(Buffer.from("sha256")), false);
 });
 
 test("a backup the passphrase cannot open is refused before anything is written", () => {
@@ -120,22 +125,29 @@ test("an altered archive is refused rather than half-restored", () => {
   assert.throws(() => restoreBackup(archive, path.join(outside, "a"), PASSPHRASE), /does not open/u);
   assert.equal(fs.existsSync(path.join(outside, "a")), false);
 
-  // A byte in the header line: the seal over the header catches it.
-  const headerEnd = original.indexOf(0x0a);
-  const header = Buffer.from(original);
-  const digitAt = header.indexOf(Buffer.from('"size":'), 0) + 7;
-  header[digitAt] = header[digitAt] === 0x39 ? 0x38 : header[digitAt] + 1;
-  assert.ok(digitAt < headerEnd);
-  fs.writeFileSync(archive, header);
-  assert.throws(() => verifyBackup(archive, PASSPHRASE), /does not match its seal/u);
+  // A byte in the preamble: it is the file list's additional data, so the file
+  // list stops opening. No separate MAC is needed to notice.
+  const preambleEnd = original.indexOf(0x0a);
+  const preamble = Buffer.from(original);
+  const at = preamble.indexOf(Buffer.from('"createdAt":')) + 13;
+  assert.ok(at > 12 && at < preambleEnd);
+  preamble[at] = preamble[at] === 0x39 ? 0x38 : preamble[at] + 1;
+  fs.writeFileSync(archive, preamble);
+  assert.throws(() => verifyBackup(archive, PASSPHRASE), /file list does not open/u);
 
-  // A truncated archive: the header describes bytes that are not there.
+  // A byte in the sealed file list itself: same seal, same refusal.
+  const manifest = Buffer.from(original);
+  manifest[preambleEnd + 12] ^= 0xff;
+  fs.writeFileSync(archive, manifest);
+  assert.throws(() => verifyBackup(archive, PASSPHRASE), /file list does not open/u);
+
+  // A truncated archive: the file list describes bytes that are not there.
   fs.writeFileSync(archive, original.subarray(0, original.length - 64));
   assert.throws(() => verifyBackup(archive, PASSPHRASE), /truncated/u);
 
   // Appended bytes are not silently ignored either.
   fs.writeFileSync(archive, Buffer.concat([original, Buffer.from("extra")]));
-  assert.throws(() => verifyBackup(archive, PASSPHRASE), /bytes its header does not describe/u);
+  assert.throws(() => verifyBackup(archive, PASSPHRASE), /bytes its file list does not describe/u);
 
   // The unaltered archive still restores, so none of the above was a false alarm.
   fs.writeFileSync(archive, original);

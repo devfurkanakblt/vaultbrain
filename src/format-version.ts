@@ -73,6 +73,7 @@ export const AAD = {
   attachmentManifestPrefix: "secondbrain-vault:attachment-manifest:v1:",
   attachmentChunkPrefix: "secondbrain-vault:attachment-chunk:v1:",
   backupKey: "secondbrain-vault:backup-key:v1",
+  backupManifestPrefix: "secondbrain-vault:backup-manifest:v1:",
   backupEntryPrefix: "secondbrain-vault:backup-entry:v1:",
 } as const;
 
@@ -99,6 +100,12 @@ export const syncEpochKeyAad = (epoch: number): string => `${AAD.syncEpochKeyPre
  */
 export const backupEntryAad = (index: number, entryPath: string): string =>
   `${AAD.backupEntryPrefix}${index}:${entryPath}`;
+/**
+ * Binds a backup's sealed file list to the preamble it was written under, so
+ * the two halves of an archive header cannot be taken from different backups.
+ */
+export const backupManifestAad = (preambleDigest: string): string =>
+  `${AAD.backupManifestPrefix}${preambleDigest}`;
 
 /**
  * Strict base64: rejects malformed alphabets, non-canonical padding, and

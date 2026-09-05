@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { AAD, VAULT_FORMAT_VERSION, backupEntryAad } from "./format-version.js";
+import { AAD, VAULT_FORMAT_VERSION, backupEntryAad, backupManifestAad } from "./format-version.js";
 import { assertNoSymlinkComponents, assertNotSymlink } from "./fs-safe.js";
 import {
   KEYRING_FILENAME,
@@ -40,18 +40,28 @@ export interface BackupEntry {
   sha256: string;
 }
 
-export interface BackupHeader {
+/**
+ * The only part of an archive that is readable without the passphrase.
+ *
+ * It carries the keyring because a reader needs it before it can decrypt
+ * anything else, and the keyring's own protection is its passphrase wrapping.
+ * Everything that would describe the vault's contents — how many objects it
+ * holds, how many revisions each one has, how large they are — is in the
+ * sealed manifest instead. An archive is meant to be stored somewhere the
+ * owner does not control, and a plaintext list of every object in a vault is
+ * a description of that vault.
+ */
+export interface BackupPreamble {
   version: number;
   kind: string;
   /** The vault format the archive was taken from, for a later reader. */
   formatVersion: string;
   createdAt: string;
-  /**
-   * The vault's `keyring.json`, verbatim. It travels in the clear because it
-   * is the one file whose protection is its own passphrase wrapping, and
-   * because a reader needs it before it can decrypt anything else.
-   */
+  /** The vault's `keyring.json`, verbatim. */
   keyring: string;
+}
+
+export interface BackupManifest {
   files: BackupEntry[];
 }
 
@@ -138,24 +148,29 @@ function collectFiles(vaultDir: string): BackupEntry[] {
   return entries;
 }
 
-function sealEntry(data: Buffer, key: Buffer, index: number, entryPath: string): Buffer {
+function seal(data: Buffer, key: Buffer, aad: string): Buffer {
   const nonce = crypto.randomBytes(NONCE_BYTES);
   const cipher = crypto.createCipheriv("aes-256-gcm", key, nonce);
-  cipher.setAAD(Buffer.from(backupEntryAad(index, entryPath), "utf8"));
+  cipher.setAAD(Buffer.from(aad, "utf8"));
   const ciphertext = Buffer.concat([cipher.update(data), cipher.final()]);
   return Buffer.concat([nonce, ciphertext, cipher.getAuthTag()]);
 }
 
-function openEntry(sealed: Buffer, key: Buffer, index: number, entryPath: string): Buffer {
+function open(sealed: Buffer, key: Buffer, aad: string): Buffer {
   const nonce = sealed.subarray(0, NONCE_BYTES);
   const tag = sealed.subarray(sealed.length - TAG_BYTES);
   const decipher = crypto.createDecipheriv("aes-256-gcm", key, nonce);
-  decipher.setAAD(Buffer.from(backupEntryAad(index, entryPath), "utf8"));
+  decipher.setAAD(Buffer.from(aad, "utf8"));
   decipher.setAuthTag(tag);
   return Buffer.concat([
     decipher.update(sealed.subarray(NONCE_BYTES, sealed.length - TAG_BYTES)),
     decipher.final(),
   ]);
+}
+
+/** The manifest's AAD binds it to the exact preamble it was written under. */
+function manifestAadFor(preambleLine: Buffer): string {
+  return backupManifestAad(crypto.createHash("sha256").update(preambleLine).digest("hex"));
 }
 
 /**
@@ -190,38 +205,44 @@ export function createBackup(vaultDir: string, outputPath: string, passphrase: s
   }
 
   const createdAt = new Date().toISOString();
-  // The lock is held across both passes, so the hashes in the header describe
+  // The lock is held across both passes, so the hashes in the manifest describe
   // the same bytes the second pass seals.
-  const { header, bytes } = withVaultLock(vault, () => {
+  const { count, bytes } = withVaultLock(vault, () => {
     const keyringText = fs.readFileSync(keyringPath(vault), "utf8");
     const keys = unwrapKeyring(parseKeyring(keyringText), passphrase);
     try {
       const key = backupKey(keys);
       const files = collectFiles(vault);
-      const headerValue: BackupHeader = {
+      const preamble: BackupPreamble = {
         version: BACKUP_VERSION,
         kind: BACKUP_KIND,
         formatVersion: VAULT_FORMAT_VERSION,
         createdAt,
         keyring: keyringText,
-        files,
       };
-      const headerLine = Buffer.from(`${JSON.stringify(headerValue)}\n`, "utf8");
-      const mac = crypto.createHmac("sha256", key).update(headerLine).digest("hex");
+      const preambleLine = Buffer.from(`${JSON.stringify(preamble)}\n`, "utf8");
+      const sealedManifest = seal(
+        Buffer.from(JSON.stringify({ files } satisfies BackupManifest), "utf8"),
+        key,
+        manifestAadFor(preambleLine),
+      );
+      const manifestLength = Buffer.allocUnsafe(4);
+      manifestLength.writeUInt32BE(sealedManifest.length);
 
       const temporary = `${output}.${process.pid}.${crypto.randomUUID()}.part`;
       const handle = fs.openSync(temporary, "wx", 0o600);
       let carried = 0;
       try {
-        fs.writeSync(handle, headerLine);
-        fs.writeSync(handle, Buffer.from(`${mac}\n`, "utf8"));
+        fs.writeSync(handle, preambleLine);
+        fs.writeSync(handle, manifestLength);
+        fs.writeSync(handle, sealedManifest);
         for (const [index, entry] of files.entries()) {
           const absolute = path.join(vault, ...entry.path.split("/"));
           const data = fs.readFileSync(absolute);
           if (data.byteLength !== entry.size) {
             throw new Error(`A vault file changed while the backup was running: ${entry.path}`);
           }
-          fs.writeSync(handle, sealEntry(data, key, index, entry.path));
+          fs.writeSync(handle, seal(data, key, backupEntryAad(index, entry.path)));
           data.fill(0);
           carried += entry.size;
         }
@@ -238,7 +259,7 @@ export function createBackup(vaultDir: string, outputPath: string, passphrase: s
         throw error;
       }
       key.fill(0);
-      return { header: headerValue, bytes: carried };
+      return { count: files.length, bytes: carried };
     } finally {
       zeroKeySet(keys);
     }
@@ -252,15 +273,16 @@ export function createBackup(vaultDir: string, outputPath: string, passphrase: s
     version: 1,
     vault,
     archive: output,
-    createdAt: header.createdAt,
-    files: header.files.length,
+    createdAt,
+    files: count,
     bytes,
     archiveBytes: fs.statSync(output).size,
   };
 }
 
 interface OpenedArchive {
-  header: BackupHeader;
+  preamble: BackupPreamble;
+  files: BackupEntry[];
   key: Buffer;
   keys: KeySet;
   dataOffset: number;
@@ -284,8 +306,8 @@ function readLine(handle: number, start: number, limit: number, label: string): 
   }
 }
 
-function parseHeader(text: string): BackupHeader {
-  const parsed = JSON.parse(text) as BackupHeader;
+function parsePreamble(text: string): BackupPreamble {
+  const parsed = JSON.parse(text) as BackupPreamble;
   if (parsed?.kind !== BACKUP_KIND) throw new Error("This file is not a Vault Brain backup.");
   if (parsed.version !== BACKUP_VERSION) {
     throw new Error(
@@ -295,8 +317,19 @@ function parseHeader(text: string): BackupHeader {
   if (typeof parsed.keyring !== "string" || typeof parsed.createdAt !== "string") {
     throw new Error("This backup header is missing the fields a restore needs.");
   }
-  if (!Array.isArray(parsed.files) || parsed.files.length > MAX_ENTRIES) {
-    throw new Error("This backup header does not list its contents.");
+  return parsed;
+}
+
+/**
+ * The manifest is authenticated by the time this runs, so these checks are not
+ * about an attacker: they stop a path this build would refuse to write from
+ * being restored by a build that reads it, and they keep `..` out of a
+ * destination directory whatever produced the archive.
+ */
+function parseManifest(text: string): BackupEntry[] {
+  const parsed = JSON.parse(text) as BackupManifest;
+  if (!Array.isArray(parsed?.files) || parsed.files.length > MAX_ENTRIES) {
+    throw new Error("This backup does not list its contents.");
   }
   const seen = new Set<string>();
   for (const entry of parsed.files) {
@@ -308,7 +341,7 @@ function parseHeader(text: string): BackupHeader {
       typeof entry.sha256 !== "string" ||
       !/^[a-f0-9]{64}$/u.test(entry.sha256)
     ) {
-      throw new Error("This backup header describes an entry this build cannot read.");
+      throw new Error("This backup describes an entry this build cannot read.");
     }
     const segments = entry.path.split("/");
     if (
@@ -324,34 +357,62 @@ function parseHeader(text: string): BackupHeader {
     if (seen.has(key)) throw new Error(`This backup names one entry twice: ${entry.path}`);
     seen.add(key);
   }
-  return parsed;
+  return parsed.files;
 }
 
-function openArchive(handle: number, passphrase: string): OpenedArchive {
-  const headerLine = readLine(handle, 0, MAX_HEADER_BYTES, "The backup header");
-  const header = parseHeader(headerLine.text);
-  const macLine = readLine(handle, headerLine.end, 256, "The backup seal");
+function openArchive(handle: number, archiveSize: number, passphrase: string): OpenedArchive {
+  const preambleLine = readLine(handle, 0, MAX_HEADER_BYTES, "The backup header");
+  const preamble = parsePreamble(preambleLine.text);
 
   // The passphrase opens the keyring the archive carries. A backup this
   // passphrase cannot open is refused here, before anything is written.
-  const keys = unwrapKeyring(parseKeyring(header.keyring), passphrase);
+  const keys = unwrapKeyring(parseKeyring(preamble.keyring), passphrase);
   const key = backupKey(keys);
-  const headerBytes = Buffer.allocUnsafe(headerLine.end);
-  if (fs.readSync(handle, headerBytes, 0, headerBytes.length, 0) !== headerBytes.length) {
+  try {
+    const lengthBytes = Buffer.allocUnsafe(4);
+    if (fs.readSync(handle, lengthBytes, 0, 4, preambleLine.end) !== 4) {
+      throw new Error("This backup is truncated: its file list is not present.");
+    }
+    const sealedLength = lengthBytes.readUInt32BE();
+    const manifestStart = preambleLine.end + 4;
+    if (sealedLength <= ENTRY_OVERHEAD || sealedLength > MAX_HEADER_BYTES) {
+      throw new Error("This backup's file list is not a size this build will read.");
+    }
+    if (manifestStart + sealedLength > archiveSize) {
+      throw new Error("This backup is truncated: its file list is not fully present.");
+    }
+    const sealedManifest = Buffer.allocUnsafe(sealedLength);
+    if (fs.readSync(handle, sealedManifest, 0, sealedLength, manifestStart) !== sealedLength) {
+      throw new Error("This backup is truncated: its file list is not fully present.");
+    }
+
+    // The preamble is authenticated here rather than by a separate MAC: it is
+    // the manifest's additional data, so altering one byte of it makes the file
+    // list refuse to open.
+    const preambleBytes = Buffer.allocUnsafe(preambleLine.end);
+    if (fs.readSync(handle, preambleBytes, 0, preambleBytes.length, 0) !== preambleBytes.length) {
+      throw new Error("The backup header could not be read back for verification.");
+    }
+    let manifestText: string;
+    try {
+      manifestText = open(sealedManifest, key, manifestAadFor(preambleBytes)).toString("utf8");
+    } catch {
+      throw new Error(
+        "This backup's file list does not open: the header has been altered, or the two halves come from different backups."
+      );
+    }
+    return {
+      preamble,
+      files: parseManifest(manifestText),
+      key,
+      keys,
+      dataOffset: manifestStart + sealedLength,
+    };
+  } catch (error) {
     key.fill(0);
     zeroKeySet(keys);
-    throw new Error("The backup header could not be read back for verification.");
+    throw error;
   }
-  const expected = crypto.createHmac("sha256", key).update(headerBytes).digest("hex");
-  if (macLine.text.length !== expected.length || !crypto.timingSafeEqual(
-    Buffer.from(macLine.text, "utf8"),
-    Buffer.from(expected, "utf8")
-  )) {
-    key.fill(0);
-    zeroKeySet(keys);
-    throw new Error("This backup's header does not match its seal: the file has been altered or truncated.");
-  }
-  return { header, key, keys, dataOffset: macLine.end };
 }
 
 function eachEntry(
@@ -362,7 +423,7 @@ function eachEntry(
 ): number {
   let offset = opened.dataOffset;
   let bytes = 0;
-  for (const [index, entry] of opened.header.files.entries()) {
+  for (const [index, entry] of opened.files.entries()) {
     const sealedLength = entry.size + ENTRY_OVERHEAD;
     if (offset + sealedLength > archiveSize) {
       throw new Error(`This backup is truncated: ${entry.path} is not fully present.`);
@@ -372,7 +433,7 @@ function eachEntry(
     if (read !== sealedLength) throw new Error(`This backup is truncated: ${entry.path} is not fully present.`);
     let data: Buffer;
     try {
-      data = openEntry(sealed, opened.key, index, entry.path);
+      data = open(sealed, opened.key, backupEntryAad(index, entry.path));
     } catch {
       throw new Error(`This backup entry does not open: ${entry.path}`);
     }
@@ -386,13 +447,13 @@ function eachEntry(
     bytes += entry.size;
   }
   if (offset !== archiveSize) {
-    throw new Error("This backup carries bytes its header does not describe.");
+    throw new Error("This backup carries bytes its file list does not describe.");
   }
   return bytes;
 }
 
 /**
- * Opens a backup and checks every byte of it: the seal over the header, the
+ * Opens a backup and checks every byte of it: the seal over the file list, the
  * AEAD tag on each entry, and each entry's plaintext hash. Nothing is written.
  */
 export function verifyBackup(archivePath: string, passphrase: string): BackupVerification {
@@ -401,15 +462,15 @@ export function verifyBackup(archivePath: string, passphrase: string): BackupVer
   const handle = fs.openSync(archive, "r");
   try {
     const archiveSize = fs.fstatSync(handle).size;
-    const opened = openArchive(handle, passphrase);
+    const opened = openArchive(handle, archiveSize, passphrase);
     try {
       const bytes = eachEntry(handle, opened, archiveSize, () => {});
       return {
         version: 1,
         archive,
-        createdAt: opened.header.createdAt,
-        formatVersion: opened.header.formatVersion,
-        files: opened.header.files.length,
+        createdAt: opened.preamble.createdAt,
+        formatVersion: opened.preamble.formatVersion,
+        files: opened.files.length,
         bytes,
       };
     } finally {
@@ -453,7 +514,7 @@ export function restoreBackup(archivePath: string, destinationDirectory: string,
   const staging = path.join(path.dirname(destination), `.${path.basename(destination)}.${crypto.randomUUID()}.restoring`);
   try {
     const archiveSize = fs.fstatSync(handle).size;
-    const opened = openArchive(handle, passphrase);
+    const opened = openArchive(handle, archiveSize, passphrase);
     try {
       fs.mkdirSync(staging, { recursive: true, mode: 0o700 });
       const bytes = eachEntry(handle, opened, archiveSize, (entry, data) => {
@@ -461,7 +522,7 @@ export function restoreBackup(archivePath: string, destinationDirectory: string,
         fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
         fs.writeFileSync(target, data, { mode: 0o600 });
       });
-      fs.writeFileSync(path.join(staging, KEYRING_FILENAME), opened.header.keyring, { mode: 0o600 });
+      fs.writeFileSync(path.join(staging, KEYRING_FILENAME), opened.preamble.keyring, { mode: 0o600 });
 
       if (fs.existsSync(destination)) fs.rmdirSync(destination);
       fs.renameSync(staging, destination);
@@ -469,9 +530,9 @@ export function restoreBackup(archivePath: string, destinationDirectory: string,
         version: 1,
         archive,
         destination,
-        createdAt: opened.header.createdAt,
-        formatVersion: opened.header.formatVersion,
-        files: opened.header.files.length,
+        createdAt: opened.preamble.createdAt,
+        formatVersion: opened.preamble.formatVersion,
+        files: opened.files.length,
         bytes,
       };
     } finally {
