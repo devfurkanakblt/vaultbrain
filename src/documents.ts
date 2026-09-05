@@ -349,6 +349,60 @@ export interface RevisionInfo {
   current: boolean;
 }
 
+/**
+ * How much history a vault keeps.
+ *
+ * Nothing pruned revisions before this existed, so a note edited daily grew a
+ * file per edit forever. The default is still unlimited — silently discarding
+ * someone's history because a new build shipped would be the worse failure —
+ * but a vault can now say how much of it is wanted.
+ */
+export interface RetentionPolicy {
+  version: 1;
+  /** Archived revisions to keep per object, newest first. `null` keeps all. */
+  keepRevisions: number | null;
+  /** Drop archived revisions older than this many days. `null` keeps all. */
+  keepDays: number | null;
+}
+
+export const UNLIMITED_RETENTION: RetentionPolicy = {
+  version: 1,
+  keepRevisions: null,
+  keepDays: null,
+};
+
+/** Bounds that keep a policy from being a denial-of-service on its own vault. */
+const MAX_KEEP_REVISIONS = 1_000_000;
+const MAX_KEEP_DAYS = 36_500;
+
+export function validateRetentionPolicy(value: unknown): RetentionPolicy {
+  const raw = value as Partial<RetentionPolicy> | null;
+  if (!raw || raw.version !== 1) throw new Error("Unsupported retention policy version.");
+  const bounded = (field: "keepRevisions" | "keepDays", max: number): number | null => {
+    const given = raw[field];
+    if (given === null || given === undefined) return null;
+    if (!Number.isSafeInteger(given) || given < 1 || given > max) {
+      throw new Error(`Retention ${field} must be a whole number between 1 and ${max}, or unset.`);
+    }
+    return given;
+  };
+  return {
+    version: 1,
+    keepRevisions: bounded("keepRevisions", MAX_KEEP_REVISIONS),
+    keepDays: bounded("keepDays", MAX_KEEP_DAYS),
+  };
+}
+
+export interface RetentionSweepReport {
+  version: 1;
+  policy: RetentionPolicy;
+  /** Objects whose history the sweep looked at. */
+  objectsExamined: number;
+  /** Objects that actually lost a revision. */
+  objectsPruned: number;
+  revisionsRemoved: number;
+}
+
 export interface PurgeReport {
   version: 1;
   kind: "note" | "canvas" | "attachment";
@@ -484,6 +538,7 @@ export class DocumentVault {
   private readonly session: DocumentKeySession;
   private indexCache?: DocumentIndex;
   private notesCache?: IndexedNote[];
+  private retentionCache?: RetentionPolicy;
   private readonly searchCache = new Map<string, SearchFields>();
   private readonly semanticIndexes = new Map<EmbeddingAdapter, SemanticNoteIndex>();
   private sessionGeneration = 0;
@@ -521,6 +576,7 @@ export class DocumentVault {
     forgetVaultKeys(this.vaultDir);
     this.indexCache = undefined;
     this.notesCache = undefined;
+    this.retentionCache = undefined;
     this.searchCache.clear();
     this.locked = true;
   }
@@ -539,6 +595,10 @@ export class DocumentVault {
 
   private pluginPolicyPath(): string {
     return resolveInside(this.session.rootDir, "plugin-policy.enc");
+  }
+
+  private retentionPolicyPath(): string {
+    return resolveInside(this.session.rootDir, "retention.enc");
   }
 
   private objectsDir(): string {
@@ -832,6 +892,7 @@ export class DocumentVault {
       noteHistoryAad(note.id, note.revision)
     );
     writeFileAtomic(historyPath, JSON.stringify(payload), { mode: 0o600 });
+    this.applyRetention(note.id, "note");
   }
 
   private archiveCanvasRevision(canvas: CanvasDocument): void {
@@ -844,6 +905,7 @@ export class DocumentVault {
       canvasHistoryAad(canvas.id, canvas.revision),
     );
     writeFileAtomic(historyPath, JSON.stringify(payload), { mode: 0o600 });
+    this.applyRetention(canvas.id, "canvas");
   }
 
   private loadRevisionById(id: string, revision: number): NoteDocument {
@@ -899,6 +961,149 @@ export class DocumentVault {
       .filter((name) => /^\d+\.note\.enc$/u.test(name))
       .map((name) => Number.parseInt(name, 10))
       .sort((a, b) => a - b);
+  }
+
+  /**
+   * The vault's retention policy, cached for the session.
+   *
+   * It is read on every archived revision, which is every note and canvas
+   * write, so decrypting it each time would put a scrypt-free but real cost on
+   * the hot path. `setRetentionPolicy` is the only writer and clears the cache.
+   */
+  private retentionPolicy(): RetentionPolicy {
+    if (this.retentionCache) return this.retentionCache;
+    const filePath = this.retentionPolicyPath();
+    if (!fs.existsSync(filePath)) {
+      this.retentionCache = UNLIMITED_RETENTION;
+      return this.retentionCache;
+    }
+    assertNotSymlink(filePath);
+    const payload = JSON.parse(
+      readTextFileLimited(filePath, 64 * 1024, "Retention policy")
+    ) as DocumentPayload;
+    this.retentionCache = validateRetentionPolicy(
+      JSON.parse(decryptDocument(payload, this.session.readKeys, AAD.retentionPolicy))
+    );
+    return this.retentionCache;
+  }
+
+  getRetentionPolicy(): RetentionPolicy {
+    this.assertUnlocked();
+    return { ...this.retentionPolicy() };
+  }
+
+  /**
+   * Sets the policy and applies it to the history that already exists.
+   *
+   * A policy that only governed future writes would leave the years of history
+   * someone is trying to bound exactly where it was, which is the opposite of
+   * what asking for it means.
+   */
+  setRetentionPolicy(policy: RetentionPolicy, now = Date.now()): RetentionSweepReport {
+    const normalized = validateRetentionPolicy(policy);
+    return withVaultLock(this.vaultDir, () => {
+      const payload = encryptDocument(
+        JSON.stringify(normalized),
+        this.session.key,
+        AAD.retentionPolicy
+      );
+      writeFileAtomic(this.retentionPolicyPath(), JSON.stringify(payload), { mode: 0o600 });
+      this.retentionCache = normalized;
+      return this.sweepRetentionLocked(now);
+    });
+  }
+
+  /**
+   * Applies the stored policy to every object's history.
+   *
+   * `now` is the instant an age bound is measured against. It is a parameter
+   * rather than a fixed `Date.now()` so a caller sweeping several vaults can
+   * hold them to one instant, and so the age rule is testable without waiting
+   * out a retention window.
+   */
+  sweepRetention(now = Date.now()): RetentionSweepReport {
+    return withVaultLock(this.vaultDir, () => this.sweepRetentionLocked(now));
+  }
+
+  private sweepRetentionLocked(now: number): RetentionSweepReport {
+    const policy = this.retentionPolicy();
+    const root = path.join(this.session.rootDir, "history");
+    const report: RetentionSweepReport = {
+      version: 1,
+      policy,
+      objectsExamined: 0,
+      objectsPruned: 0,
+      revisionsRemoved: 0,
+    };
+    if (!fs.existsSync(root)) return report;
+    for (const id of fs.readdirSync(root)) {
+      if (!/^[a-f0-9-]{36}$/u.test(id)) continue;
+      report.objectsExamined += 1;
+      const removed =
+        this.applyRetention(id, "note", policy, now) +
+        this.applyRetention(id, "canvas", policy, now);
+      if (removed > 0) report.objectsPruned += 1;
+      report.revisionsRemoved += removed;
+    }
+    return report;
+  }
+
+  /**
+   * Drops the archived revisions of one object that the policy does not keep.
+   *
+   * `keepRevisions` needs only the filenames. `keepDays` needs each revision's
+   * own timestamp, so it decrypts — but only when a vault has actually asked
+   * for an age bound, which keeps the common case off that path.
+   */
+  private applyRetention(
+    id: string,
+    kind: "note" | "canvas",
+    policy = this.retentionPolicy(),
+    now = Date.now()
+  ): number {
+    if (policy.keepRevisions === null && policy.keepDays === null) return 0;
+    const numbers =
+      kind === "note" ? this.archivedRevisionNumbers(id) : this.archivedCanvasRevisionNumbers(id);
+    if (numbers.length === 0) return 0;
+
+    const doomed = new Set<number>();
+    if (policy.keepRevisions !== null && numbers.length > policy.keepRevisions) {
+      for (const revision of numbers.slice(0, numbers.length - policy.keepRevisions)) {
+        doomed.add(revision);
+      }
+    }
+    if (policy.keepDays !== null) {
+      const cutoff = now - policy.keepDays * 24 * 60 * 60 * 1000;
+      for (const revision of numbers) {
+        if (doomed.has(revision)) continue;
+        let updatedAt: string;
+        try {
+          updatedAt =
+            kind === "note"
+              ? this.loadRevisionById(id, revision).updatedAt
+              : this.loadCanvasRevisionById(id, revision).updatedAt;
+        } catch {
+          // A revision this build cannot open is left alone: deleting what we
+          // cannot read is not a retention decision, it is data loss.
+          continue;
+        }
+        const stamp = Date.parse(updatedAt);
+        if (Number.isFinite(stamp) && stamp < cutoff) doomed.add(revision);
+      }
+    }
+    if (doomed.size === 0) return 0;
+
+    const historyDir = this.historyDir(id);
+    for (const revision of doomed) {
+      const filePath =
+        kind === "note" ? this.historyPath(id, revision) : this.canvasHistoryPath(id, revision);
+      assertNotSymlink(filePath);
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    }
+    if (fs.existsSync(historyDir) && fs.readdirSync(historyDir).length === 0) {
+      fs.rmdirSync(historyDir);
+    }
+    return doomed.size;
   }
 
   private archivedCanvasRevisionNumbers(id: string): number[] {
