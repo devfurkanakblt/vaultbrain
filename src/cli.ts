@@ -2074,6 +2074,8 @@ program
   .command("rekey")
   .description("replace the vault keyset and re-encrypt every object under it")
   .option("--keep-passphrase", "rotate the keys but keep wrapping them under the current passphrase")
+  .option("--recovery-kit <file>", "offline recovery kit to advance alongside this re-key")
+  .option("--recovery-code <code>", "recovery code for --recovery-kit (prompted if omitted)")
   .action(async (opts) => {
     const dir = program.opts().vault;
     const keepPassphrase = Boolean(opts.keepPassphrase);
@@ -2125,9 +2127,21 @@ program
       ? ""
       : (process.env.VBRAIN_NEW_PASSPHRASE ?? (await readNewPassphrase()));
 
+    // Only asked for when a kit was named: a vault with no recovery slot must
+    // not be made to answer a recovery-code prompt it has no use for, and one
+    // that does have a slot but was given no kit here refuses inside
+    // `rekeyVault` with a clear message instead of a silent drop.
+    const recoveryKit = opts.recoveryKit as string | undefined;
+    const recovery = recoveryKit
+      ? {
+          kitPath: recoveryKit,
+          code: process.env.VBRAIN_RECOVERY_CODE ?? opts.recoveryCode ?? (await readSecret("Recovery code: ")),
+        }
+      : undefined;
+
     let report;
     try {
-      report = rekeyVault(dir, current, next, { keepPassphrase });
+      report = rekeyVault(dir, current, next, { keepPassphrase, recovery });
     } catch (error) {
       reportMalformedJournal(dir, error);
       throw error;
@@ -2156,6 +2170,13 @@ program
       for (const slot of report.droppedSlots) {
         console.log(`  ${slot.id} (${slot.label}), created ${slot.createdAt}.`);
       }
+    }
+
+    if (report.recovery) {
+      console.log(
+        `Recovery kit ${report.recovery.kitPath} was advanced under the new keyset; recovery slot ` +
+          `${report.recovery.slotId} still opens this vault with the same recovery code.`,
+      );
     }
 
     if (!report.settled) {

@@ -44,6 +44,12 @@ import {
   type RetiringKeys,
 } from "./keyring.js";
 import { MIN_PASSPHRASE_LENGTH } from "./keyring-passphrase.js";
+import {
+  prepareRecoveryForRekey,
+  rewriteRecoveryKitForRekey,
+  type PreparedRecoveryRekey,
+  type RekeyRecoveryInput,
+} from "./keyring-recovery.js";
 import { resolveInside } from "./safety.js";
 import { canonicalSyncJson, openSyncChange, type SyncChangeKeys, type SyncJson } from "./sync.js";
 import { CHANGE_AAD_PREFIX, changeEncryptionKey } from "./sync/protocol.js";
@@ -662,6 +668,18 @@ export interface DroppedSlot {
   createdAt: string;
 }
 
+/**
+ * What happened to the offline recovery kit, when the caller supplied one.
+ * `kitPath` and `slotId` are the same kit and slot `prepareRecoveryForRekey`
+ * validated up front — the id never changes across a re-key — so the caller
+ * can tell the operator the kit they already have on hand is the one that was
+ * advanced, not a new one they need to go generate.
+ */
+export interface RekeyRecoveryReport {
+  slotId: string;
+  kitPath: string;
+}
+
 export interface RekeyReport {
   rotated: KeyName[];
   pinned: { name: KeyName; reason: string }[];
@@ -679,6 +697,15 @@ export interface RekeyReport {
    * the next re-key or passphrase change clears them.
    */
   settled: boolean;
+  /**
+   * Null when this vault carries no recovery slot (or the caller passed no
+   * recovery input for one that does not exist — `prepareRecoveryForRekey`
+   * already refused that combination before anything ran). Present whenever
+   * the recovery slot survived the re-key: the offline kit was rewritten
+   * under the new keyset and the matching slot was installed alongside the
+   * new primary slot, so the recovery code still opens this vault.
+   */
+  recovery: RekeyRecoveryReport | null;
 }
 
 function emptyReport(overrides: Partial<RekeyReport>): RekeyReport {
@@ -690,6 +717,7 @@ function emptyReport(overrides: Partial<RekeyReport>): RekeyReport {
     passphraseChanged: false,
     resumed: false,
     settled: true,
+    recovery: null,
     ...overrides,
   };
 }
@@ -709,7 +737,12 @@ export function rekeyVault(
   vaultDir: string,
   currentPassphrase: string,
   newPassphrase: string,
-  options: { keepPassphrase?: boolean; allowSamePassphrase?: boolean } = {},
+  options: {
+    keepPassphrase?: boolean;
+    allowSamePassphrase?: boolean;
+    /** The offline kit and code for the recovery slot this vault carries, if any. */
+    recovery?: RekeyRecoveryInput;
+  } = {},
 ): RekeyReport {
   if (!currentPassphrase) throw new Error("A non-empty vault passphrase is required.");
   const keepPassphrase = Boolean(options.keepPassphrase);
@@ -748,6 +781,10 @@ export function rekeyVault(
       let oldKeys: KeySet | undefined;
       let newKeys: KeySet | undefined;
       const droppedSlots: DroppedSlot[] = [];
+      // Set once the offline kit's rewrite has actually landed on disk. From
+      // that point until `commitRekey` finishes, the kit and this vault's
+      // (still unrekeyed) keyring disagree — see the catch block below.
+      let recoveryKitRewritten = false;
 
       try {
         for (const slot of file.slots) {
@@ -767,6 +804,16 @@ export function rekeyVault(
         if (!oldKeys) {
           throw new Error("Unable to unlock this vault: wrong passphrase, or the keyring is damaged.");
         }
+
+        // Validated before anything below writes a single byte: a vault that
+        // carries a recovery slot but was given no matching kit and code
+        // refuses right here, with nothing on disk touched yet — the same
+        // guarantee every other refusal in this function gives.
+        const preparedRecovery: PreparedRecoveryRekey | null = prepareRecoveryForRekey(
+          file,
+          oldKeys,
+          options.recovery,
+        );
 
         newKeys = randomKeySet();
         for (const { name } of PINNED_KEYS) {
@@ -804,10 +851,31 @@ export function rekeyVault(
         } finally {
           zeroRetiringKeys(retiring);
         }
+
+        // The offline kit is rewritten before the vault commits, because
+        // `commitRekey` needs the exact slot this returns to build the
+        // keyring it publishes — there is no way to install "the slot that
+        // matches the kit" without first knowing what that slot is. This is
+        // also the ordering hazard: the kit write below is atomic on its own,
+        // but the vault's own commit is a separate step that follows it, so a
+        // crash in between leaves a kit already advanced to the new keyset
+        // while the vault (nothing committed yet) still opens only under the
+        // OLD passphrase and OLD keys. The catch block below detects exactly
+        // that window and tells the operator how to recover: the current
+        // passphrase still works, so a fresh kit can always be created after
+        // the fact — it is the one thing that must be said out loud, because
+        // a kit that disagrees with its vault opens nothing.
+        let recoverySlot: KeyringSlot | undefined;
+        if (preparedRecovery) {
+          recoverySlot = rewriteRecoveryKitForRekey(preparedRecovery, options.recovery!.code, newKeys);
+          recoveryKitRewritten = true;
+        }
+
+        const committedSlots = recoverySlot ? [slot, recoverySlot] : [slot];
         commitRekey(
           vaultDir,
           { version: 1, slotId: slot.id, files: items.map((item) => item.path) },
-          { version: KEYRING_VERSION, slots: [slot] },
+          { version: KEYRING_VERSION, slots: committedSlots },
         );
 
         // Every staged file is installed, so nothing on disk is sealed under
@@ -825,11 +893,15 @@ export function rekeyVault(
         // job alone — so it gets its own try/catch instead of falling into
         // the outer one below, which exists to decide whether the *staging*
         // half of a refused run may still be cleared.
+        // The recovery slot never carries retiring keys — `rewriteRecoveryKitForRekey`
+        // wraps the new keyset directly, with nothing left to settle — so it is
+        // carried across unchanged rather than re-wrapped a second time.
         let settled = true;
         try {
+          const settledSlot = wrapKeySet(newKeys, wrapPassphrase, DEFAULT_SCRYPT_N, null, oldKeys.documents);
           writeKeyring(vaultDir, {
             version: KEYRING_VERSION,
-            slots: [wrapKeySet(newKeys, wrapPassphrase, DEFAULT_SCRYPT_N, null, oldKeys.documents)],
+            slots: recoverySlot ? [settledSlot, recoverySlot] : [settledSlot],
           });
         } catch {
           settled = false;
@@ -864,6 +936,9 @@ export function rekeyVault(
           passphraseChanged: !keepPassphrase,
           resumed: false,
           settled,
+          recovery: recoverySlot
+            ? { slotId: recoverySlot.id, kitPath: preparedRecovery!.kitPath }
+            : null,
         };
       } catch (error) {
         // Fail closed, but only on this side of the commit point. A journal
@@ -874,8 +949,28 @@ export function rekeyVault(
         // the refusal `stageRekey` raises for that same reason. Before the
         // commit point there is no journal, nothing live has been touched, and
         // the half-built shadow tree goes.
-        if (!fs.existsSync(journalPath(vaultDir))) {
+        const precommit = !fs.existsSync(journalPath(vaultDir));
+        if (precommit) {
           fs.rmSync(stagingRoot(vaultDir), { recursive: true, force: true });
+        }
+        // The ordering hazard: this vault was never committed (no journal, so
+        // it still opens under the CURRENT passphrase and keys, unchanged),
+        // but the offline kit was already rewritten to the new keyset before
+        // this failure landed. The kit and this vault now disagree, and a kit
+        // that disagrees opens nothing — so the operator has to be told
+        // explicitly, because nothing about the failed command's own error
+        // says so.
+        if (precommit && recoveryKitRewritten) {
+          const detail = error instanceof Error ? error.message : String(error);
+          throw new Error(
+            `${detail} The offline recovery kit was already rewritten under the new keyset before this failure, ` +
+              "but the vault itself was not re-keyed and still opens only under the CURRENT passphrase. That kit " +
+              "no longer matches this vault and will not open it. The current passphrase still works: once the " +
+              "problem that caused this failure is fixed, remove the recovery slot ('vbrain keyring recovery " +
+              "remove --slot <id>') and create a fresh kit ('vbrain keyring recovery create --out <file>') before " +
+              "retrying 'vbrain rekey'.",
+            { cause: error },
+          );
         }
         throw error;
       } finally {

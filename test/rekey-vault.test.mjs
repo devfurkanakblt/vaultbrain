@@ -35,6 +35,11 @@ import {
   writeKeyring,
 } from "../dist/keyring.js";
 import { changeVaultPassphrase } from "../dist/keyring-passphrase.js";
+import {
+  createRecoveryKit,
+  generateRecoveryCode,
+  restoreVaultKeyring,
+} from "../dist/keyring-recovery.js";
 import { loadVaultFile, upsertEntry } from "../dist/store.js";
 import { saveGrants, emptyGrantFile } from "../dist/grants.js";
 import { SyncChangeLog, SyncDeviceManager } from "../dist/sync.js";
@@ -1171,6 +1176,114 @@ test("every refusal leaves the vault byte-identical and no staging behind", () =
 
   assert.equal(fs.existsSync(stagingRoot(dir)), false);
   assert.deepEqual(hashVault(dir), before);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// This is also the mutation guard for dropping the `prepareRecoveryForRekey`
+// call out of `rekeyVault`: without it, a re-key on a vault carrying a
+// recovery slot but given no kit would silently drop that slot (the same
+// path a stranger slot takes) instead of refusing up front. That would leave
+// this exact test green on the wrong code path — succeeding instead of
+// throwing — so the assertion on `droppedSlots` a few tests up, plus this one
+// refusing outright, together are what turns red if the call is removed.
+test("a vault with a recovery slot refuses a re-key given no kit, and is left byte-identical", () => {
+  const { dir } = seedVault();
+  const kit = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-rekey-kit-")), "recovery-kit.json");
+  createRecoveryKit(dir, PASSPHRASE, kit);
+  forgetVaultKeys();
+  const before = hashVault(dir);
+
+  assert.throws(
+    () => rekeyVault(dir, PASSPHRASE, NEW_PASSPHRASE),
+    /matching recovery kit and code are required/iu,
+  );
+
+  assert.equal(fs.existsSync(stagingRoot(dir)), false);
+  assert.deepEqual(hashVault(dir), before, "a refused re-key must not touch a single live file");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a vault with a recovery slot re-keys given a matching kit and code, and both re-open it afterward", () => {
+  const { dir } = seedVault();
+  const kitDir = fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-rekey-kit-"));
+  const kit = path.join(kitDir, "recovery-kit.json");
+  const created = createRecoveryKit(dir, PASSPHRASE, kit);
+  forgetVaultKeys();
+
+  const report = rekeyVault(dir, PASSPHRASE, NEW_PASSPHRASE, {
+    recovery: { kitPath: kit, code: created.recoveryCode },
+  });
+
+  assert.deepEqual(report.droppedSlots, []);
+  assert.ok(report.recovery);
+  assert.equal(report.recovery.slotId, created.slotId);
+  assert.equal(report.recovery.kitPath, path.resolve(kit));
+
+  const slots = readKeyring(dir).slots;
+  assert.equal(slots.length, 2);
+  assert.ok(slots.some((slot) => slot.label === "recovery" && slot.id === created.slotId));
+
+  forgetVaultKeys();
+  assert.ok(openVaultKeys(dir, NEW_PASSPHRASE), "the new passphrase must open the re-keyed vault");
+
+  // The recovery kit itself opens the vault independently, exactly the way
+  // `keyring recovery restore` would use it after real data loss — simulated
+  // here by dropping the keyring and restoring from the (now-rewritten) kit
+  // in place, which needs no directory copy.
+  fs.rmSync(path.join(dir, "keyring.json"));
+  forgetVaultKeys();
+  const restored = restoreVaultKeyring(dir, kit, created.recoveryCode, "a-restored-passphrase-123");
+  assert.ok(restored.slotId);
+  forgetVaultKeys();
+  assert.ok(openVaultKeys(dir, "a-restored-passphrase-123"), "the recovery kit must still open the re-keyed vault");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.rmSync(kitDir, { recursive: true, force: true });
+});
+
+test("a wrong recovery code and a mismatched kit are both refused, non-mutating", () => {
+  const { dir } = seedVault();
+  const kitDir = fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-rekey-kit-"));
+  const kit = path.join(kitDir, "recovery-kit.json");
+  const created = createRecoveryKit(dir, PASSPHRASE, kit);
+  forgetVaultKeys();
+  const before = hashVault(dir);
+
+  assert.throws(
+    () => rekeyVault(dir, PASSPHRASE, NEW_PASSPHRASE, {
+      recovery: { kitPath: kit, code: generateRecoveryCode() },
+    }),
+    /does not carry|checksum|authenticate/iu,
+  );
+  assert.deepEqual(hashVault(dir), before, "a wrong recovery code must not touch a single live file");
+
+  const otherVault = fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-rekey-other-"));
+  const otherKit = path.join(otherVault, "other-recovery-kit.json");
+  const otherCreated = createRecoveryKit(otherVault, PASSPHRASE, otherKit);
+  forgetVaultKeys();
+
+  assert.throws(
+    () => rekeyVault(dir, PASSPHRASE, NEW_PASSPHRASE, {
+      recovery: { kitPath: otherKit, code: otherCreated.recoveryCode },
+    }),
+    /does not match the recovery slot/iu,
+  );
+  assert.deepEqual(hashVault(dir), before, "a mismatched kit must not touch a single live file");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.rmSync(kitDir, { recursive: true, force: true });
+  fs.rmSync(otherVault, { recursive: true, force: true });
+});
+
+test("a vault with no recovery slot re-keys exactly as before, reporting no recovery outcome", () => {
+  const { dir } = seedVault();
+
+  const report = rekeyVault(dir, PASSPHRASE, NEW_PASSPHRASE);
+
+  assert.equal(report.recovery, null);
+  assert.equal(readKeyring(dir).slots.length, 1);
 
   fs.rmSync(dir, { recursive: true, force: true });
 });
