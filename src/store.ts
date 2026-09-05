@@ -12,9 +12,9 @@ import {
   type AnyEncryptedPayload,
   type KeyedEncryptedPayload,
 } from "./crypto.js";
-import { openOrCreateVaultKey, openVaultKey } from "./keyring.js";
+import { openOrCreateVaultKey, openVaultKey, openVaultReadKeys } from "./keyring.js";
 import { parseKV, serializeKV, type KVEntry } from "./format.js";
-import { assertNotSymlink, writeFileAtomic } from "./fs-safe.js";
+import { assertNotSymlink, readTextFileLimited, writeFileAtomic } from "./fs-safe.js";
 import {
   assertValueSize,
   normalizeDescription,
@@ -61,20 +61,21 @@ export function loadVaultFile(
   const filePath = vaultFilePath(vaultDir, name);
   if (!fs.existsSync(filePath)) return [];
   assertNotSymlink(filePath);
-  const payload: AnyEncryptedPayload = JSON.parse(fs.readFileSync(filePath, "utf8"));
-  // A vault interrupted mid-migration holds a keyring and older files at the
-  // same time, so both envelopes stay readable regardless of vault format.
-  const plaintext =
-    envelopeVersion(payload) === KEYED_ENVELOPE_VERSION
-      ? decryptWithKey(payload as KeyedEncryptedPayload, requireKvKey(vaultDir, passphrase), normalizeVaultName(name))
-      : decrypt(payload, passphrase);
+  const payload: AnyEncryptedPayload = JSON.parse(readTextFileLimited(filePath, 64 * 1024 * 1024, "Vault file"));
+  const plaintext = envelopeVersion(payload) === KEYED_ENVELOPE_VERSION
+    ? decryptWithKey(payload as KeyedEncryptedPayload, requireKvReadKeys(vaultDir, passphrase), normalizeVaultName(name))
+    : decrypt(payload, passphrase);
   return parseKV(plaintext);
 }
 
-function requireKvKey(vaultDir: string, passphrase: string): Buffer {
-  const key = kvKey(vaultDir, passphrase);
-  if (!key) throw new Error("This file is keyring-encrypted but the vault has no readable keyring.");
-  return key;
+/**
+ * The keys a read may try: the `kv` key in force, and behind it the retiring
+ * one while a re-key has not yet rewritten every file.
+ */
+function requireKvReadKeys(vaultDir: string, passphrase: string): Buffer[] {
+  const keys = openVaultReadKeys(vaultDir, passphrase, "kv");
+  if (!keys) throw new Error("This file is keyring-encrypted but the vault has no readable keyring.");
+  return keys;
 }
 
 export interface MigrationReport {
@@ -89,7 +90,7 @@ export function vaultFileEnvelopeVersion(vaultDir: string, name: string): number
   const filePath = vaultFilePath(vaultDir, name);
   if (!fs.existsSync(filePath)) return undefined;
   assertNotSymlink(filePath);
-  return envelopeVersion(JSON.parse(fs.readFileSync(filePath, "utf8")) as AnyEncryptedPayload);
+  return envelopeVersion(JSON.parse(readTextFileLimited(filePath, 64 * 1024 * 1024, "Vault file")) as AnyEncryptedPayload);
 }
 
 /**
@@ -157,7 +158,7 @@ export function upsertEntry(
 /**
  * Auto-generated keys for freeform journal-style notes encode their own
  * timestamp: NOTE_YYYYMMDD_HHMMSS_xxxx. This lets date-range browsing work
- * directly off schema.json (key names + descriptions) with zero decryption —
+ * directly off the encrypted discovery catalog (key names + descriptions) —
  * the same "fast, safe index" the fact-lookup path already relies on.
  */
 export function generateAutoKey(): string {

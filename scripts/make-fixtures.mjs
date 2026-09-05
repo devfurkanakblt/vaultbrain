@@ -12,13 +12,22 @@
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { appendAudit } from "../dist/audit.js";
+import { openDocumentKey } from "../dist/document-crypto.js";
 import { DocumentVault } from "../dist/documents.js";
 import { migrateToKeyring } from "../dist/keyring-migrate.js";
 import { upsertEntry } from "../dist/store.js";
+import {
+  SyncChangeLog,
+  SyncDeviceManager,
+  SyncedDocumentVault,
+  parseAttachmentSnapshot,
+  sealSyncChange,
+} from "../dist/sync.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixtures = path.resolve(here, "..", "test", "fixtures");
@@ -62,6 +71,190 @@ function writeCanvasFixture() {
     edges: [{ id: "edge", fromNode: "contract", toNode: "text", toEnd: "arrow" }],
   });
   fs.rmSync(path.join(canvasDir, ".sbrain.lock"), { force: true });
+}
+
+/**
+ * A vault that has been through one epoch rotation: an owner device, a revoked
+ * device, a pre-rotation change sealed at epoch 1 and a post-rotation change
+ * sealed with the epoch 2 content key. Pins the version 2 registry and
+ * envelope shapes, and the fact that both envelope versions coexist.
+ */
+function writeSyncEpochFixture() {
+  const dir = path.join(fixtures, "sync-epoch-v2");
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+
+  const ownerId = "11111111-1111-4111-8111-111111111111";
+  const revokedId = "22222222-2222-4222-8222-222222222222";
+  const noteId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const mutation = (baseRevision, revision, body) => ({
+    objectType: "note",
+    objectId: noteId,
+    operation: "put",
+    baseRevision,
+    revision,
+    value: { title: "Frozen", body },
+  });
+
+  const manager = new SyncDeviceManager(dir, FIXTURE_PASSPHRASE);
+  manager.initializeOwner("Owner laptop", ownerId, "2026-09-03T00:00:00.000Z");
+
+  // A second device is required to produce a proof-of-possession enrollment
+  // request, but two independently created vaults can never share key
+  // material (each derives from its own random KDF salt). So the peer is a
+  // copy of the owner's freshly initialized vault, in a temporary directory,
+  // with the owner's private keys stripped -- it never gets committed.
+  const peerDir = fs.mkdtempSync(path.join(os.tmpdir(), "secondbrain-fixture-peer-"));
+  fs.rmSync(peerDir, { recursive: true, force: true });
+  fs.cpSync(dir, peerDir, { recursive: true });
+  fs.rmSync(path.join(peerDir, "documents", "sync", "identity", "authority.key.enc"));
+  fs.rmSync(path.join(peerDir, "documents", "sync", "identity", `${ownerId}.key.enc`));
+  fs.rmSync(path.join(peerDir, "documents", "sync", "identity", `${ownerId}.x25519.key.enc`));
+
+  const log = new SyncChangeLog(dir, FIXTURE_PASSPHRASE);
+  const peer = new SyncDeviceManager(peerDir, FIXTURE_PASSPHRASE);
+  try {
+    manager.enroll(
+      peer.createEnrollmentRequest("Travel laptop", revokedId, "2026-09-03T00:00:01.000Z"),
+      "2026-09-03T00:00:01.000Z"
+    );
+
+    // Sealed at epoch 1 with the vault key.
+    log.append(ownerId, mutation(null, 1, "before rotation"), "2026-09-03T00:00:02.000Z");
+    manager.createCheckpoint(log.changes(), "2026-09-03T00:00:03.000Z");
+
+    // Revocation rotates to epoch 2 and wraps the new key to the owner only.
+    manager.revoke(revokedId, 1, "2026-09-03T00:00:04.000Z");
+
+    // Sealed at epoch 2 with the wrapped content key.
+    log.append(ownerId, mutation(1, 2, "after rotation"), "2026-09-03T00:00:05.000Z");
+  } finally {
+    log.close();
+    manager.close();
+    peer.close();
+    fs.rmSync(peerDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A vault whose attachment travels as blob references instead of base64 bytes.
+ *
+ * `source/` holds an owner-enrolled vault with two changes: a note change and
+ * an attachment change carrying a `version: 3` body — the blob manifest form,
+ * `filename`/`mime`/`size`/`chunks`/`blobs[]` — plus the four sealed 1 MiB
+ * chunks staged under `documents/sync/blobs/`. `target/` is the very same
+ * vault copied before the attachment existed, so it shares the key material
+ * and the device registry and can admit and apply the change the way a second
+ * device would.
+ *
+ * The writer stamps `version: 3` on a blob-manifest attachment change of its
+ * own accord (`changeBodyVersion` in `src/sync.ts`), so the re-seal below now
+ * rewrites the same body under the same change id rather than upgrading it,
+ * as it once did. It is kept as a guard: if the writer ever stops choosing 3,
+ * this fixture still pins a version 3 body instead of silently drifting.
+ */
+function writeAttachmentBlobFixture() {
+  const dir = path.join(fixtures, "sync-attachment-blobs-v3");
+  fs.rmSync(dir, { recursive: true, force: true });
+  const sourceDir = path.join(dir, "source");
+  const targetDir = path.join(dir, "target");
+  fs.mkdirSync(sourceDir, { recursive: true });
+
+  const ownerId = "11111111-1111-4111-8111-111111111111";
+
+  const manager = new SyncDeviceManager(sourceDir, FIXTURE_PASSPHRASE);
+  manager.initializeOwner("Owner laptop", ownerId, "2026-09-04T00:00:00.000Z");
+  manager.close();
+
+  let vault = new SyncedDocumentVault(sourceDir, FIXTURE_PASSPHRASE, ownerId);
+  vault.put({
+    path: "Atlas/Blob contract.md",
+    title: "Blob contract",
+    body: "# Blob contract\n\nThe attachment beside this note travels as blobs. #fixture",
+    properties: { status: "frozen" },
+  });
+  vault.lock();
+  fs.rmSync(path.join(sourceDir, ".sbrain.lock"), { force: true });
+
+  // The receiving device: the same vault, before the attachment exists.
+  fs.cpSync(sourceDir, targetDir, { recursive: true });
+
+  // 1.5 MiB of deterministic bytes -> exactly two 1 MiB chunks, so the
+  // recorded SHA-256 is stable across regenerations even though every sealed
+  // chunk (and therefore every blob id) is fresh. Two chunks is the smallest
+  // size that still pins multi-blob reassembly, chunk ordering and the AAD
+  // index binding; the heavy 12-blob case is exercised at runtime by
+  // test/sync-blob-transport.test.mjs rather than carried in git forever.
+  const data = Buffer.alloc(1024 * 1024 + 512 * 1024);
+  for (let index = 0; index < data.length; index += 1) data[index] = (index * 31 + 7) & 0xff;
+
+  vault = new SyncedDocumentVault(sourceDir, FIXTURE_PASSPHRASE, ownerId);
+  const info = vault.putAttachment(data, "frozen-blob.bin", "application/octet-stream");
+  vault.lock();
+  fs.rmSync(path.join(sourceDir, ".sbrain.lock"), { force: true });
+
+  // Normalize the attachment change body to version 3 and re-seal. Nothing references its
+  // ID -- it is the newest change on the device chain -- so replacing the file
+  // leaves the DAG, the device sequence and the applied state consistent.
+  const log = new SyncChangeLog(sourceDir, FIXTURE_PASSPHRASE);
+  const changes = log.changes();
+  log.close();
+  const attachmentChange = changes.find((change) => change.mutation.objectType === "attachment");
+  const { id: previousId, ...body } = attachmentChange;
+  const session = openDocumentKey(sourceDir, FIXTURE_PASSPHRASE);
+  let envelope;
+  try {
+    envelope = sealSyncChange({ ...body, version: 3 }, {
+      syncChangeKey: session.syncChangeKey,
+      syncEnvelopeKey: session.syncEnvelopeKey,
+    });
+  } finally {
+    session.key.fill(0);
+    session.attachmentIdKey.fill(0);
+    session.syncChangeKey.fill(0);
+    session.syncEnvelopeKey.fill(0);
+  }
+  const changesDir = path.join(sourceDir, "documents", "sync", "changes");
+  fs.rmSync(path.join(changesDir, `${previousId}.change.enc`));
+  fs.writeFileSync(path.join(changesDir, `${envelope.id}.change.enc`), JSON.stringify(envelope), { mode: 0o600 });
+
+  // Read the fixture back through the ordinary reader, so a broken generator
+  // fails here rather than in CI.
+  const verify = new SyncChangeLog(sourceDir, FIXTURE_PASSPHRASE);
+  const stored = verify.changes();
+  verify.close();
+  const reread = stored.find((change) => change.mutation.objectType === "attachment");
+  if (reread.version !== 3) throw new Error("The attachment change body was not re-sealed at version 3.");
+  const snapshot = parseAttachmentSnapshot(reread.mutation.value);
+  if (snapshot.chunks !== 2) throw new Error("The blob fixture must hold exactly two chunks.");
+
+  fs.writeFileSync(
+    path.join(dir, "manifest.json"),
+    `${JSON.stringify(
+      {
+        deviceId: ownerId,
+        changeCount: stored.length,
+        changeBodyVersion: reread.version,
+        attachmentId: info.id,
+        filename: snapshot.filename,
+        mime: snapshot.mime,
+        size: snapshot.size,
+        chunks: snapshot.chunks,
+        blobs: snapshot.blobs,
+        sha256: crypto.createHash("sha256").update(data).digest("hex"),
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  fs.rmSync(path.join(sourceDir, ".sbrain.lock"), { force: true });
+  fs.rmSync(path.join(targetDir, ".sbrain.lock"), { force: true });
+}
+
+if (process.argv.includes("--blobs-only")) {
+  writeAttachmentBlobFixture();
+  console.log(`Attachment blob fixture written to ${path.join(fixtures, "sync-attachment-blobs-v3")}`);
+  process.exit(0);
 }
 
 if (process.argv.includes("--canvas-only")) {
@@ -159,6 +352,8 @@ attachmentVault.putAttachment(
 fs.rmSync(path.join(attachmentDir, ".sbrain.lock"), { force: true });
 
 writeCanvasFixture();
+writeSyncEpochFixture();
+writeAttachmentBlobFixture();
 
 function writeKeyringFixture() {
   const dir = path.join(fixtures, "keyring-v2");
@@ -201,11 +396,17 @@ They contain dummy data only. Never point a fixture at a real vault.
 | \`documents-v1/\` | document vault manifest v1, index v2 | An encrypted note vault written by the current format still opens, searches and resolves links |
 | \`documents-attachments-v1/\` | document vault with chunk-encrypted attachments | Content-addressed attachments written by the TypeScript core still open in the Rust desktop core |
 | \`documents-canvas-v1/\` | document vault with encrypted canvas objects | Canvas objects, identities, references and AAD written by the TypeScript core stay readable |
-| \`keyring-v2/\` | vault keyring v2, keyset v1, key-value envelope v2 | A migrated vault opens through its wrapped keyset, its key-value files use the keyed envelope, and its adopted audit chain still verifies |
+| \`sync-epoch-v2/\` | sync registry v2, change envelopes v1 and v2 | A rotated vault still opens: epoch 1 changes stay vault-key sealed, epoch 2 changes need the wrapped content key, and the revoked device holds no wrap |
+| \`sync-attachment-blobs-v3/\` | sync change body v3, attachment blob manifest | An attachment change that carries \`size\`/\`chunks\`/\`blobs[]\` instead of base64 bytes still opens; \`source/\` stages the two sealed chunks, \`target/\` is the same vault before the attachment and reassembles it from them. \`manifest.json\` records the blob ids and the plaintext SHA-256 |
 
 Regenerate deliberately (see \`scripts/make-fixtures.mjs\`) — overwriting a
 fixture throws away the evidence it was there to provide. To cover a new
 format version, add a new directory instead of editing an old one.
+
+\`keyring-vector.json\` is written by \`scripts/make-keyring-vector.mjs\` and
+refuses to overwrite itself without \`--force\`. Its passphrase is
+\`vector-only-passphrase\`, not the shared fixture passphrase, because it is a
+format vector rather than a vault.
 `,
 );
 

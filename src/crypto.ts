@@ -1,8 +1,10 @@
 import crypto from "node:crypto";
+import { assertStrongPassphrase } from "./passphrase-policy.js";
 
 const ALGO = "aes-256-gcm";
 const KEY_LEN = 32; // 256-bit
-const SCRYPT_N = 2 ** 15; // cost factor; MVP default, tune upward for production
+const SCRYPT_N = 2 ** 16;
+const LEGACY_SCRYPT_N = 2 ** 15;
 const SCRYPT_R = 8;
 const SCRYPT_P = 1;
 const MAX_MEM = 128 * 1024 * 1024;
@@ -55,7 +57,7 @@ export type AnyEncryptedPayload = EncryptedPayload | LegacyEncryptedPayload | Ke
 
 const LEGACY_PARAMETERS: Omit<ScryptParameters, "salt"> = {
   name: "scrypt",
-  N: SCRYPT_N,
+  N: LEGACY_SCRYPT_N,
   r: SCRYPT_R,
   p: SCRYPT_P,
 };
@@ -129,8 +131,9 @@ function headerAad(version: number, kdf: ScryptParameters): Buffer {
  * The passphrase itself is never written to disk anywhere.
  */
 export function encrypt(plaintext: string, passphrase: string): EncryptedPayload {
+  assertStrongPassphrase(passphrase);
   const salt = crypto.randomBytes(16);
-  const kdf: ScryptParameters = { ...LEGACY_PARAMETERS, salt: salt.toString("base64") };
+  const kdf: ScryptParameters = { ...LEGACY_PARAMETERS, N: SCRYPT_N, salt: salt.toString("base64") };
   const key = deriveKey(passphrase, salt, kdf);
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv(ALGO, key, iv);
@@ -219,12 +222,29 @@ export function encryptWithKey(plaintext: string, key: Buffer, name: string): Ke
   };
 }
 
-export function decryptWithKey(payload: KeyedEncryptedPayload, key: Buffer, name: string): string {
+/** The `kv` key to read with, or the ordered list to try. See `DocumentReadKey`. */
+export type KeyedReadKey = Buffer | readonly Buffer[];
+
+export function decryptWithKey(payload: KeyedEncryptedPayload, key: KeyedReadKey, name: string): string {
   if (payload.version !== KEYED_ENVELOPE_VERSION) {
     throw new Error(`Unsupported keyed envelope version: ${String(payload.version)}`);
   }
   if (payload.cipher !== ALGO) throw new Error("Unsupported cipher in encrypted envelope.");
   if (payload.keyId !== "kv") throw new Error(`Unsupported key ID in encrypted envelope: ${String(payload.keyId)}`);
+  const candidates = Buffer.isBuffer(key) ? [key] : key;
+  if (candidates.length === 0) throw new Error("No key was offered to decrypt this envelope.");
+  let failure: unknown;
+  for (const candidate of candidates) {
+    try {
+      return decryptUnderKey(payload, candidate, name);
+    } catch (error) {
+      failure = error;
+    }
+  }
+  throw failure;
+}
+
+function decryptUnderKey(payload: KeyedEncryptedPayload, key: Buffer, name: string): string {
   if (key.length !== KEY_LEN) throw new Error("A 256-bit key is required.");
   const decipher = crypto.createDecipheriv(ALGO, key, base64Bytes(payload.iv, 12, 12, "iv"));
   decipher.setAAD(keyedAad(name));

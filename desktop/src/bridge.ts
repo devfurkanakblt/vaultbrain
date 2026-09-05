@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AttachmentContent, AttachmentInfo, Backlink, Bookmark, CanvasDocument, CanvasInput, CanvasSummary, DailyNote, DeletedNote, KnowledgeGraph, NoteDocument, NoteSummary, PluginPackage, PluginSecurityPolicy, PluginSummary, PropertyRow, RevisionInfo, SavedView, SearchHit, UnlinkedMention, VaultInfo, WorkspaceState } from "./types";
+import type { AttachmentContent, AttachmentInfo, Backlink, Bookmark, CanvasDocument, CanvasInput, CanvasSummary, DailyNote, DeletedNote, KnowledgeGraph, NoteDocument, NoteSummary, PluginCallContext, PluginPackage, PluginSecurityPolicy, PluginSummary, PropertyRow, RevisionInfo, SavedView, SearchHit, SyncStatusData, UnlinkedMention, VaultInfo, WorkspaceState } from "./types";
 
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -52,7 +52,21 @@ let demoHistory: NoteDocument[] = [];
 let demoPlugins: PluginPackage[] = [];
 let demoPluginStorage: Record<string, Record<string, string>> = {};
 let demoPluginPolicy: PluginSecurityPolicy = { version: 1, restrictedMode: false, revokedSigners: [] };
+const demoPluginInstances = new Map<string, { pluginId: string; revision: number }>();
 let demoWorkspace: WorkspaceState = { version: 1, bookmarks: [], layouts: [] };
+/** Demo mode has no on-disk sync store, so it always reports not enrolled. */
+const demoSyncStatus: SyncStatusData = {
+  enrolled: false,
+  authorityFingerprint: "",
+  epoch: 0,
+  registryRevision: 0,
+  registryVersion: 0,
+  devices: [],
+  checkpoint: null,
+  changeCount: 0,
+  appliedObjectCount: 0,
+  readable: true,
+};
 
 const WIKILINK = /\[\[[^\]]*\]\]/gu;
 
@@ -142,6 +156,7 @@ export const vaultBridge = {
   },
   async lock(): Promise<void> {
     if (isTauri) return call<void>("lock_vault");
+    demoPluginInstances.clear();
   },
   async listNotes(): Promise<NoteSummary[]> {
     if (isTauri) return call<NoteSummary[]>("list_notes");
@@ -504,6 +519,57 @@ export const vaultBridge = {
     if (isTauri) return call<PluginSummary[]>("list_plugins");
     return demoPlugins.map(summarizeDemoPlugin).sort((left, right) => left.name.localeCompare(right.name));
   },
+  async authorizePluginInstance(pluginId: string, revision: number): Promise<{ instanceToken: string }> {
+    if (isTauri) return call<{ instanceToken: string }>("authorize_plugin_instance", { pluginId, revision });
+    const summary = summarizeDemoPlugin(
+      demoPlugins.find((plugin) => plugin.id === pluginId) ?? (() => { throw new Error("Plugin not found."); })()
+    );
+    if (!summary.enabled || summary.revision !== revision) throw new Error("Plugin authorization is stale or disabled.");
+    const instanceToken = crypto.randomUUID();
+    demoPluginInstances.set(instanceToken, { pluginId, revision });
+    return { instanceToken };
+  },
+  async pluginCall(context: PluginCallContext, method: string, params: Record<string, unknown>): Promise<unknown> {
+    if (isTauri) return call<unknown>("plugin_call", { ...context, method, params });
+    const authorization = demoPluginInstances.get(context.instanceToken);
+    const plugin = demoPlugins.find((entry) => entry.id === context.pluginId);
+    if (!authorization || authorization.pluginId !== context.pluginId || authorization.revision !== context.revision || !plugin) {
+      throw new Error("Invalid plugin instance authorization.");
+    }
+    const summary = summarizeDemoPlugin(plugin);
+    if (!summary.enabled || summary.revision !== context.revision) throw new Error("Plugin authorization was revoked or changed.");
+    const reference = String(params.reference ?? "");
+    switch (method) {
+      case "notes.list": return vaultBridge.listNotes();
+      case "notes.metadata": {
+        const note = await vaultBridge.getNote(reference);
+        const { body: _body, ...metadata } = note;
+        return metadata;
+      }
+      case "notes.read": return vaultBridge.getNote(reference);
+      case "notes.create": return vaultBridge.createNote(String(params.path ?? ""), String(params.title ?? ""));
+      case "notes.update": {
+        const note = await vaultBridge.getNote(reference);
+        return vaultBridge.saveNote({ ...note, body: String(params.body ?? "") });
+      }
+      case "search.query": return vaultBridge.search(String(params.query ?? ""));
+      case "canvas.list": return vaultBridge.canvases();
+      case "canvas.read": return vaultBridge.getCanvas(reference);
+      case "canvas.save": return vaultBridge.saveCanvas(params.input as CanvasInput);
+      case "attachments.list": return vaultBridge.attachments();
+      case "attachments.read": return vaultBridge.readAttachment(String(params.id ?? ""));
+      case "storage.get": {
+        const stored = await vaultBridge.pluginStorage(context.pluginId);
+        return stored[String(params.key ?? "")] ?? null;
+      }
+      case "storage.set": {
+        const stored = await vaultBridge.pluginStorage(context.pluginId);
+        await vaultBridge.savePluginStorage(context.pluginId, { ...stored, [String(params.key ?? "")]: String(params.value ?? "") });
+        return null;
+      }
+      default: throw new Error(`Unknown privileged plugin method: ${method}`);
+    }
+  },
   async getPlugin(reference: string): Promise<PluginPackage> {
     if (isTauri) return call<PluginPackage>("get_plugin", { reference });
     const plugin = demoPlugins.find((item) => item.id === reference || item.manifest.id === reference);
@@ -623,6 +689,20 @@ export const vaultBridge = {
     if (!entry) throw new Error(`Attachment not found: ${id}`);
     demoAttachments = demoAttachments.filter((item) => item.info.id !== id);
     return structuredClone(entry.info);
+  },
+  /**
+   * Read-only visibility into the CLI-owned sync store. There is no mutating
+   * counterpart here by design -- enroll, revoke, import, apply and relay
+   * stay CLI-only so the sync protocol keeps exactly one authoritative
+   * implementation.
+   */
+  async syncStatus(): Promise<SyncStatusData> {
+    if (isTauri) return call<SyncStatusData>("sync_status");
+    return structuredClone(demoSyncStatus);
+  },
+  async syncVerifyRegistry(): Promise<boolean> {
+    if (isTauri) return call<boolean>("sync_verify_registry");
+    return demoSyncStatus.enrolled;
   },
 };
 

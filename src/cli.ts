@@ -50,30 +50,54 @@ import { generatePluginSigningKey, signPluginPackage } from "./plugin-signatures
 import { DocumentVault, type PropertyValue } from "./documents.js";
 import { OllamaLocalModelAdapter } from "./semantic.js";
 import { importObsidianVault } from "./obsidian-import.js";
-import { writeFileAtomic } from "./fs-safe.js";
+import { readTextFileLimited, writeFileAtomic } from "./fs-safe.js";
 import {
   SyncChangeLog,
+  SyncDeviceManager,
   SyncedDocumentVault,
+  syncRegistryFingerprint,
   type EncryptedSyncChange,
+  type EncryptedSyncDeviceRegistry,
+  type EncryptedSyncFreshnessCheckpoint,
+  type SyncChange,
   type SyncJson,
   type SyncMutation,
   type SyncObjectType,
   type SyncOperation,
 } from "./sync.js";
-import { createFromTemplate, openDailyNote, parseLocalDate, type TemplateVariables } from "./templates.js";
+import { attachmentBlobIds, startSyncRelay, SyncRelayClient } from "./sync-relay.js";
+import { MAX_BLOB_BYTES, SyncBlobStore } from "./sync-blobs.js";
+import {
+  createFromTemplate,
+  openDailyNote,
+  parseLocalDate,
+  type TemplateVariables,
+} from "./templates.js";
+import { FORMAT_COMPATIBILITY, VAULT_FORMAT_VERSION } from "./format-version.js";
 
 const program = new Command();
 
 function openDocumentVault(vaultDir: string, passphrase: string): DocumentVault {
   const deviceId = program.opts().syncDevice as string | undefined;
-  return deviceId ? new SyncedDocumentVault(vaultDir, passphrase, deviceId) : new DocumentVault(vaultDir, passphrase);
+  if (deviceId && !program.opts().experimentalTrustedSync) {
+    throw new Error(
+      "Sync is experimental and trusted-device/local-transport only. Re-run with --experimental-trusted-sync to acknowledge this boundary."
+    );
+  }
+  return deviceId
+    ? new SyncedDocumentVault(vaultDir, passphrase, deviceId)
+    : new DocumentVault(vaultDir, passphrase);
 }
 
 program
   .name("vbrain")
   .description("Vault Brain — an .env-style, least-exposure personal data store for the AI age.")
   .option("--vault <dir>", "vault directory", DEFAULT_VAULT_DIR)
-  .option("--sync-device <uuid>", "automatically capture document writes for this sync device");
+  .option("--sync-device <uuid>", "automatically capture document writes for this sync device")
+  .option(
+    "--experimental-trusted-sync",
+    "acknowledge the experimental sync format and trusted-device boundary"
+  );
 
 program
   .command("init")
@@ -105,7 +129,7 @@ program
     appendAudit(dir, { actor: "cli-direct-write", file, key }, passphrase);
     buildSchema(dir, passphrase);
     console.log(`Stored ${key} in ${file}.kv.enc (encrypted).`);
-    console.log(`Safe, value-free schema refreshed.`);
+    console.log(`Encrypted, value-free schema refreshed.`);
   });
 
 program
@@ -125,15 +149,16 @@ program
 
 program
   .command("timeline")
-  .description("browse journal notes by date range — safe index only, no decryption")
+  .description("browse journal notes by date range after unlocking the encrypted catalog")
   .option("--category <file>", "limit to one category")
   .option("--from <iso-date>", "inclusive lower bound")
   .option("--to <iso-date>", "inclusive upper bound")
-  .action((opts) => {
+  .action(async (opts) => {
     const dir = program.opts().vault;
-    const schema = readSchema(dir);
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const schema = readSchema(dir, passphrase);
     if (!schema) {
-      console.log("No schema.json yet — run 'vbrain index' first.");
+      console.log("No encrypted schema yet — run 'vbrain index' first.");
       return;
     }
     const hits = filterNotesByDate(schema, { file: opts.category, from: opts.from, to: opts.to });
@@ -164,11 +189,12 @@ program
 program
   .command("list")
   .description("show all key names + descriptions (no values) — safe to read directly")
-  .action(() => {
+  .action(async () => {
     const dir = program.opts().vault;
-    const schema = readSchema(dir);
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const schema = readSchema(dir, passphrase);
     if (!schema) {
-      console.log("No schema.json yet — run 'vbrain index' first.");
+      console.log("No encrypted schema yet — run 'vbrain index' first.");
       return;
     }
     for (const [file, entries] of Object.entries(schema.files)) {
@@ -179,12 +205,13 @@ program
 
 program
   .command("search <query>")
-  .description("fuzzy-search key names + descriptions (fast path, no decryption needed)")
-  .action((query) => {
+  .description("fuzzy-search key names + descriptions in the encrypted fast-path catalog")
+  .action(async (query) => {
     const dir = program.opts().vault;
-    const schema = readSchema(dir);
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const schema = readSchema(dir, passphrase);
     if (!schema) {
-      console.log("No schema.json yet — run 'vbrain index' first.");
+      console.log("No encrypted schema yet — run 'vbrain index' first.");
       return;
     }
     const hits = searchSchema(schema, query);
@@ -197,13 +224,13 @@ program
 
 program
   .command("index")
-  .description("rebuild schema.json (key names + descriptions only, zero secret values) across the vault")
+  .description("rebuild the encrypted key-name and description catalog across the vault")
   .action(async () => {
     const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
     const dir = program.opts().vault;
     const schema = buildSchema(dir, passphrase);
     const total = Object.values(schema.files).reduce((n, arr) => n + arr.length, 0);
-    console.log(`Indexed ${total} keys across ${listVaultFiles(dir).length} files -> ${dir}/schema.json`);
+    console.log(`Indexed ${total} keys across ${listVaultFiles(dir).length} files -> ${dir}/schema.enc`);
   });
 
 const docs = program.command("docs").description("encrypted Markdown documents, search and knowledge links");
@@ -698,10 +725,521 @@ const sync = program
   .command("sync")
   .description("encrypted immutable change log and deterministic conflict inspection");
 
+function relayToken(): string {
+  // SBRAIN_RELAY_TOKEN was the public name before the vbrain rename. Kept as a
+  // read-only compatibility alias, the same way `getPassphrase` keeps
+  // SBRAIN_PASSPHRASE, so an existing relay deployment does not break.
+  const token = process.env.VBRAIN_RELAY_TOKEN ?? process.env.SBRAIN_RELAY_TOKEN;
+  if (!token) throw new Error("Set VBRAIN_RELAY_TOKEN to a random secret containing at least 32 bytes.");
+  if (Buffer.byteLength(token, "utf8") < 32) {
+    throw new Error("VBRAIN_RELAY_TOKEN must contain at least 32 bytes.");
+  }
+  return token;
+}
+
+/** The enrollment authority fingerprint doubles as the relay's vault ID. */
+function relayVaultId(manager: SyncDeviceManager): string {
+  const vaultId = manager.fingerprint();
+  if (!vaultId) throw new Error("Initialize sync device enrollment before using a relay.");
+  return vaultId;
+}
+
+/**
+ * Every attachment blob the given changes reference, de-duplicated and in
+ * change order. A change that is not a blob-form attachment contributes none.
+ */
+function referencedBlobIds(changes: readonly SyncChange[]): string[] {
+  return [...new Set(changes.flatMap((change) => attachmentBlobIds(change)))];
+}
+
+/**
+ * Ask the relay whether it already holds a blob. `SyncRelayClient` exposes no
+ * such probe on purpose — the blob collection has no list route — so
+ * `sync blobs prune` asks over the wire itself. Constructing the client first
+ * reuses its URL, token and vault-ID validation before any request is made.
+ */
+sync.hook("preAction", () => {
+  if (!program.opts().experimentalTrustedSync) {
+    throw new Error(
+      "Sync format compatibility is experimental and enrolled devices remain trusted. Re-run with --experimental-trusted-sync to acknowledge this boundary."
+    );
+  }
+});
+
 sync
   .command("device-id")
-  .description("generate a new local device identity (enrollment is added in the next slice)")
+  .description("generate a UUID for legacy trusted-device sync")
   .action(() => console.log(crypto.randomUUID()));
+
+const syncDevices = sync
+  .command("devices")
+  .description("owner-signed device enrollment, registry exchange and revocation");
+
+syncDevices
+  .command("init <name>")
+  .description("create the enrollment authority and enroll this first device")
+  .option("--device-id <uuid>", "use an existing local device UUID")
+  .action(async (name, opts) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const manager = new SyncDeviceManager(dir, passphrase);
+    try {
+      const registry = manager.initializeOwner(name, opts.deviceId);
+      console.log(
+        JSON.stringify(
+          {
+            deviceId: registry.body.devices[0].certificate.deviceId,
+            authorityFingerprint: manager.fingerprint(),
+            registryRevision: registry.body.revision,
+            legacyChanges: registry.body.legacyChangeIds.length,
+          },
+          null,
+          2,
+        ),
+      );
+    } finally {
+      manager.close();
+    }
+  });
+
+syncDevices
+  .command("request <name>")
+  .description("create a proof-of-possession enrollment request and retain its private key locally")
+  .option("--device-id <uuid>", "use an existing local device UUID")
+  .action(async (name, opts) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const manager = new SyncDeviceManager(dir, passphrase);
+    try {
+      process.stdout.write(`${JSON.stringify(manager.createEnrollmentRequest(name, opts.deviceId), null, 2)}\n`);
+    } finally {
+      manager.close();
+    }
+  });
+
+syncDevices
+  .command("enroll <request>")
+  .description("verify and owner-sign a device enrollment request")
+  .action(async (source) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const parsed: unknown = JSON.parse(
+      readTextFileLimited(path.resolve(source), 64 * 1024, "Sync enrollment request"),
+    );
+    const manager = new SyncDeviceManager(dir, passphrase);
+    try {
+      const registry = manager.enroll(parsed);
+      const requestId = (parsed as { deviceId?: unknown }).deviceId;
+      const enrolled = registry.body.devices.find(
+        (record) => record.certificate.deviceId === requestId,
+      );
+      if (!enrolled) throw new Error("Enrolled device is missing from the updated registry.");
+      console.log(
+        `Enrolled ${enrolled.certificate.name} (${enrolled.certificate.deviceId}); registry revision ${registry.body.revision}.`,
+      );
+    } finally {
+      manager.close();
+    }
+  });
+
+syncDevices
+  .command("list")
+  .description("list enrolled and revoked device certificates")
+  .action(async () => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const manager = new SyncDeviceManager(dir, passphrase);
+    try {
+      const registry = manager.state();
+      if (!registry) throw new Error("Sync device enrollment is not initialized.");
+      console.log(
+        `Authority ${manager.fingerprint()} — registry revision ${registry.body.revision}, epoch ${registry.body.epoch}`,
+      );
+      for (const record of registry.body.devices) {
+        const state = record.revokedAt ? `revoked-after=${record.revokedAfterSequence}` : "active";
+        console.log(
+          `${record.certificate.deviceId}  ${record.certificate.name}  serial=${record.certificate.serial}  epoch=${record.certificate.epoch}  ${state}`,
+        );
+      }
+    } finally {
+      manager.close();
+    }
+  });
+
+syncDevices
+  .command("export")
+  .description("write the encrypted owner-signed device registry bundle to stdout")
+  .action(async () => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const manager = new SyncDeviceManager(dir, passphrase);
+    try {
+      process.stdout.write(`${JSON.stringify(manager.exportRegistry(), null, 2)}\n`);
+    } finally {
+      manager.close();
+    }
+  });
+
+syncDevices
+  .command("import <source>")
+  .description("verify and install a newer owner-signed device registry")
+  .option("--authority <sha256>", "expected authority fingerprint for the first import")
+  .action(async (source, opts) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const parsed: unknown = JSON.parse(
+      readTextFileLimited(path.resolve(source), 12 * 1024 * 1024, "Sync device registry bundle"),
+    );
+    const manager = new SyncDeviceManager(dir, passphrase);
+    try {
+      const registry = manager.importRegistry(
+        parsed as EncryptedSyncDeviceRegistry,
+        opts.authority,
+      );
+      console.log(`Installed device registry revision ${registry.body.revision}.`);
+    } finally {
+      manager.close();
+    }
+  });
+
+syncDevices
+  .command("revoke <device-id>")
+  .description("owner-sign a revocation at the last observed device sequence")
+  .action(async (deviceId) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const log = new SyncChangeLog(dir, passphrase);
+    let cutoff: number;
+    try {
+      cutoff = Math.max(
+        0,
+        ...log.changes().filter((change) => change.deviceId === deviceId).map((change) => change.sequence),
+      );
+    } finally {
+      log.close();
+    }
+    const manager = new SyncDeviceManager(dir, passphrase);
+    try {
+      const registry = manager.revoke(deviceId, cutoff);
+      console.log(
+        `Revoked ${deviceId} after sequence ${cutoff}; registry revision ${registry.body.revision}, rotated to epoch ${registry.body.epoch}.`,
+      );
+      console.log(
+        "Export the registry to every remaining device so they adopt the new epoch key; changes written before this rotation stay readable to the revoked device.",
+      );
+    } finally {
+      manager.close();
+    }
+  });
+
+const syncCheckpoint = sync
+  .command("checkpoint")
+  .description("owner-signed freshness checkpoints for relay rollback detection");
+
+syncCheckpoint
+  .command("create")
+  .description("sign and pin the complete currently verified sync history")
+  .action(async () => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const log = new SyncChangeLog(dir, passphrase);
+    let changes;
+    try {
+      changes = log.changes();
+    } finally {
+      log.close();
+    }
+    const manager = new SyncDeviceManager(dir, passphrase);
+    try {
+      const checkpoint = manager.createCheckpoint(changes);
+      console.log(
+        `Created checkpoint ${checkpoint.id} at sequence ${checkpoint.body.sequence} for ${checkpoint.body.changeCount} changes.`,
+      );
+    } finally {
+      manager.close();
+    }
+  });
+
+syncCheckpoint
+  .command("export")
+  .description("write the encrypted signed checkpoint bundle to stdout")
+  .action(async () => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const manager = new SyncDeviceManager(dir, passphrase);
+    try {
+      process.stdout.write(`${JSON.stringify(manager.exportCheckpoint(), null, 2)}\n`);
+    } finally {
+      manager.close();
+    }
+  });
+
+syncCheckpoint
+  .command("import <source>")
+  .description("verify and pin a checkpoint against the complete local sync history")
+  .option("--expected <sha256>", "expected checkpoint ID for the first import")
+  .action(async (source, opts) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const parsed: unknown = JSON.parse(
+      readTextFileLimited(path.resolve(source), 2 * 1024 * 1024, "Sync freshness checkpoint bundle"),
+    );
+    const log = new SyncChangeLog(dir, passphrase);
+    let changes;
+    try {
+      changes = log.changes();
+    } finally {
+      log.close();
+    }
+    const manager = new SyncDeviceManager(dir, passphrase);
+    try {
+      const checkpoint = manager.importCheckpoint(
+        parsed as EncryptedSyncFreshnessCheckpoint,
+        changes,
+        opts.expected,
+      );
+      console.log(`Pinned freshness checkpoint ${checkpoint.id} at sequence ${checkpoint.body.sequence}.`);
+    } finally {
+      manager.close();
+    }
+  });
+
+syncCheckpoint
+  .command("verify")
+  .description("prove the pinned checkpoint is present in the local causal history")
+  .action(async () => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const log = new SyncChangeLog(dir, passphrase);
+    let changes;
+    try {
+      changes = log.changes();
+    } finally {
+      log.close();
+    }
+    const manager = new SyncDeviceManager(dir, passphrase);
+    try {
+      const checkpoint = manager.verifyCheckpoint(changes);
+      console.log(
+        `Verified checkpoint ${checkpoint.id}: ${checkpoint.body.changeCount} committed changes are present.`,
+      );
+    } finally {
+      manager.close();
+    }
+  });
+
+const syncRelay = sync
+  .command("relay")
+  .description("authenticated opaque relay transport for encrypted sync objects");
+
+syncRelay
+  .command("serve <storage>")
+  .description("run a self-hosted relay; the bearer token is read from VBRAIN_RELAY_TOKEN")
+  .option("--host <address>", "listen address", "127.0.0.1")
+  .option("--port <number>", "listen port", "8787")
+  .action(async (storage, opts) => {
+    const port = Number(opts.port);
+    if (!Number.isSafeInteger(port) || port < 0 || port > 65_535) {
+      throw new Error("Relay port must be an integer between 0 and 65535.");
+    }
+    const relay = await startSyncRelay({
+      storageDir: path.resolve(storage),
+      token: relayToken(),
+      host: opts.host,
+      port,
+    });
+    console.log(`Sync relay listening at ${relay.url}.`);
+    console.log("The relay stores opaque encrypted objects and cannot recover a lost vault key.");
+    await new Promise<void>((resolve, reject) => {
+      let closing = false;
+      const stop = (): void => {
+        if (closing) return;
+        closing = true;
+        void relay.close().then(resolve, reject);
+      };
+      process.once("SIGINT", stop);
+      process.once("SIGTERM", stop);
+    });
+  });
+
+syncRelay
+  .command("push <url>")
+  .description("upload encrypted changes, device registry and pinned checkpoint")
+  .action(async (url) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const manager = new SyncDeviceManager(dir, passphrase);
+    const log = new SyncChangeLog(dir, passphrase);
+    try {
+      const client = new SyncRelayClient(url, relayToken(), relayVaultId(manager), dir);
+      // Passing the decrypted changes is what makes `uploadChanges` send each
+      // attachment's blobs first, so the relay never advertises a change whose
+      // bytes no peer can fetch.
+      const changes = await client.uploadChanges(log.envelopes(), log.changes());
+      const registryArtifact = await client.uploadArtifact("registry", manager.exportRegistry());
+      let checkpointArtifact: string | null = null;
+      if (manager.checkpoint()) {
+        checkpointArtifact = await client.uploadArtifact("checkpoint", manager.exportCheckpoint());
+      }
+      console.log(JSON.stringify({ changes, registryArtifact, checkpointArtifact }, null, 2));
+    } finally {
+      log.close();
+      manager.close();
+    }
+  });
+
+syncRelay
+  .command("pull <url>")
+  .description("verify and import encrypted relay state without trusting the relay")
+  .option("--authority <sha256>", "expected enrollment authority on the first pull")
+  .option("--checkpoint <sha256>", "expected freshness checkpoint on the first pull")
+  .action(async (url, opts) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const manager = new SyncDeviceManager(dir, passphrase);
+    let log: SyncChangeLog | undefined;
+    try {
+      const currentAuthority = manager.fingerprint();
+      const expectedAuthority = currentAuthority ?? opts.authority;
+      if (!expectedAuthority || !/^[a-f0-9]{64}$/u.test(expectedAuthority)) {
+        throw new Error("First relay pull requires --authority with the expected 64-character fingerprint.");
+      }
+      const client = new SyncRelayClient(url, relayToken(), expectedAuthority, dir);
+      const registryBundles = await client.downloadArtifacts("registry");
+      const registries = registryBundles
+        .map((value) => ({ value, registry: manager.inspectRegistry(value) }))
+        .filter(({ registry }) => syncRegistryFingerprint(registry) === expectedAuthority)
+        .sort((left, right) => right.registry.body.revision - left.registry.body.revision);
+      const newest = registries[0];
+      if (!newest) throw new Error("Relay has no registry for the expected enrollment authority.");
+      manager.importRegistry(newest.value, currentAuthority ? undefined : expectedAuthority);
+
+      log = new SyncChangeLog(dir, passphrase);
+      const imported = log.import(await client.downloadChanges());
+      const changes = log.changes();
+      // The symmetric half of the push ordering: an admitted attachment change
+      // is useless until its sealed chunks are on disk, so fetch them now.
+      const blobs = await client.pullBlobs(referencedBlobIds(changes));
+
+      const checkpointBundles = await client.downloadArtifacts("checkpoint");
+      const checkpoints = checkpointBundles
+        .map((value) => ({ value, checkpoint: manager.inspectCheckpoint(value) }))
+        .sort((left, right) => left.checkpoint.body.sequence - right.checkpoint.body.sequence);
+      let pinned = manager.checkpoint();
+      if (!pinned && opts.checkpoint) {
+        if (!/^[a-f0-9]{64}$/u.test(opts.checkpoint)) {
+          throw new Error("Expected checkpoint must be a 64-character lowercase hexadecimal ID.");
+        }
+        const expected = checkpoints.find(({ checkpoint }) => checkpoint.id === opts.checkpoint);
+        if (!expected) throw new Error("Relay does not contain the expected freshness checkpoint.");
+        pinned = manager.importCheckpoint(expected.value, changes, opts.checkpoint);
+      } else if (pinned) {
+        while (true) {
+          const extensions = checkpoints.filter(
+            ({ checkpoint }) =>
+              checkpoint.body.sequence === pinned!.body.sequence + 1 &&
+              checkpoint.body.previousCheckpoint === pinned!.id,
+          );
+          if (extensions.length > 1) throw new Error("Relay contains a forked freshness checkpoint sequence.");
+          if (extensions.length === 0) break;
+          pinned = manager.importCheckpoint(extensions[0].value, changes);
+        }
+      }
+      if (pinned) manager.verifyCheckpoint(changes);
+      console.log(
+        JSON.stringify(
+          {
+            registryRevision: newest.registry.body.revision,
+            changes: imported,
+            blobs,
+            checkpoint: pinned?.id ?? null,
+            checkpointWarning: pinned ? null : "No checkpoint was pinned; use --checkpoint on the first pull.",
+          },
+          null,
+          2,
+        ),
+      );
+    } finally {
+      log?.close();
+      manager.close();
+    }
+  });
+
+const syncBlobs = sync
+  .command("blobs")
+  .description("staged sealed attachment chunks that travel beside their changes");
+
+syncBlobs
+  .command("status")
+  .description("report present and missing chunks for every attachment change in the log")
+  .action(async () => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const log = new SyncChangeLog(dir, passphrase);
+    const store = new SyncBlobStore(dir);
+    try {
+      for (const change of log.changes()) {
+        const blobs = attachmentBlobIds(change);
+        if (blobs.length === 0) continue;
+        const missing = store.missing(blobs).length;
+        console.log(`${change.mutation.objectId} ${blobs.length - missing} present, ${missing} missing`);
+      }
+    } finally {
+      log.close();
+    }
+  });
+
+syncBlobs
+  .command("fetch <url>")
+  .description("stage only the attachment chunks still missing for already-admitted changes")
+  .action(async (url) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const manager = new SyncDeviceManager(dir, passphrase);
+    const log = new SyncChangeLog(dir, passphrase);
+    try {
+      const client = new SyncRelayClient(url, relayToken(), relayVaultId(manager), dir);
+      const store = new SyncBlobStore(dir);
+      const referenced = referencedBlobIds(log.changes());
+      const missing = store.missing(referenced);
+      const result = await client.pullBlobs(missing);
+      console.log(
+        `Fetched ${result.fetched} blob(s); ${referenced.length - missing.length} already present.`,
+      );
+    } finally {
+      log.close();
+      manager.close();
+    }
+  });
+
+syncBlobs
+  .command("prune <url>")
+  .description("delete staged attachment chunks the relay confirms it already holds")
+  .action(async (url) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const manager = new SyncDeviceManager(dir, passphrase);
+    const log = new SyncChangeLog(dir, passphrase);
+    try {
+      const client = new SyncRelayClient(url, relayToken(), relayVaultId(manager), dir);
+      const store = new SyncBlobStore(dir);
+      let pruned = 0;
+      let kept = 0;
+      for (const id of referencedBlobIds(log.changes())) {
+        if (!store.has(id)) continue;
+        // A blob the relay does not hold is never dropped locally: that would
+        // leave the change unappliable on every device that still needs it.
+        if (await client.hasBlob(id)) {
+          store.remove(id);
+          pruned += 1;
+        } else kept += 1;
+      }
+      console.log(`Pruned ${pruned} staged blob(s); kept ${kept} the relay does not hold.`);
+    } finally {
+      log.close();
+      manager.close();
+    }
+  });
 
 sync
   .command("append <device-id> <object-type> <object-id> <operation>")
@@ -755,12 +1293,35 @@ sync
 sync
   .command("export")
   .description("write relay-safe opaque encrypted envelopes as JSON to stdout")
-  .action(async () => {
+  .option("--bundle <dir>", "write changes.json plus blobs/<id> into a directory instead of stdout")
+  .action(async (opts) => {
     const dir = program.opts().vault;
     const passphrase = await getPassphrase({ vaultDir: dir });
     const log = new SyncChangeLog(dir, passphrase);
     try {
-      process.stdout.write(`${JSON.stringify(log.envelopes(), null, 2)}\n`);
+      const envelopes = log.envelopes();
+      const serialized = `${JSON.stringify(envelopes, null, 2)}\n`;
+      if (!opts.bundle) {
+        process.stdout.write(serialized);
+        return;
+      }
+      // A bundle is the relay-independent transport: the same opaque
+      // ciphertext, plus the sealed chunks the envelopes no longer carry.
+      const bundleDir = path.resolve(opts.bundle);
+      const store = new SyncBlobStore(dir);
+      const ids = referencedBlobIds(log.changes());
+      const absent = store.missing(ids);
+      if (absent.length > 0) {
+        throw new Error(
+          `${absent.length} of ${ids.length} attachment chunks are missing; run sync blobs fetch before exporting a bundle.`,
+        );
+      }
+      fs.mkdirSync(path.join(bundleDir, "blobs"), { recursive: true, mode: 0o700 });
+      for (const id of ids) {
+        writeFileAtomic(path.join(bundleDir, "blobs", id), store.read(id), { mode: 0o600 });
+      }
+      writeFileAtomic(path.join(bundleDir, "changes.json"), serialized, { mode: 0o600 });
+      console.log(`Exported ${envelopes.length} envelope(s) and ${ids.length} blob(s) to ${bundleDir}.`);
     } finally {
       log.close();
     }
@@ -768,15 +1329,40 @@ sync
 
 sync
   .command("import <source>")
-  .description("verify a complete batch, then idempotently admit encrypted envelopes from another device")
+  .description(
+    "verify a complete batch, then idempotently admit encrypted envelopes from a JSON file or an exported bundle directory",
+  )
   .action(async (source) => {
     const dir = program.opts().vault;
     const passphrase = await getPassphrase({ vaultDir: dir });
-    const parsed: unknown = JSON.parse(fs.readFileSync(path.resolve(source), "utf8"));
+    const resolved = path.resolve(source);
+    const bundle = fs.statSync(resolved).isDirectory();
+    let staged = 0;
+    if (bundle) {
+      // Stage the sealed chunks first: `SyncBlobStore.put` re-verifies each
+      // SHA-256, so a tampered bundle fails before any envelope is admitted.
+      const store = new SyncBlobStore(dir);
+      const blobsDir = path.join(resolved, "blobs");
+      for (const name of fs.existsSync(blobsDir) ? fs.readdirSync(blobsDir).sort() : []) {
+        if (!/^[0-9a-f]{64}$/u.test(name)) {
+          throw new Error(`A sync bundle blob filename must be 64 lowercase hexadecimal characters: ${name}`);
+        }
+        const blobPath = path.join(blobsDir, name);
+        if (fs.statSync(blobPath).size > MAX_BLOB_BYTES) {
+          throw new Error(`Sync bundle blob ${name} exceeds its 2 MiB limit.`);
+        }
+        store.put(name, fs.readFileSync(blobPath));
+        staged += 1;
+      }
+    }
+    const parsed: unknown = JSON.parse(
+      fs.readFileSync(bundle ? path.join(resolved, "changes.json") : resolved, "utf8"),
+    );
     if (!Array.isArray(parsed)) throw new Error("Sync import must contain a JSON array of envelopes.");
     const log = new SyncChangeLog(dir, passphrase);
     try {
       const result = log.import(parsed as EncryptedSyncChange[]);
+      if (bundle) console.log(`Staged ${staged} attachment blob(s).`);
       console.log(`Imported ${result.imported}; already present ${result.existing}.`);
     } finally {
       log.close();
@@ -801,11 +1387,53 @@ sync
   });
 
 sync
-  .command("resolve <object-type> <object-id>")
-  .description("show the deterministic winner and every preserved concurrent branch")
-  .action(async (objectType, objectId) => {
+  .command("conflicts")
+  .description("list every object with concurrent unresolved heads without printing snapshot values")
+  .action(async () => {
     const dir = program.opts().vault;
     const passphrase = await getPassphrase({ vaultDir: dir });
+    const log = new SyncChangeLog(dir, passphrase);
+    try {
+      const conflicts = log.conflicts().map((resolution) => ({
+        objectType: resolution.objectType,
+        objectId: resolution.objectId,
+        heads: resolution.heads,
+      }));
+      console.log(JSON.stringify(conflicts, null, 2));
+    } finally {
+      log.close();
+    }
+  });
+
+sync
+  .command("resolve <object-type> <object-id>")
+  .description("inspect a conflict, select a preserved head, or safely merge a plugin policy")
+  .option("--head <change-id>", "resolve by selecting one of the current conflict heads")
+  .option("--safe", "apply the built-in strengthening-only merge for a plugin policy conflict")
+  .action(async (objectType, objectId, opts) => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    if (opts.head || opts.safe) {
+      const deviceId = program.opts().syncDevice as string | undefined;
+      if (!deviceId) throw new Error("Resolving a conflict requires --sync-device <uuid>.");
+      const vault = new SyncedDocumentVault(dir, passphrase, deviceId);
+      try {
+        console.log(
+          JSON.stringify(
+            vault.resolveConflict(
+              objectType as SyncObjectType,
+              objectId,
+              opts.head as string | undefined,
+            ),
+            null,
+            2,
+          ),
+        );
+      } finally {
+        vault.lock();
+      }
+      return;
+    }
     const log = new SyncChangeLog(dir, passphrase);
     try {
       console.log(JSON.stringify(log.resolve(objectType as SyncObjectType, objectId), null, 2));
@@ -816,16 +1444,16 @@ sync
 
 sync
   .command("apply <object-type> <object-id>")
-  .description("apply one conflict-free note, canvas or attachment history to live vault storage")
+  .description("apply one conflict-free supported object history to live vault storage")
   .action(async (objectType, objectId) => {
-    if (objectType !== "note" && objectType !== "canvas" && objectType !== "attachment") {
-      throw new Error("Sync apply supports note, canvas and attachment objects only.");
+    if (!["note", "canvas", "attachment", "plugin", "vault"].includes(objectType)) {
+      throw new Error("Unsupported sync object type.");
     }
     const dir = program.opts().vault;
     const passphrase = await getPassphrase({ vaultDir: dir });
     const vault = new SyncedDocumentVault(dir, passphrase);
     try {
-      const result = vault.applyResolved(objectType, objectId);
+      const result = vault.applyResolved(objectType as SyncObjectType, objectId);
       console.log(
         result.conflict
           ? `Cannot apply ${objectType}:${objectId}; ${result.heads!.length} unresolved sync heads remain.`
@@ -1086,7 +1714,7 @@ plugins
     if (mode !== "on" && mode !== "off") throw new Error("Restricted mode must be 'on' or 'off'.");
     const dir = program.opts().vault;
     const passphrase = await getPassphrase({ vaultDir: dir });
-    new DocumentVault(dir, passphrase).setPluginRestrictedMode(mode === "on");
+    openDocumentVault(dir, passphrase).setPluginRestrictedMode(mode === "on");
     console.log(`Restricted mode is ${mode}.`);
   });
 
@@ -1096,7 +1724,7 @@ plugins
   .action(async (reference) => {
     const dir = program.opts().vault;
     const passphrase = await getPassphrase({ vaultDir: dir });
-    const policy = new DocumentVault(dir, passphrase).revokePluginSigner(reference);
+    const policy = openDocumentVault(dir, passphrase).revokePluginSigner(reference);
     console.log(`Signer revoked. ${policy.revokedSigners.length} signer(s) are now blocked.`);
   });
 
@@ -1106,7 +1734,7 @@ plugins
   .action(async (keyId) => {
     const dir = program.opts().vault;
     const passphrase = await getPassphrase({ vaultDir: dir });
-    const policy = new DocumentVault(dir, passphrase).restorePluginSigner(keyId);
+    const policy = openDocumentVault(dir, passphrase).restorePluginSigner(keyId);
     console.log(`Signer restored. ${policy.revokedSigners.length} signer(s) remain blocked.`);
   });
 
@@ -1117,7 +1745,7 @@ plugins
   .action(async (manifestPath, sourcePath, opts) => {
     const dir = program.opts().vault;
     const passphrase = await getPassphrase({ vaultDir: dir });
-    const installed = new DocumentVault(dir, passphrase).installPlugin({
+    const installed = openDocumentVault(dir, passphrase).installPlugin({
       manifest: JSON.parse(fs.readFileSync(manifestPath, "utf8")),
       source: fs.readFileSync(sourcePath, "utf8"),
       enabled: opts.enable === true,
@@ -1137,7 +1765,7 @@ plugins
   .action(async (reference) => {
     const dir = program.opts().vault;
     const passphrase = await getPassphrase({ vaultDir: dir });
-    const changed = new DocumentVault(dir, passphrase).setPluginEnabled(reference, true);
+    const changed = openDocumentVault(dir, passphrase).setPluginEnabled(reference, true);
     console.log(`${changed.name} is enabled.`);
   });
 
@@ -1147,7 +1775,7 @@ plugins
   .action(async (reference) => {
     const dir = program.opts().vault;
     const passphrase = await getPassphrase({ vaultDir: dir });
-    const changed = new DocumentVault(dir, passphrase).setPluginEnabled(reference, false);
+    const changed = openDocumentVault(dir, passphrase).setPluginEnabled(reference, false);
     console.log(`${changed.name} is disabled.`);
   });
 
@@ -1157,7 +1785,7 @@ plugins
   .action(async (reference) => {
     const dir = program.opts().vault;
     const passphrase = await getPassphrase({ vaultDir: dir });
-    const removed = new DocumentVault(dir, passphrase).removePlugin(reference);
+    const removed = openDocumentVault(dir, passphrase).removePlugin(reference);
     console.log(`Removed ${removed.name}.`);
   });
 
@@ -1196,15 +1824,15 @@ program
 program
   .command("mcp")
   .description("MODE 2 — start the MCP server for AI-agent-assisted, scoped, audited access")
-  .action(async () => {
+  .requiredOption("--agent <name>", "owner-configured grant identity for this MCP process")
+  .action(async (opts) => {
     const dir = program.opts().vault;
     if (!grantsExist(dir)) {
-      console.error(
-        "Note: this vault has no grant policy, so any agent that starts this server sees every key. " +
-          "Run 'vbrain grant add <agent> --scope ...' to govern it.",
+      throw new Error(
+        "MCP access is disabled until you create a policy with 'vbrain grant add <agent> --scope ...'."
       );
     }
-    await startMcpServer(dir);
+    await startMcpServer(dir, opts.agent);
   });
 
 program
@@ -1420,6 +2048,15 @@ program
     for (const name of listVaultFiles(dir)) {
       console.log(`  ${name}.kv.enc: envelope v${vaultFileEnvelopeVersion(dir, name)}`);
     }
+  });
+
+program
+  .command("format")
+  .description("print the on-disk format version and the artifact version matrix")
+  .action(() => {
+    console.log(
+      JSON.stringify({ formatVersion: VAULT_FORMAT_VERSION, artifacts: FORMAT_COMPATIBILITY }, null, 2),
+    );
   });
 
 program.parseAsync(process.argv).catch((error: unknown) => {

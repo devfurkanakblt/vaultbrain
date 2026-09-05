@@ -1,15 +1,24 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import { openDocumentKey } from "../dist/document-crypto.js";
-import { SyncChangeLog, SyncedDocumentVault, canonicalSyncJson, openSyncChange, sealSyncChange } from "../dist/sync.js";
+import {
+  SyncChangeLog,
+  SyncDeviceManager,
+  SyncedDocumentVault,
+  canonicalSyncJson,
+  openSyncChange,
+  sealSyncChange,
+} from "../dist/sync.js";
 
 const PASSPHRASE = "sync-test-passphrase";
 const DEVICE_A = "11111111-1111-4111-8111-111111111111";
 const DEVICE_B = "22222222-2222-4222-8222-222222222222";
+const DEVICE_C = "33333333-3333-4333-8333-333333333333";
 
 function tempVault(label) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `vault-brain-sync-${label}-`));
@@ -86,6 +95,224 @@ test("the local log appends an immutable encrypted device chain", () => {
   log.close();
   assert.throws(() => log.changes(), /closed/iu);
   fs.rmSync(vaultDir, { recursive: true, force: true });
+});
+
+test("owner-signed enrollment gives a second device a distinct signing identity", () => {
+  const ownerDir = tempVault("device-owner");
+  const ownerManager = new SyncDeviceManager(ownerDir, PASSPHRASE);
+  const initialized = ownerManager.initializeOwner("Owner laptop", DEVICE_A, "2026-09-03T08:00:00.000Z");
+  assert.equal(initialized.body.devices[0].certificate.deviceId, DEVICE_A);
+  const fingerprint = ownerManager.fingerprint();
+  assert.match(fingerprint, /^[a-f0-9]{64}$/u);
+  const initialRegistry = ownerManager.exportRegistry();
+  assert.doesNotMatch(JSON.stringify(initialRegistry), /Owner laptop/u);
+
+  const ownerLog = new SyncChangeLog(ownerDir, PASSPHRASE);
+  const ownerChange = ownerLog.append(
+    DEVICE_A,
+    noteMutation(null, 1, "owner change"),
+    "2026-09-03T08:01:00.000Z",
+  );
+  assert.equal(ownerChange.version, 2);
+  assert.equal(ownerChange.authorization.certificateSerial, 1);
+  ownerLog.close();
+
+  const secondDir = tempVault("device-second");
+  fs.rmSync(secondDir, { recursive: true, force: true });
+  fs.cpSync(ownerDir, secondDir, { recursive: true });
+  fs.rmSync(path.join(secondDir, "documents", "sync", "identity", "authority.key.enc"));
+  fs.rmSync(path.join(secondDir, "documents", "sync", "identity", `${DEVICE_A}.key.enc`));
+
+  const secondManager = new SyncDeviceManager(secondDir, PASSPHRASE);
+  const request = secondManager.createEnrollmentRequest(
+    "Travel laptop",
+    DEVICE_B,
+    "2026-09-03T08:02:00.000Z",
+  );
+  assert.doesNotMatch(JSON.stringify(request), /PRIVATE KEY/u);
+  assert.throws(() => ownerManager.enroll({ ...request, name: "Tampered" }), /proof verification failed/iu);
+  const enrolled = ownerManager.enroll(request, "2026-09-03T08:03:00.000Z");
+  assert.equal(enrolled.body.devices.length, 2);
+  secondManager.importRegistry(ownerManager.exportRegistry());
+  assert.throws(() => secondManager.importRegistry(initialRegistry), /rollback/iu);
+
+  const secondLog = new SyncChangeLog(secondDir, PASSPHRASE);
+  const secondChange = secondLog.append(
+    DEVICE_B,
+    noteMutation(1, 2, "second device change"),
+    "2026-09-03T08:04:00.000Z",
+  );
+  assert.equal(secondChange.version, 2);
+  assert.equal(secondChange.authorization.certificateSerial, 2);
+
+  const ownerReceiver = new SyncChangeLog(ownerDir, PASSPHRASE);
+  assert.deepEqual(ownerReceiver.import(secondLog.envelopes()), { imported: 1, existing: 1 });
+  assert.equal(ownerReceiver.verify().devices, 2);
+
+  ownerReceiver.close();
+  secondLog.close();
+  secondManager.close();
+  ownerManager.close();
+  fs.rmSync(ownerDir, { recursive: true, force: true });
+  fs.rmSync(secondDir, { recursive: true, force: true });
+});
+
+test("enrollment freezes the exact verified legacy history before requiring signatures", () => {
+  const vaultDir = tempVault("device-legacy-migration");
+  const legacyLog = new SyncChangeLog(vaultDir, PASSPHRASE);
+  const legacy = legacyLog.append(
+    DEVICE_A,
+    noteMutation(null, 1, "legacy"),
+    "2026-09-03T08:30:00.000Z",
+  );
+  legacyLog.close();
+
+  const manager = new SyncDeviceManager(vaultDir, PASSPHRASE);
+  const registry = manager.initializeOwner("Owner", DEVICE_A, "2026-09-03T08:31:00.000Z");
+  assert.deepEqual(registry.body.legacyChangeIds, [legacy.id]);
+
+  const signedLog = new SyncChangeLog(vaultDir, PASSPHRASE);
+  const signed = signedLog.append(
+    DEVICE_A,
+    noteMutation(1, 2, "signed"),
+    "2026-09-03T08:32:00.000Z",
+  );
+  assert.equal(signed.version, 2);
+  assert.equal(signedLog.verify().changes, 2);
+
+  signedLog.close();
+  manager.close();
+  fs.rmSync(vaultDir, { recursive: true, force: true });
+});
+
+test("a revoked device cannot append locally or import a withheld post-cutoff change", () => {
+  const ownerDir = tempVault("revoke-owner");
+  const ownerManager = new SyncDeviceManager(ownerDir, PASSPHRASE);
+  ownerManager.initializeOwner("Owner", DEVICE_A, "2026-09-03T09:00:00.000Z");
+
+  const secondDir = tempVault("revoke-second");
+  fs.rmSync(secondDir, { recursive: true, force: true });
+  fs.cpSync(ownerDir, secondDir, { recursive: true });
+  fs.rmSync(path.join(secondDir, "documents", "sync", "identity", "authority.key.enc"));
+  fs.rmSync(path.join(secondDir, "documents", "sync", "identity", `${DEVICE_A}.key.enc`));
+  const secondManager = new SyncDeviceManager(secondDir, PASSPHRASE);
+  const request = secondManager.createEnrollmentRequest("Second", DEVICE_B, "2026-09-03T09:01:00.000Z");
+  ownerManager.enroll(request, "2026-09-03T09:02:00.000Z");
+  secondManager.importRegistry(ownerManager.exportRegistry());
+
+  const secondLog = new SyncChangeLog(secondDir, PASSPHRASE);
+  secondLog.append(DEVICE_B, noteMutation(null, 1, "accepted"), "2026-09-03T09:03:00.000Z");
+  const ownerLog = new SyncChangeLog(ownerDir, PASSPHRASE);
+  ownerLog.import(secondLog.envelopes());
+  ownerManager.revoke(DEVICE_B, 1, "2026-09-03T09:04:00.000Z");
+
+  const withheld = secondLog.append(
+    DEVICE_B,
+    noteMutation(1, 2, "withheld after revocation"),
+    "2026-09-03T09:05:00.000Z",
+  );
+  assert.equal(withheld.sequence, 2, "the stale device has not received the revocation yet");
+  assert.throws(() => ownerLog.import(secondLog.envelopes()), /revoked after sequence 1/iu);
+  secondManager.importRegistry(ownerManager.exportRegistry());
+  assert.throws(
+    () => secondLog.append(DEVICE_B, noteMutation(2, 3, "blocked locally")),
+    /revoked/iu,
+  );
+
+  ownerLog.close();
+  secondLog.close();
+  secondManager.close();
+  ownerManager.close();
+  fs.rmSync(ownerDir, { recursive: true, force: true });
+  fs.rmSync(secondDir, { recursive: true, force: true });
+});
+
+test("a stolen vault key cannot forge an enrolled device signature", () => {
+  const vaultDir = tempVault("device-forgery");
+  const manager = new SyncDeviceManager(vaultDir, PASSPHRASE);
+  manager.initializeOwner("Owner", DEVICE_A, "2026-09-03T10:00:00.000Z");
+  const log = new SyncChangeLog(vaultDir, PASSPHRASE);
+  const first = log.append(DEVICE_A, noteMutation(null, 1, "signed"), "2026-09-03T10:01:00.000Z");
+  const session = openDocumentKey(vaultDir, PASSPHRASE);
+  const forged = sealSyncChange(
+    {
+      version: 2,
+      deviceId: DEVICE_A,
+      sequence: 2,
+      previousDeviceChange: first.id,
+      parents: [first.id],
+      createdAt: "2026-09-03T10:02:00.000Z",
+      mutation: noteMutation(1, 2, "forged with only the vault key"),
+      authorization: {
+        certificateSerial: 1,
+        signature: Buffer.alloc(64).toString("base64"),
+      },
+    },
+    session.key,
+  );
+  assert.throws(() => log.import([forged]), /invalid device signature/iu);
+  assert.equal(log.envelopes().length, 1);
+
+  session.key.fill(0);
+  log.close();
+  manager.close();
+  fs.rmSync(vaultDir, { recursive: true, force: true });
+});
+
+test("signed freshness checkpoints reject rollback and selective relay withholding", () => {
+  const ownerDir = tempVault("checkpoint-owner");
+  const ownerManager = new SyncDeviceManager(ownerDir, PASSPHRASE);
+  ownerManager.initializeOwner("Owner", DEVICE_A, "2026-09-03T11:00:00.000Z");
+  const ownerLog = new SyncChangeLog(ownerDir, PASSPHRASE);
+  ownerLog.append(DEVICE_A, noteMutation(null, 1, "first"), "2026-09-03T11:01:00.000Z");
+  const firstCheckpoint = ownerManager.createCheckpoint(
+    ownerLog.changes(),
+    "2026-09-03T11:02:00.000Z",
+  );
+  const firstBundle = ownerManager.exportCheckpoint();
+
+  const receiverDir = tempVault("checkpoint-receiver");
+  fs.rmSync(receiverDir, { recursive: true, force: true });
+  fs.cpSync(ownerDir, receiverDir, { recursive: true });
+  fs.rmSync(path.join(receiverDir, "documents", "sync", "identity"), { recursive: true, force: true });
+
+  const second = ownerLog.append(
+    DEVICE_A,
+    noteMutation(1, 2, "second"),
+    "2026-09-03T11:03:00.000Z",
+  );
+  const secondCheckpoint = ownerManager.createCheckpoint(
+    ownerLog.changes(),
+    "2026-09-03T11:04:00.000Z",
+  );
+  assert.equal(secondCheckpoint.body.previousCheckpoint, firstCheckpoint.id);
+  const secondBundle = ownerManager.exportCheckpoint();
+  assert.throws(
+    () => ownerManager.importCheckpoint(firstBundle, ownerLog.changes()),
+    /rollback/iu,
+  );
+
+  const receiverLog = new SyncChangeLog(receiverDir, PASSPHRASE);
+  receiverLog.import(ownerLog.envelopes());
+  const receiverManager = new SyncDeviceManager(receiverDir, PASSPHRASE);
+  const imported = receiverManager.importCheckpoint(secondBundle, receiverLog.changes());
+  assert.equal(imported.id, secondCheckpoint.id);
+  receiverManager.verifyCheckpoint(receiverLog.changes());
+
+  fs.rmSync(
+    path.join(receiverDir, "documents", "sync", "changes", `${second.id}.change.enc`),
+  );
+  assert.throws(
+    () => receiverManager.verifyCheckpoint(receiverLog.changes()),
+    /checkpoint head .* is missing/iu,
+  );
+
+  receiverManager.close();
+  receiverLog.close();
+  ownerLog.close();
+  ownerManager.close();
+  fs.rmSync(ownerDir, { recursive: true, force: true });
+  fs.rmSync(receiverDir, { recursive: true, force: true });
 });
 
 test("concurrent device edits remain visible and a causal merge resolves them", () => {
@@ -211,6 +438,47 @@ test("synced document operations automatically emit note, canvas and attachment 
   fs.rmSync(vaultDir, { recursive: true, force: true });
 });
 
+test("plugin packages and security policy changes synchronize and apply", () => {
+  const sourceDir = tempVault("plugin-source");
+  new SyncedDocumentVault(sourceDir, PASSPHRASE, DEVICE_A).lock();
+  const targetDir = tempVault("plugin-target");
+  fs.rmSync(targetDir, { recursive: true, force: true });
+  fs.cpSync(sourceDir, targetDir, { recursive: true });
+
+  const source = new SyncedDocumentVault(sourceDir, PASSPHRASE, DEVICE_A);
+  source.installPlugin({
+    manifest: {
+      manifestVersion: 1,
+      id: "sync-example",
+      name: "Sync example",
+      version: "1.0.0",
+      description: "Exercises plugin synchronization.",
+      author: "Vault Brain",
+      capabilities: ["notes:metadata"],
+    },
+    source: "api.notice('ready');",
+    enabled: true,
+  });
+  assert.equal(source.getPlugin("sync-example").enabled, true, "source execution consent stays local");
+  source.setPluginRestrictedMode(true);
+
+  const pluginChanges = source.changeLog.changes().filter((change) => change.mutation.objectType === "plugin");
+  assert.deepEqual(pluginChanges.map((change) => change.mutation.revision), [1]);
+  assert.equal(source.changeLog.resolve("vault", "plugin-policy").winner.mutation.revision, 2);
+
+  const target = new SyncedDocumentVault(targetDir, PASSPHRASE);
+  target.changeLog.import(source.changeLog.envelopes());
+  assert.equal(target.applyResolved("plugin", "sync-example").applied, 1);
+  assert.equal(target.applyResolved("vault", "plugin-policy").applied, 2);
+  assert.equal(target.getPlugin("sync-example").enabled, false);
+  assert.equal(target.pluginSecurityPolicy().restrictedMode, true);
+
+  source.lock();
+  target.lock();
+  fs.rmSync(sourceDir, { recursive: true, force: true });
+  fs.rmSync(targetDir, { recursive: true, force: true });
+});
+
 test("clean remote changes apply idempotently to the real vault storage", () => {
   const sourceDir = tempVault("apply-source");
   let source = new SyncedDocumentVault(sourceDir, PASSPHRASE, DEVICE_A);
@@ -281,11 +549,571 @@ test("unresolved remote conflicts never mutate live vault storage", () => {
   first.changeLog.import(second.changeLog.envelopes());
 
   assert.equal(first.changeLog.resolve("note", note.id).status, "conflict");
+  assert.deepEqual(
+    first.listConflicts().map((conflict) => [conflict.objectType, conflict.objectId]),
+    [["note", note.id]],
+  );
   assert.equal(first.applyResolved("note", note.id).conflict, true);
   assert.equal(first.get(note.id).body, "from A");
+  assert.throws(() => first.resolveConflict("note", note.id), /explicit current head/iu);
+  const fromB = first
+    .changeLog
+    .resolve("note", note.id)
+    .heads
+    .find((head) => first.changeLog.change(head).mutation.value.body === "from B");
+  const resolved = first.resolveConflict("note", note.id, fromB);
+  assert.equal(resolved.conflict, undefined);
+  assert.equal(first.get(note.id).body, "from B");
+  assert.equal(first.changeLog.resolve("note", note.id).status, "clean");
 
   first.lock();
   second.lock();
   fs.rmSync(firstDir, { recursive: true, force: true });
   fs.rmSync(secondDir, { recursive: true, force: true });
+});
+
+test("concurrent plugin policies merge only toward stronger restrictions", () => {
+  const firstDir = tempVault("policy-conflict-a");
+  let first = new SyncedDocumentVault(firstDir, PASSPHRASE, DEVICE_A);
+  first.setPluginRestrictedMode(false);
+  first.lock();
+
+  const secondDir = tempVault("policy-conflict-b");
+  fs.rmSync(secondDir, { recursive: true, force: true });
+  fs.cpSync(firstDir, secondDir, { recursive: true });
+
+  first = new SyncedDocumentVault(firstDir, PASSPHRASE, DEVICE_A);
+  const second = new SyncedDocumentVault(secondDir, PASSPHRASE, DEVICE_B);
+  first.setPluginRestrictedMode(true);
+  second.setPluginRestrictedMode(false);
+  first.changeLog.import(second.changeLog.envelopes());
+
+  assert.equal(first.changeLog.resolve("vault", "plugin-policy").status, "conflict");
+  const merged = first.resolveConflict("vault", "plugin-policy");
+  assert.equal(merged.conflict, undefined);
+  assert.equal(first.pluginSecurityPolicy().restrictedMode, true);
+  assert.equal(first.changeLog.resolve("vault", "plugin-policy").status, "clean");
+
+  first.lock();
+  second.lock();
+  fs.rmSync(firstDir, { recursive: true, force: true });
+  fs.rmSync(secondDir, { recursive: true, force: true });
+});
+
+test("enrollment stores an X25519 agreement key that never leaves the device", () => {
+  const ownerVault = tempVault("agreement-owner");
+  const owner = new SyncDeviceManager(ownerVault, PASSPHRASE);
+  owner.initializeOwner("Owner laptop", DEVICE_A);
+
+  // A peer device shares the same vault (same passphrase-derived key material),
+  // as in the existing owner-signed-enrollment test: copy the vault, then strip
+  // the private keys that belong only to the owner's device.
+  const peerVault = tempVault("agreement-peer");
+  fs.rmSync(peerVault, { recursive: true, force: true });
+  fs.cpSync(ownerVault, peerVault, { recursive: true });
+  fs.rmSync(path.join(peerVault, "documents", "sync", "identity", "authority.key.enc"));
+  fs.rmSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.key.enc`));
+  fs.rmSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.x25519.key.enc`));
+  const peer = new SyncDeviceManager(peerVault, PASSPHRASE);
+  try {
+    const request = peer.createEnrollmentRequest("Travel laptop", DEVICE_B);
+
+    assert.equal(request.version, 2);
+    assert.equal(Buffer.from(request.keyAgreementKey, "base64").length, 44);
+
+    const registry = owner.enroll(request);
+    const enrolled = registry.body.devices.find((record) => record.certificate.deviceId === DEVICE_B);
+    assert.equal(enrolled.certificate.version, 2);
+    assert.equal(enrolled.certificate.keyAgreementKey, request.keyAgreementKey);
+
+    // The private half stays on the requesting device and is stored encrypted.
+    const keyFile = path.join(peerVault, "documents", "sync", "identity", `${DEVICE_B}.x25519.key.enc`);
+    assert.ok(fs.existsSync(keyFile), "the agreement private key is written locally");
+    assert.doesNotMatch(fs.readFileSync(keyFile, "utf8"), /-----BEGIN/u, "it is stored as ciphertext");
+
+    // The bundle the owner sends is opaque on the wire...
+    const bundle = owner.exportRegistry();
+    assert.doesNotMatch(JSON.stringify(bundle), new RegExp(DEVICE_B, "u"));
+
+    // ...and decrypting it shows what it actually carries, which is the point:
+    // grepping ciphertext for a UUID only ever proves that it is ciphertext.
+    // Each record is exactly a certificate and its signature, and the
+    // certificate is exactly the device's public halves -- no field of the
+    // enrolling device's private material rides along.
+    const plain = owner.inspectRegistry(bundle);
+    const record = plain.body.devices.find((item) => item.certificate.deviceId === DEVICE_B);
+    assert.deepEqual(Object.keys(record).sort(), ["certificate", "certificateSignature"]);
+    assert.deepEqual(Object.keys(record.certificate).sort(), [
+      "deviceId",
+      "enrolledAt",
+      "epoch",
+      "keyAgreementKey",
+      "name",
+      "publicKey",
+      "serial",
+      "version",
+    ]);
+    assert.equal(record.certificate.keyAgreementKey, request.keyAgreementKey, "only the public half travels");
+    assert.equal(record.certificate.publicKey, request.publicKey);
+  } finally {
+    owner.close();
+    peer.close();
+  }
+});
+
+test("a hand-built version 1 enrollment request from an older build is still accepted and yields a version 1 certificate", () => {
+  const ownerVault = tempVault("legacy-owner");
+  const owner = new SyncDeviceManager(ownerVault, PASSPHRASE);
+  try {
+    owner.initializeOwner("Owner laptop", DEVICE_A);
+
+    // Build the request exactly the way a pre-agreement-key build did: an
+    // Ed25519 identity keypair and an unsigned payload with no
+    // keyAgreementKey field at all (not present, not undefined), signed with
+    // the same canonical-JSON + Ed25519 proof scheme the current build still
+    // verifies with.
+    const legacyPair = crypto.generateKeyPairSync("ed25519");
+    const unsigned = {
+      version: 1,
+      deviceId: DEVICE_C,
+      name: "Legacy build laptop",
+      publicKey: legacyPair.publicKey.export({ format: "der", type: "spki" }).toString("base64"),
+      requestedAt: "2026-09-03T09:00:00.000Z",
+      nonce: crypto.randomBytes(32).toString("base64"),
+    };
+    assert.ok(!("keyAgreementKey" in unsigned));
+    const proof = crypto
+      .sign(null, Buffer.from(canonicalSyncJson(unsigned), "utf8"), legacyPair.privateKey)
+      .toString("base64");
+    const legacyRequest = { ...unsigned, proof };
+
+    const registry = owner.enroll(legacyRequest, "2026-09-03T09:01:00.000Z");
+    const enrolledInline = registry.body.devices.find((record) => record.certificate.deviceId === DEVICE_C);
+    assert.equal(enrolledInline.certificate.version, 1);
+    assert.ok(!("keyAgreementKey" in enrolledInline.certificate));
+
+    // Read the registry back through the normal decrypt+validate path, so
+    // validateSignedDeviceRegistry runs over a registry that mixes the
+    // owner's version 2 certificate with this version 1 certificate -- the
+    // realistic post-upgrade state.
+    const reloaded = owner.state();
+    const ownerRecord = reloaded.body.devices.find((record) => record.certificate.deviceId === DEVICE_A);
+    const legacyRecord = reloaded.body.devices.find((record) => record.certificate.deviceId === DEVICE_C);
+    assert.equal(ownerRecord.certificate.version, 2);
+    assert.equal(legacyRecord.certificate.version, 1);
+    assert.ok(!("keyAgreementKey" in legacyRecord.certificate));
+  } finally {
+    owner.close();
+  }
+});
+
+test("version 1 and version 2 envelopes coexist and are keyed differently", () => {
+  const vaultDir = tempVault("envelope-v2");
+  const session = openDocumentKey(vaultDir, PASSPHRASE);
+  const epochKey = Buffer.alloc(32, 9);
+  const body = {
+    version: 1,
+    deviceId: DEVICE_A,
+    sequence: 1,
+    previousDeviceChange: null,
+    parents: [],
+    createdAt: "2026-09-03T08:30:00.000Z",
+    mutation: noteMutation(null, 1, "private body"),
+  };
+
+  const legacy = sealSyncChange(body, session.key);
+  assert.equal(legacy.version, 1);
+  assert.equal(legacy.epoch, undefined);
+
+  const rotated = sealSyncChange(body, epochKey, 2);
+  assert.equal(rotated.version, 2);
+  assert.equal(rotated.epoch, 2);
+
+  // The same body under a different epoch key is a different change ID.
+  assert.notEqual(legacy.id, rotated.id);
+
+  const resolver = (epoch) => (epoch === 1 ? session.key : epochKey);
+  assert.equal(openSyncChange(legacy, resolver).mutation.value.body, "private body");
+  assert.equal(openSyncChange(rotated, resolver).mutation.value.body, "private body");
+
+  // A bare vault key still opens version 1 and now refuses version 2.
+  assert.equal(openSyncChange(legacy, session.key).sequence, 1);
+  assert.throws(() => openSyncChange(rotated, session.key), /epoch/iu);
+
+  // Neither envelope leaks plaintext.
+  assert.doesNotMatch(JSON.stringify(rotated), /private body/u);
+});
+
+test("revoking a device rotates the epoch and locks it out of later changes", () => {
+  const ownerVault = tempVault("rotate-owner");
+  const owner = new SyncDeviceManager(ownerVault, PASSPHRASE);
+  owner.initializeOwner("Owner laptop", DEVICE_A);
+
+  // A peer device shares the same vault (same passphrase-derived key material),
+  // as in the existing owner-signed-enrollment test: copy the vault, then strip
+  // the private keys that belong only to the owner's device.
+  const peerVault = tempVault("rotate-peer");
+  fs.rmSync(peerVault, { recursive: true, force: true });
+  fs.cpSync(ownerVault, peerVault, { recursive: true });
+  fs.rmSync(path.join(peerVault, "documents", "sync", "identity", "authority.key.enc"));
+  fs.rmSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.key.enc`));
+  fs.rmSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.x25519.key.enc`));
+  const peer = new SyncDeviceManager(peerVault, PASSPHRASE);
+  let registryAfterEnroll;
+  try {
+    registryAfterEnroll = owner.enroll(peer.createEnrollmentRequest("Travel laptop", DEVICE_B));
+    assert.equal(registryAfterEnroll.body.epoch, 1);
+
+    const rotated = owner.revoke(DEVICE_B, 0);
+    assert.equal(rotated.body.epoch, 2, "revocation advances the epoch");
+    assert.equal(rotated.body.revision, registryAfterEnroll.body.revision + 1, "in one signed revision");
+
+    // Only the remaining device gets a wrap.
+    assert.deepEqual(
+      rotated.body.epochKeys.map((wrap) => wrap.deviceId),
+      [DEVICE_A],
+    );
+
+    // The remaining device's certificate was reissued at the new epoch,
+    // reusing its existing public keys.
+    const before = registryAfterEnroll.body.devices.find((r) => r.certificate.deviceId === DEVICE_A).certificate;
+    const after = rotated.body.devices.find((r) => r.certificate.deviceId === DEVICE_A).certificate;
+    assert.equal(after.epoch, 2);
+    assert.equal(after.publicKey, before.publicKey);
+    assert.equal(after.keyAgreementKey, before.keyAgreementKey);
+
+    // The revoked device stays behind at the old epoch.
+    const revoked = rotated.body.devices.find((r) => r.certificate.deviceId === DEVICE_B);
+    assert.equal(revoked.certificate.epoch, 1);
+    assert.ok(revoked.revokedAt);
+  } finally {
+    owner.close();
+    peer.close();
+  }
+});
+
+
+test("a failed agreement-key write rolls the identity key back so the request can be retried", () => {
+  const vaultDir = tempVault("enroll-rollback");
+  const manager = new SyncDeviceManager(vaultDir, PASSPHRASE);
+  try {
+    manager.initializeOwner("Owner laptop", DEVICE_A);
+    const identityDir = path.join(vaultDir, "documents", "sync", "identity");
+    // Occupy the agreement key's path with a directory, so the second of the
+    // two writes fails after the first one has already landed.
+    fs.mkdirSync(path.join(identityDir, `${DEVICE_B}.x25519.key.enc`), { recursive: true });
+
+    assert.throws(() => manager.createEnrollmentRequest("Travel laptop", DEVICE_B));
+    assert.ok(
+      !fs.existsSync(path.join(identityDir, `${DEVICE_B}.key.enc`)),
+      "the identity key written first did not survive the failure",
+    );
+
+    // So the retry reaches the real fault instead of the pending-key guard.
+    assert.throws(
+      () => manager.createEnrollmentRequest("Travel laptop", DEVICE_B),
+      (error) => !/pending private key/u.test(error.message),
+      "a retry is not blocked by a half-written enrollment",
+    );
+  } finally {
+    manager.close();
+  }
+});
+test("revocation refuses to rotate while another active device still holds a version 1 certificate", () => {
+  const ownerVault = tempVault("rotate-legacy-owner");
+  const owner = new SyncDeviceManager(ownerVault, PASSPHRASE);
+  owner.initializeOwner("Owner laptop", DEVICE_A);
+
+  const peerVault = tempVault("rotate-legacy-peer");
+  fs.rmSync(peerVault, { recursive: true, force: true });
+  fs.cpSync(ownerVault, peerVault, { recursive: true });
+  fs.rmSync(path.join(peerVault, "documents", "sync", "identity", "authority.key.enc"));
+  fs.rmSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.key.enc`));
+  fs.rmSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.x25519.key.enc`));
+  const peer = new SyncDeviceManager(peerVault, PASSPHRASE);
+  try {
+    owner.enroll(peer.createEnrollmentRequest("Travel laptop", DEVICE_B));
+
+    // A third device enrolled the way an older build did: version 1, no
+    // agreement key, so a new epoch key could never be wrapped to it.
+    const legacyPair = crypto.generateKeyPairSync("ed25519");
+    const unsigned = {
+      version: 1,
+      deviceId: DEVICE_C,
+      name: "Legacy build laptop",
+      publicKey: legacyPair.publicKey.export({ format: "der", type: "spki" }).toString("base64"),
+      requestedAt: "2026-09-03T09:00:00.000Z",
+      nonce: crypto.randomBytes(32).toString("base64"),
+    };
+    const proof = crypto
+      .sign(null, Buffer.from(canonicalSyncJson(unsigned), "utf8"), legacyPair.privateKey)
+      .toString("base64");
+    const enrolled = owner.enroll({ ...unsigned, proof }, "2026-09-03T09:01:00.000Z");
+    assert.equal(enrolled.body.epoch, 1, "enrolling a legacy device does not rotate on its own");
+
+    // Revoking the *other* device would have to wrap the new epoch key to the
+    // legacy device, which has nothing to wrap it to. Refuse instead of
+    // rotating a device silently out of the vault.
+    assert.throws(
+      () => owner.revoke(DEVICE_B, 0),
+      new RegExp(`${DEVICE_C} predates key agreement`, "u"),
+      "the guard names the offending device",
+    );
+
+    // The refusal is total: no epoch advance, no half-applied revocation.
+    const after = owner.state();
+    assert.equal(after.body.epoch, 1, "the epoch did not advance");
+    assert.equal(after.body.revision, enrolled.body.revision, "no new signed revision was written");
+    assert.ok(
+      !after.body.devices.find((record) => record.certificate.deviceId === DEVICE_B).revokedAt,
+      "the target device is still active",
+    );
+  } finally {
+    owner.close();
+    peer.close();
+  }
+});
+
+test("post-rotation changes are unreadable with the revoked device's epoch keys", () => {
+  const vaultDir = tempVault("rotate-readability");
+  const manager = new SyncDeviceManager(vaultDir, PASSPHRASE);
+  const log = new SyncChangeLog(vaultDir, PASSPHRASE);
+  try {
+    manager.initializeOwner("Owner laptop", DEVICE_A);
+    // A peer device shares the same vault (same passphrase-derived key material),
+    // as in the existing owner-signed-enrollment test: copy the vault, then strip
+    // the private keys that belong only to the owner's device.
+    const peerVault = tempVault("rotate-readability-peer");
+    fs.rmSync(peerVault, { recursive: true, force: true });
+    fs.cpSync(vaultDir, peerVault, { recursive: true });
+    fs.rmSync(path.join(peerVault, "documents", "sync", "identity", "authority.key.enc"));
+    fs.rmSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.key.enc`));
+    fs.rmSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.x25519.key.enc`));
+    const peer = new SyncDeviceManager(peerVault, PASSPHRASE);
+    try {
+      manager.enroll(peer.createEnrollmentRequest("Travel laptop", DEVICE_B));
+    } finally {
+      peer.close();
+    }
+
+    const before = log.append(DEVICE_A, noteMutation(null, 1, "before rotation"));
+    assert.equal(before.version, 2, "changes are device-signed once enrolled");
+
+    manager.revoke(DEVICE_B, 0);
+
+    const after = log.append(DEVICE_A, noteMutation(1, 2, "after rotation"));
+    const envelopes = log.envelopes();
+    const rotatedEnvelope = envelopes.find((envelope) => envelope.id === after.id);
+    const legacyEnvelope = envelopes.find((envelope) => envelope.id === before.id);
+
+    assert.equal(rotatedEnvelope.version, 2);
+    assert.equal(rotatedEnvelope.epoch, 2);
+    assert.equal(legacyEnvelope.version, 1, "pre-rotation changes keep their epoch 1 sealing");
+
+    // Holding only the epoch 1 key material — which a revoked device still has —
+    // is no longer enough for the post-rotation change.
+    const session = openDocumentKey(vaultDir, PASSPHRASE);
+    const epochOne = {
+      syncChangeKey: session.syncChangeKey,
+      syncEnvelopeKey: session.syncEnvelopeKey,
+    };
+    assert.doesNotThrow(() => openSyncChange(legacyEnvelope, epochOne));
+    assert.throws(() => openSyncChange(rotatedEnvelope, epochOne), /epoch/iu);
+    // The bare documents key opened epoch 1 changes before the identity key was
+    // separated out; it deliberately no longer does.
+    assert.throws(() => openSyncChange(legacyEnvelope, session.key));
+
+    // The whole log still verifies on the device that holds the epoch key.
+    assert.equal(log.verify().heads.length, 1);
+  } finally {
+    log.close();
+    manager.close();
+  }
+});
+
+test("revoking the last active device is refused", () => {
+  const vaultDir = tempVault("rotate-last");
+  const manager = new SyncDeviceManager(vaultDir, PASSPHRASE);
+  try {
+    manager.initializeOwner("Owner laptop", DEVICE_A);
+    assert.throws(() => manager.revoke(DEVICE_A, 0), /last active sync device/u);
+  } finally {
+    manager.close();
+  }
+});
+
+test("a checkpoint created before rotation still verifies afterwards", () => {
+  const vaultDir = tempVault("rotate-checkpoint");
+  const manager = new SyncDeviceManager(vaultDir, PASSPHRASE);
+  const log = new SyncChangeLog(vaultDir, PASSPHRASE);
+  try {
+    manager.initializeOwner("Owner laptop", DEVICE_A);
+    // A peer device shares the same vault (same passphrase-derived key material),
+    // as in the existing owner-signed-enrollment test: copy the vault, then strip
+    // the private keys that belong only to the owner's device.
+    const peerVault = tempVault("rotate-checkpoint-peer");
+    fs.rmSync(peerVault, { recursive: true, force: true });
+    fs.cpSync(vaultDir, peerVault, { recursive: true });
+    fs.rmSync(path.join(peerVault, "documents", "sync", "identity", "authority.key.enc"));
+    fs.rmSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.key.enc`));
+    fs.rmSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.x25519.key.enc`));
+    const peer = new SyncDeviceManager(peerVault, PASSPHRASE);
+    try {
+      manager.enroll(peer.createEnrollmentRequest("Travel laptop", DEVICE_B));
+    } finally {
+      peer.close();
+    }
+    log.append(DEVICE_A, noteMutation(null, 1, "checkpointed"));
+    const checkpoint = manager.createCheckpoint(log.changes());
+
+    manager.revoke(DEVICE_B, 0);
+    log.append(DEVICE_A, noteMutation(1, 2, "after rotation"));
+
+    const verified = manager.verifyCheckpoint(log.changes());
+    assert.equal(verified.id, checkpoint.id, "the pinned checkpoint survives an epoch bump");
+  } finally {
+    log.close();
+    manager.close();
+  }
+});
+
+test("an attachment sync snapshot parses in both the inline and the blob form", async () => {
+  const { parseAttachmentSnapshot, isBlobAttachmentSnapshot, sameAttachmentSnapshot } = await import("../dist/sync.js");
+  const blobId = "a".repeat(64);
+
+  const inline = parseAttachmentSnapshot({ filename: "a.txt", mime: "text/plain", data: "aGk=" });
+  assert.equal(isBlobAttachmentSnapshot(inline), false);
+  assert.equal(inline.data, "aGk=");
+
+  const blob = parseAttachmentSnapshot({
+    filename: "a.bin",
+    mime: "application/octet-stream",
+    size: 2,
+    chunks: 1,
+    blobs: [blobId],
+  });
+  assert.equal(isBlobAttachmentSnapshot(blob), true);
+  assert.deepEqual(blob.blobs, [blobId]);
+
+  // A snapshot may not claim both forms.
+  assert.throws(
+    () => parseAttachmentSnapshot({ filename: "a", mime: "text/plain", data: "aGk=", size: 2, chunks: 1, blobs: [blobId] }),
+    /exactly one/i,
+  );
+  // chunks must agree with blobs.length.
+  assert.throws(
+    () => parseAttachmentSnapshot({ filename: "a", mime: "text/plain", size: 2, chunks: 2, blobs: [blobId] }),
+    /chunk count/i,
+  );
+  // chunks must agree with size.
+  assert.throws(
+    () => parseAttachmentSnapshot({ filename: "a", mime: "text/plain", size: 5 * 1024 * 1024, chunks: 1, blobs: [blobId] }),
+    /chunk count/i,
+  );
+  // size must be at least 1: an empty attachment is refused at the storage layer too.
+  assert.throws(
+    () => parseAttachmentSnapshot({ filename: "a", mime: "text/plain", size: 0, chunks: 1, blobs: [blobId] }),
+    /size/i,
+  );
+  // blob ids are 64 lowercase hex characters.
+  assert.throws(
+    () => parseAttachmentSnapshot({ filename: "a", mime: "text/plain", size: 2, chunks: 1, blobs: ["NOTHEX"] }),
+    /blob id/i,
+  );
+  // at most 256 blobs.
+  assert.throws(
+    () =>
+      parseAttachmentSnapshot({
+        filename: "a",
+        mime: "text/plain",
+        size: 257 * 1024 * 1024,
+        chunks: 257,
+        blobs: Array.from({ length: 257 }, () => blobId),
+      }),
+    /at most 256/i,
+  );
+
+  // Equality ignores the form and the blob ids.
+  assert.equal(
+    sameAttachmentSnapshot(
+      { filename: "a.bin", mime: "text/plain", data: "aGk=" },
+      { filename: "a.bin", mime: "text/plain", size: 2, chunks: 1, blobs: [blobId] },
+    ),
+    true,
+  );
+  assert.equal(
+    sameAttachmentSnapshot(
+      { filename: "a.bin", mime: "text/plain", data: "aGk=" },
+      { filename: "renamed.bin", mime: "text/plain", size: 2, chunks: 1, blobs: [blobId] },
+    ),
+    false,
+  );
+});
+
+test("an attachment larger than the old 6 MiB ceiling is captured as blob references", async () => {
+  const { parseAttachmentSnapshot, isBlobAttachmentSnapshot } = await import("../dist/sync.js");
+  const { SyncBlobStore } = await import("../dist/sync-blobs.js");
+  const dir = tempVault("blob-writer");
+  const vault = new SyncedDocumentVault(dir, PASSPHRASE, DEVICE_A);
+
+  // Nine chunks: comfortably past the 6,242,304-byte inline ceiling this replaces.
+  const data = crypto.randomBytes(9 * 1024 * 1024);
+  const info = vault.putAttachment(data, "big.bin", "application/octet-stream");
+  assert.equal(info.size, data.length);
+
+  const changes = vault.changeLog.changes().filter((change) => change.mutation.objectType === "attachment");
+  const snapshot = parseAttachmentSnapshot(changes.at(-1).mutation.value);
+  assert.equal(isBlobAttachmentSnapshot(snapshot), true);
+  assert.equal(snapshot.size, data.length);
+  assert.equal(snapshot.chunks, 9);
+  assert.equal(snapshot.blobs.length, 9);
+
+  const store = new SyncBlobStore(dir);
+  assert.deepEqual(store.missing(snapshot.blobs), []);
+  assert.deepEqual(vault.getAttachment(info.id).data, data);
+
+  vault.lock();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("an enrolled device stamps a blob attachment change at version 3", () => {
+  const dir = tempVault("blob-body-version");
+  const manager = new SyncDeviceManager(dir, PASSPHRASE);
+  manager.initializeOwner("Owner", DEVICE_A, "2026-09-04T00:00:00.000Z");
+  manager.close();
+
+  const vault = new SyncedDocumentVault(dir, PASSPHRASE, DEVICE_A);
+  vault.put({ path: "Plans/Launch.md", body: "first" });
+  const info = vault.putAttachment(Buffer.from("blob transported bytes"), "brief.txt", "text/plain");
+  vault.removeAttachment(info.id);
+
+  const changes = vault.changeLog.changes();
+  const pick = (objectType, operation) =>
+    changes.find((change) => change.mutation.objectType === objectType && change.mutation.operation === operation);
+
+  // Only the body that actually carries a blob manifest moves to version 3, so
+  // a client that stops at version 2 refuses the manifest instead of misreading it.
+  assert.equal(pick("attachment", "put").version, 3);
+  assert.equal(pick("attachment", "delete").version, 2);
+  assert.equal(pick("note", "put").version, 2);
+
+  vault.lock();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("an unenrolled vault keeps writing version 1, blob manifest included", () => {
+  const dir = tempVault("blob-body-version-legacy");
+  const vault = new SyncedDocumentVault(dir, PASSPHRASE, DEVICE_A);
+  const info = vault.putAttachment(Buffer.from("legacy blob bytes"), "brief.txt", "text/plain");
+
+  // Version 3 requires a device signature, which a vault without a device
+  // registry cannot produce; the legacy unauthorized ladder has no version 3.
+  const change = vault.changeLog
+    .changes()
+    .find((candidate) => candidate.mutation.objectType === "attachment");
+  assert.equal(change.version, 1);
+  assert.equal(change.mutation.objectId, info.id);
+
+  vault.lock();
+  fs.rmSync(dir, { recursive: true, force: true });
 });

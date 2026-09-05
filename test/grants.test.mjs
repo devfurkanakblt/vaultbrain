@@ -41,13 +41,13 @@ function scope(overrides = {}) {
   });
 }
 
-test("a vault with no grant file stays ungoverned and unmasked", () => {
+test("a vault with no grant file denies access by default", () => {
   const vault = tempVault();
   assert.equal(grantsExist(vault), false);
   const decision = decide(null, { agent: "claude", action: "resolve", file: "health", key: "IBAN" });
-  assert.equal(decision.allowed, true);
+  assert.equal(decision.allowed, false);
   assert.equal(decision.ungoverned, true);
-  assert.equal(decision.redact, "none");
+  assert.equal(decision.redact, "full");
 });
 
 test("the first grant closes the vault to every other agent", () => {
@@ -198,7 +198,7 @@ test("discovery is narrowed to the key names a grant covers", () => {
     visible.map((entry) => entry.key),
     ["NOTE_20260830_090000_visit"],
   );
-  assert.equal(filterDiscoverable(null, "claude", "health", entries).length, 2);
+  assert.equal(filterDiscoverable(null, "claude", "health", entries).length, 0);
 });
 
 test("the grant file is encrypted at rest and refuses a wrong passphrase", () => {
@@ -308,6 +308,30 @@ test("tampering with a recorded redaction level breaks the audit chain", () => {
   assert.equal(verifyAudit(vault, PASSPHRASE).valid, false);
 });
 
+test("deleting or truncating an initialized audit log is detected", () => {
+  const vault = tempVault();
+  appendAudit(vault, { actor: "cli-direct", file: "health", key: "IBAN" }, PASSPHRASE);
+  fs.writeFileSync(path.join(vault, "audit.log"), "");
+
+  const verification = verifyAudit(vault, PASSPHRASE);
+  assert.equal(verification.valid, false);
+  assert.match(verification.error, /missing or truncated/u);
+});
+
+test("removing the authenticated audit head cannot hide a truncated tail", () => {
+  const vault = tempVault();
+  appendAudit(vault, { actor: "cli-direct", file: "health", key: "IBAN" }, PASSPHRASE);
+  appendAudit(vault, { actor: "cli-direct", file: "health", key: "BLOOD" }, PASSPHRASE);
+  const logPath = path.join(vault, "audit.log");
+  const [firstEntry] = fs.readFileSync(logPath, "utf8").trim().split("\n");
+  fs.writeFileSync(logPath, `${firstEntry}\n`);
+  fs.rmSync(path.join(vault, "audit.head.json"));
+
+  const verification = verifyAudit(vault, PASSPHRASE);
+  assert.equal(verification.valid, false);
+  assert.match(verification.error, /head is missing/u);
+});
+
 function seededVault() {
   const vault = tempVault();
   upsertEntry(vault, "health", "IBAN", "TR330006100519786457841326", "bank", PASSPHRASE);
@@ -342,13 +366,13 @@ test("an MCP resolution comes back masked at the granted level", () => {
   assert.equal(readAudit(vault).at(-1).redaction, "partial");
 });
 
-test("an ungoverned vault resolves in full, exactly as before", () => {
+test("an ungoverned vault refuses MCP resolution", () => {
   const vault = seededVault();
 
   const outcome = resolveForAgent(vault, "anyone", "health", "IBAN", PASSPHRASE);
 
-  assert.equal(outcome.kind, "value");
-  assert.equal(outcome.message, "TR330006100519786457841326");
+  assert.equal(outcome.kind, "denied");
+  assert.equal(outcome.message.includes("TR330006100519786457841326"), false);
 });
 
 test("a confirming grant holds the first call and answers the second", () => {

@@ -1,0 +1,23 @@
+{
+  "version": 2,
+  "slots": [
+    {
+      "id": "f97eac7d-93cb-42ad-9f60-e9bc6bab2923",
+      "type": "passphrase",
+      "label": "primary",
+      "kdf": {
+        "name": "scrypt",
+        "N": 131072,
+        "r": 8,
+        "p": 1,
+        "salt": "DcwJ1Y7HaM2vyzveZtuexw=="
+      },
+      "createdAt": "2026-09-05T04:43:16.578Z",
+      "wrapped": {
+        "iv": "zuakG6IFDDoUM7/j",
+        "authTag": "v3FvSEdjwXPs37iXU8axsw==",
+        "ciphertext": "pMj+S3BF+wRIqOuNZ0yUyZaXBwa2J2Aq+3eYZuCI/F4edYzbd6ki7oQPC5dKQGP8/wZreCP2bL4eTwjotHvusjLVkOJBjYLFoKeIslg97ESxSJPE1B6jE6y2aSjOnq8Rf+X00mUQFt/aCuU6KO8pr1GHjIfwlBsG0Jj8c8Y2u6yFUicv1Me9C05DThTOUvefO0UV5DUAen/spdiqXfrMewChVrxRcIuURP7qJqL28s/pzovrI8FnTQKsubf5X3PVRGcSfjKcY9p27/zLStPU6JOd2s1rEU+v0LQFYFEfHqaylS0diWhg/fJ/piZcE6bmcZSFFIeidz++SD/q0bzz3YZIgdGdGxxDd8qddmPZX8f/uk3kQYtVTmVjfKTfauS0cVkUsxUV1K94tQYtT/K9Tg/0JAZwyIXyTY7dh815bxoN6WZqDISoU0SZWzz+UstZDIQ2+6KaA24oDHz57Akfm6HM0p+jzYVKtT1/PmWDYoR+1p00"
+      }
+    }
+  ]
+}

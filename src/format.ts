@@ -5,10 +5,9 @@
  *   # @desc: Bir sonraki doktor kontrol tarihi
  *   DOCTOR_NEXT_APPOINTMENT="2026-09-15"
  *
- * The `@desc` line is the ONLY thing that ever leaves the vault unencrypted
- * (via `vbrain index`). It must never itself contain the sensitive value —
- * that's a convention this tool can't fully enforce, so the README calls
- * it out explicitly.
+ * The `@desc` line is copied into the encrypted discovery catalog by
+ * `vbrain index`. It must never itself contain the sensitive value because
+ * agents with catalog discovery access may see it.
  */
 
 export interface KVEntry {

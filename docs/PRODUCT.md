@@ -64,7 +64,9 @@ References:
 - Obsidian vault importer with link/attachment validation
 - Versioned plugin API and signed packages
 - Theme tokens and CSS customization
-- Desktop first; mobile follows once encrypted sync is stable
+- Desktop only; encrypted sync stays desktop-to-desktop, so the passphrase
+  never leaves a machine the owner controls and no hosted relay becomes
+  mandatory
 
 ## Success measures
 

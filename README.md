@@ -40,7 +40,7 @@ This is the most important section in the README.
 | Exposure                                        | Zero — value never enters any model's context | Not zero — content **does** pass through the calling model's context, both when you tell the agent something worth saving (`store_note`) and when it resolves a value back (`resolve_key`) — that's inherent to how a conversational agent has to work |
 | What the agent sees without decrypting anything | N/A                                           | Key names + descriptions (`list_keys` / `find_key`), and note timestamps + tags (`find_notes_in_range`)                                                                                                                                                |
 | Audit                                           | Logged                                        | Logged — writes and reads both, including denials                                                                                                                                                                                                      |
-| Scoping                                         | N/A                                           | Optional per-agent grants: which keys, which actions, for how long, how masked                                                                                                                                                                         |
+| Scoping                                         | N/A                                           | Required per-agent grants: which keys, which actions, for how long, how masked                                                                                                                                                                         |
 
 Mode 2 is a deliberate trade-off, not a zero-exposure claim: you get an agent
 that can capture and recall notes for you in natural language, in exchange
@@ -52,10 +52,9 @@ guarantee that something never touches any LLM, keep using Mode 1 for it.
 
 ### Grants: narrowing Mode 2 to one agent, one slice, one answer
 
-By default a vault has no grant policy, and any agent started with the
-passphrase sees every key — that is how this tool has always worked. Adding the
-first grant flips the vault to _governed_, and from then on an agent gets only
-what a live grant gives it.
+MCP access is fail-closed. A vault with no grant policy cannot start the MCP
+server. Add a grant first; from then on an agent gets only what a live grant
+gives it.
 
 ```bash
 # A kitchen assistant that may read one key, in one category, for a week.
@@ -90,9 +89,9 @@ Three properties are worth stating plainly:
 - **An approval is single-use.** One "yes" answers one resolution and is then
   spent; it never becomes a standing permission.
 - **Redaction narrows exposure, it does not create a boundary.** A masked value
-  still crosses into the model's context as a masked value, and the agent names
-  itself — `VBRAIN_AGENT` is an identity for scoping and audit, not
-  authentication. Anything that must never reach a model belongs in Mode 1.
+  still crosses into the model's context as a masked value. The vault owner
+  pins the grant identity with `mcp --agent`; it is never accepted from tool
+  request data. Anything that must never reach a model belongs in Mode 1.
 
 Grants live encrypted in `grants.enc` inside the vault, so the agent names, the
 scopes and the pending approvals are all unreadable without the passphrase.
@@ -109,8 +108,8 @@ BLOOD_TYPE="0 Rh+"
 
 - Files live as `vault/<name>.kv.enc` — AES-256-GCM encrypted, scrypt-derived
   key from your passphrase. The plaintext above never touches disk.
-- The `@desc` comment is the **only** thing that ever leaves the vault
-  unencrypted (via `vbrain index` → `schema.json`). Never put sensitive
+- Key names and `@desc` comments are copied into encrypted `schema.enc` by
+  `vbrain index`; values are never included. Never put sensitive
   information in a description — the tool can't enforce that for you.
 
 ## Quickstart
@@ -144,11 +143,11 @@ node dist/cli.js --vault ./vault/personal search "doktor"
 # freeform journal entry (dev/testing — normally an agent calls store_note for you)
 node dist/cli.js --vault ./vault/personal note health "Check-up yaptırdım, sonuçlar normal." --desc "Doktor ziyareti notu"
 
-# browse notes by date, safe index only, no decryption
+# browse notes by date after unlocking the encrypted catalog
 node dist/cli.js --vault ./vault/personal timeline --category health
 
 # Mode 2 — start the MCP server for an agent (Claude Code, etc.)
-node dist/cli.js --vault ./vault/personal mcp
+node dist/cli.js --vault ./vault/personal mcp --agent claude-code
 ```
 
 A working demo vault (dummy data only) is checked in at `vault/example/`.
@@ -405,7 +404,7 @@ a manifest and one JavaScript file, and its reach is finite and declared.
   "manifestVersion": 1,
   "id": "word-count",
   "name": "Word count",
-  "version": "1.0.0",
+  "version": "0.2.0",
   "description": "Shows how many words the open note holds",
   "author": "example",
   "capabilities": ["notes:read", "ui:panel", "commands"]
@@ -528,10 +527,16 @@ prototype-shaping keys are rejected before anything enters encrypted storage.
   "mcpServers": {
     "vault-brain": {
       "command": "node",
-      "args": ["/absolute/path/to/vaultbrain/dist/cli.js", "--vault", "/absolute/path/to/vault/personal", "mcp"],
+      "args": [
+        "/absolute/path/to/secondbrain-vault/dist/cli.js",
+        "--vault",
+        "/absolute/path/to/vault/personal",
+        "mcp",
+        "--agent",
+        "claude-code"
+      ],
       "env": {
-        "VBRAIN_PASSPHRASE": "use-a-real-passphrase-here",
-        "VBRAIN_AGENT": "claude-code"
+        "VBRAIN_PASSPHRASE": "use-a-real-passphrase-here"
       }
     }
   }
@@ -572,45 +577,104 @@ daily-notes view, but without reading your notes to build it.
 
 Sync remains transport-independent: an append-only encrypted change log with
 per-device chains, causal parents and explicit conflict inspection. Exported
-JSON contains only keyed opaque IDs and AES-GCM ciphertext, suitable for copying
-between trusted devices or storing on an untrusted relay in a later slice.
+JSON contains only keyed opaque IDs and AES-GCM ciphertext. Enrolled devices
+sign every new change with a separate Ed25519 key; the owner-signed encrypted
+registry pins device certificates and revocation sequence cutoffs.
+Owner-signed freshness checkpoints commit to the verified causal heads and
+change count. An authenticated self-hosted relay stores only opaque immutable
+ciphertext, with request, storage and object-count quotas.
 
-Pass `--sync-device <uuid>` to a document command to capture its note, canvas or
-attachment mutation automatically. A synchronized session also records an
-encrypted per-object application cursor, so conflict-free remote changes can be
-replayed into the real vault exactly once.
+Pass `--sync-device <uuid>` to a document or plugin command to capture its note,
+canvas, attachment, plugin-package or plugin-policy mutation automatically. A
+synchronized session also records an encrypted per-object application cursor,
+so conflict-free remote changes can be replayed into the real vault exactly
+once.
 
 ```bash
-# Generate and persist this ID in your device configuration.
-vbrain sync device-id
+# Initialize enrollment and pin the returned authority fingerprint.
+vbrain --experimental-trusted-sync sync devices init "Owner laptop" \
+  --device-id <device-id>
+
+# On a securely bootstrapped second device, create a proof-of-possession request.
+vbrain --experimental-trusted-sync sync devices request "Travel laptop" \
+  --device-id <second-device-id> > enrollment-request.json
+
+# The owner approves it, then transfers the newer encrypted registry back.
+vbrain --experimental-trusted-sync sync devices enroll enrollment-request.json
+vbrain --experimental-trusted-sync sync devices export > device-registry.json
+vbrain --experimental-trusted-sync sync devices import device-registry.json
+
+# Removal is owner-signed at the last device sequence observed locally.
+vbrain --experimental-trusted-sync sync devices revoke <second-device-id>
 
 # Record revision 1 of one logical object.
-vbrain sync append <device-id> note <note-id> put \
+vbrain --experimental-trusted-sync sync append <device-id> note <note-id> put \
   --revision 1 --value '{"title":"Plan","body":"private"}'
 
 # Exchange opaque envelopes through files/stdout.
-vbrain sync export > changes.json
-vbrain sync import changes.json
+vbrain --experimental-trusted-sync sync export > changes.json
+vbrain --experimental-trusted-sync sync import changes.json
 
-# Validate the complete DAG, inspect concurrent heads, then apply a clean one.
-vbrain sync verify
-vbrain sync resolve note <note-id>
-vbrain sync apply note <note-id>
+# Validate the complete DAG, list/inspect concurrent heads, then apply a clean one.
+vbrain --experimental-trusted-sync sync verify
+vbrain --experimental-trusted-sync sync conflicts
+vbrain --experimental-trusted-sync sync resolve note <note-id>
+vbrain --experimental-trusted-sync sync apply note <note-id>
+
+# Resolve manually by naming one preserved head. Plugin-policy conflicts can
+# instead use --safe, which only unions revocations and enables restricted mode.
+vbrain --experimental-trusted-sync --sync-device <device-id> \
+  sync resolve note <note-id> --head <change-id>
+vbrain --experimental-trusted-sync --sync-device <device-id> \
+  sync resolve vault plugin-policy --safe
 
 # Example automatically captured edit.
-vbrain --sync-device <device-id> docs put Plans/Launch.md --body "Ready"
+vbrain --experimental-trusted-sync --sync-device <device-id> \
+  docs put Plans/Launch.md --body "Ready"
+
+# Publish a known-good checkpoint and push it with the encrypted change log.
+export VBRAIN_RELAY_TOKEN='<at-least-32-random-bytes>'
+vbrain --experimental-trusted-sync sync checkpoint create
+vbrain --experimental-trusted-sync sync relay push https://relay.example
+
+# First contact pins fingerprints obtained through a trusted channel.
+vbrain --experimental-trusted-sync --vault ./restored-vault \
+  sync relay pull https://relay.example \
+  --authority <owner-authority-sha256> \
+  --checkpoint <owner-checkpoint-sha256>
 ```
 
-Unresolved heads fail before live storage is touched. Synchronized attachment
-snapshots currently share the 8 MiB change limit (about 6 MiB of raw bytes);
-larger blob transport, plugin capture, device enrollment and key rotation,
-relay transport and mobile clients remain Phase 6 work. See the
-[sync protocol design](docs/superpowers/specs/2026-08-31-encrypted-sync-change-protocol-design.md)
-for the format and conflict rules.
+Unresolved heads fail before live storage is touched. Plugin package bytes and
+the fail-closed plugin policy are portable, while plugin storage and the local
+enabled/disabled execution choice never enter the sync log; a received plugin
+is always installed disabled. Attachment bytes travel outside the change
+envelope: a change carries a manifest of content-addressed, AEAD-sealed 1 MiB
+blobs, so an attachment of any size the vault accepts synchronizes and an
+interrupted transfer resumes one chunk at a time. Independently witnessed
+freshness remains Phase 6 work. The relay is not key escrow: first-device
+recovery needs an encrypted vault backup containing the original
+key-derivation metadata. A normal device clone must never carry another
+device's `documents/sync/identity` directory; private identity keys are
+local-only and absent from sync exports.
+
+Revoking a device rotates the content key: the registry advances to a new epoch,
+a fresh random content key is wrapped to each remaining device's X25519 key, and
+the revoked device receives no wrap. Rotation is forward-only. A revoked device
+keeps the epoch keys it already held and can still decrypt every change written
+before the rotation; what it loses is everything written afterwards, including
+whatever the relay accumulates from then on. Recovering historical plaintext
+still only takes the passphrase and an encrypted vault backup — the passphrase
+remains the security boundary.
+
+See the [sync protocol design](docs/superpowers/specs/2026-08-31-encrypted-sync-change-protocol-design.md)
+and [relay operations guide](docs/SYNC-RELAY.md).
+
+The on-disk format is frozen at 1.0 — see [`docs/FORMAT-1.0.md`](docs/FORMAT-1.0.md).
+The product itself remains pre-1.0 pending independent review.
 
 ## The "fast find" layer
 
-`vbrain index` rebuilds `schema.json` — key names + descriptions, no values —
+`vbrain index` rebuilds encrypted `schema.enc` — key names + descriptions, no values —
 across the whole vault. `vbrain search` / the `find_key` MCP tool run a fuzzy
 match over that small, safe file instead of decrypting and scanning every
 vault file. This is the speed win over an Obsidian graph traversal: lookup
@@ -637,13 +701,36 @@ cost scales with the number of _keys_, not the size of your notes.
   through the MCP tools instead.
 - This is an MVP. It has not been audited. Don't put real medical or
   financial identifiers in it yet — validate the model with dummy data first.
+- Rotation is forward-only. A revoked device keeps the epoch keys it already
+  held and can still decrypt every change written before the rotation; what
+  it loses is everything written afterwards, including whatever the relay
+  accumulates from then on. Recovering historical plaintext still only takes
+  the passphrase and an encrypted vault backup — the passphrase remains the
+  security boundary.
 
 ## Roadmap
 
-Phases 0–5 are implemented. Phase 6 now has the encrypted immutable change log
-and live note/canvas/attachment capture and application; plugin capture,
-enrollment/key rotation, relay transport, multi-device desktop and mobile remain. The maintained checklist is
-in [`docs/ROADMAP.md`](docs/ROADMAP.md).
+Phases 0–5 are implemented. Phase 6 now has the encrypted immutable change log,
+live note/canvas/attachment/plugin capture and application, owner-signed device
+enrollment and removal with automatic epoch content-key rotation on revocation,
+owner-signed freshness checkpoints, an authenticated opaque self-hosted relay,
+an automated recovery drill, a frozen 1.0 on-disk format with committed
+conformance fixtures, read-only desktop sync status, and resumable
+content-addressed transport for attachment blobs of any size the vault
+accepts. Desktop-driven sync mutation (enrollment, revocation, relay
+push/pull from the app) and the independent security audit remain open — see
+[`docs/AUDIT-SCOPE.md`](docs/AUDIT-SCOPE.md) for the audit readiness package.
+Sync is desktop-to-desktop: Vault Brain stays local-first with optional
+self-hosted sync, so the passphrase never leaves a machine the owner controls
+and no hosted service is ever required.
+
+Phase 7 replaced the passphrase-derived content key with a wrapped keyring, so
+`vbrain passphrase change` re-wraps the keyset without re-encrypting a single
+object, both cores read the new format, and the key-derivation cost can be
+raised per vault. `vbrain rekey` — the answer to a leaked passphrase — the
+recovery-key slot and a desktop passphrase-change interface are the remaining
+Phase 7 work. The maintained checklist is in
+[`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## License
 

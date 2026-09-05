@@ -18,7 +18,7 @@ export interface PluginRequest {
 
 export interface PluginEmit {
   kind: "emit";
-  event: "ready" | "command" | "log";
+  event: "ready" | "command" | "log" | "heartbeat";
   payload: unknown;
 }
 
@@ -44,7 +44,12 @@ export interface HostBoot {
   source: string;
 }
 
-export type HostToPlugin = HostReply | HostInvoke | HostBoot;
+export interface HostPing {
+  kind: "ping";
+  nonce: number;
+}
+
+export type HostToPlugin = HostReply | HostInvoke | HostBoot | HostPing;
 
 export interface RegisteredCommand {
   pluginId: string;

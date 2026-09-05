@@ -54,7 +54,10 @@ test("v1 golden body, keyed ID, opened result, and compatibility barrel are froz
       .heads,
     [golden.id],
   );
-  assert.equal(syncCompatibility.MAX_SYNC_ATTACHMENT_BYTES, 6242304);
+  // Blob transport removed the 6,242,304-byte inline attachment ceiling; what
+  // the barrel pins now is the bound on the blob list that replaced it.
+  assert.equal("MAX_SYNC_ATTACHMENT_BYTES" in syncCompatibility, false);
+  assert.equal(syncCompatibility.MAX_ATTACHMENT_BLOBS, 256);
   const vaultDir = tempVault("barrel");
   const log = new syncCompatibility.SyncChangeLog(vaultDir, "barrel-passphrase");
   const appended = log.append(golden.body.deviceId, golden.body.mutation, golden.body.createdAt);
@@ -179,4 +182,96 @@ test("v1 protocol freezes admission limits and graph errors", () => {
     () => verifySyncChanges([base, { ...child, mutation: { ...child.mutation, baseRevision: 2, revision: 3 } }]),
     new RegExp(adversarial.errorPatterns.revisionJump, "u"),
   );
+});
+
+test("a version 3 change body is accepted and authorized like version 2", async () => {
+  const { FORMAT_COMPATIBILITY } = await import("../dist/format-version.js");
+  assert.deepEqual(FORMAT_COMPATIBILITY.syncChangeEnvelope.reads, [1, 2, 3]);
+  assert.deepEqual(FORMAT_COMPATIBILITY.syncChangeEnvelope.writes, [1, 2, 3]);
+});
+
+test("a version 3 change body without authorization is refused", async () => {
+  // The plan calls this validator `parseChangeBody`; the exported name in
+  // `src/sync.ts` is `validateSyncChangeBody`.
+  const { validateSyncChangeBody: parseChangeBody } = await import("../dist/sync.js");
+  assert.throws(
+    () =>
+      parseChangeBody({
+        version: 3,
+        deviceId: "11111111-1111-4111-8111-111111111111",
+        sequence: 1,
+        previousDeviceChange: null,
+        parents: [],
+        createdAt: "2026-09-04T00:00:00.000Z",
+        mutation: {
+          objectType: "attachment",
+          objectId: "b".repeat(64),
+          operation: "put",
+          baseRevision: null,
+          revision: 1,
+          value: { filename: "a.bin", mime: "text/plain", size: 2, chunks: 1, blobs: ["a".repeat(64)] },
+        },
+      }),
+    /authorization/i,
+  );
+});
+
+const AUTHORIZED_BODY = {
+  version: 3,
+  deviceId: "11111111-1111-4111-8111-111111111111",
+  sequence: 1,
+  previousDeviceChange: null,
+  parents: [],
+  createdAt: "2026-09-04T00:00:00.000Z",
+  authorization: { certificateSerial: 1, signature: Buffer.alloc(64).toString("base64") },
+  mutation: {
+    objectType: "attachment",
+    objectId: "b".repeat(64),
+    operation: "put",
+    baseRevision: null,
+    revision: 1,
+    value: { filename: "a.bin", mime: "text/plain", size: 2, chunks: 1, blobs: ["a".repeat(64)] },
+  },
+};
+
+function authorizedBody(overrides = {}) {
+  return structuredClone({ ...AUTHORIZED_BODY, ...overrides });
+}
+
+test("the change body version tracks the attachment snapshot form", async () => {
+  const { validateSyncChangeBody: parseChangeBody } = await import("../dist/sync.js");
+
+  // A blob manifest is exactly what version 3 means.
+  assert.equal(parseChangeBody(authorizedBody()).version, 3);
+
+  // ...so a version 3 body carrying anything else is not a version 3 body.
+  throwsError(
+    () =>
+      parseChangeBody(
+        authorizedBody({
+          mutation: {
+            ...AUTHORIZED_BODY.mutation,
+            value: { filename: "a.bin", mime: "text/plain", data: "aGk=" },
+          },
+        }),
+      ),
+    /version 3 sync change must carry an attachment blob manifest/iu,
+  );
+  throwsError(
+    () => parseChangeBody(authorizedBody({ mutation: { ...AUTHORIZED_BODY.mutation, objectType: "note" } })),
+    /version 3 sync change must carry an attachment blob manifest/iu,
+  );
+
+  // And the bug this closes: a blob manifest must never ride inside a version 2
+  // body, which an older client would accept at the version check and then choke on.
+  throwsError(
+    () => parseChangeBody(authorizedBody({ version: 2 })),
+    /blob manifest requires a version 3 sync change/iu,
+  );
+
+  // Version 1 is the pre-enrollment ladder with no authorized counterpart, so a
+  // registry-less device still writes its manifest there.
+  const legacy = authorizedBody({ version: 1 });
+  delete legacy.authorization;
+  assert.equal(parseChangeBody(legacy).version, 1);
 });

@@ -23,6 +23,8 @@
     "allow-create-from-template",
     "allow-open-daily-note",
     "allow-list-plugins",
+    "allow-authorize-plugin-instance",
+    "allow-plugin-call",
     "allow-get-plugin",
     "allow-get-plugin-security-policy",
     "allow-set-plugin-restricted-mode",
@@ -52,6 +54,8 @@
     "allow-add-attachment",
     "allow-read-attachment",
     "allow-list-attachments",
-    "allow-delete-attachment"
+    "allow-delete-attachment",
+    "allow-sync-status",
+    "allow-sync-verify-registry"
   ]
 }

@@ -68,28 +68,66 @@ Each phase must ship a usable vertical slice and keep older vaults readable.
 - [x] Local-model adapter
 - [x] Importer for Obsidian vaults with integrity report
 
-## Phase 6 — Encrypted sync and mobile
+## Phase 6 — Encrypted sync (desktop multi-device)
 
-- [ ] Immutable encrypted change protocol and conflict resolution
+Sync is desktop-to-desktop. Vault Brain stays local-first: the passphrase — the
+vault's only real security boundary — never leaves a machine the owner controls,
+and no hosted service is ever required.
+
+- [x] Immutable encrypted change protocol and conflict resolution
   - [x] Content-addressed encrypted envelopes, device chains, causal DAG validation and deterministic conflict inspection
   - [x] Emit changes automatically from note/canvas/attachment transactions and apply resolved remote changes to live storage
-  - [ ] Capture plugin package and plugin-policy transactions
-- [ ] Device enrollment, removal and key rotation
-- [ ] Untrusted relay server and self-hosted option
-- [ ] Desktop multi-device release, then iOS/Android clients
-- [ ] External security audit, recovery drill and stable 1.0 format
+  - [x] Capture plugin package and plugin-policy transactions
+- [x] Owner-signed device enrollment and sequence-bounded removal
+  - [x] Ed25519 proof-of-possession requests, signed certificates and encrypted registry exchange
+  - [x] Per-change device signatures, authority pinning, rollback rejection and revocation cutoffs
+- [x] Epoch-based content-key rotation
+  - [x] Random per-epoch content keys wrapped to each active device's X25519 key
+  - [x] Automatic rotation on owner-signed device revocation
+  - [x] Forward-only: a revoked device retains pre-rotation read access
+- [x] Owner-signed freshness checkpoints with explicit first-pin verification
+- [x] Authenticated opaque relay server and self-hosted option
+- [ ] Desktop multi-device release
+  - [x] Read-only desktop sync status; mutation remains CLI-only
+  - [ ] Desktop-driven enrollment, revocation and relay exchange
+- [x] Resumable chunked transport for large attachment blobs
+  - [x] Version 3 change bodies carry an attachment manifest; the bytes
+    travel as content-addressed, AEAD-sealed 1 MiB blobs
+  - [x] Per-chunk idempotent push and pull, and an apply that fails closed
+    while a chunk is missing
+  - [x] `sync blobs status/fetch/prune` and relay-free bundle transport via
+    `sync export --bundle` / `sync import`
+- [x] Automated encrypted-backup plus relay catch-up recovery drill
+- [ ] External security audit and stable 1.0 format
+  - [x] Stable 1.0 on-disk format with committed conformance fixtures
+  - [x] Frozen format inventory covers the keyring: `keyring.json` is in
+    `FORMAT_COMPATIBILITY` and the artifact catalogue, and the version 2
+    manifest tombstone is a stated 1.x carve-out rather than an undeclared
+    version bump
+  - [ ] External security audit (readiness package in `docs/AUDIT-SCOPE.md`)
 
 ## Phase 7 — Key wrapping, passphrase change and re-key
 
-- [x] Encrypted keyring: passphrase-wrapped keyset, adopting migration, keyed key-value envelope
-  - [x] Keyring format, vault format detection and cached keyset resolution
-  - [x] Key-value and grant files encrypted by the keyset and bound to their file identity
-  - [x] Document, attachment-identity and sync-change keys separated
-  - [x] `vbrain migrate` upgrades an existing vault without re-encrypting an object
-  - [x] Rust core opens a keyring vault, and both cores create new vaults keyring-native
-- [x] Passphrase change, including the KDF cost upgrade path
-- [ ] Full re-key after a compromised passphrase
-- [x] Survivable keyrings: a second way in, a way to look inside, and a record of every change
+The passphrase unwraps a keyring instead of deriving the content key directly,
+so it can change without re-encrypting the vault and the key-derivation cost
+can be raised per vault. Design contract:
+[`docs/superpowers/specs/2026-09-03-vault-keyring-design.md`](superpowers/specs/2026-09-03-vault-keyring-design.md).
+
+- [x] 7.1 Keyring format and migration (TypeScript)
+  - [x] `keyring.json` with a scrypt-wrapped keyset, kv envelope v2 and `vbrain migrate`
+  - [x] Committed v1 fixtures migrate with byte-identical attachment and sync change IDs
+- [x] 7.2 Rust read parity
+  - [x] The desktop core opens keyring vaults; new vaults are keyring-native in both cores
+  - [x] A manifest version tombstone makes an older build fail closed, not misread
+  - [x] A deterministic cross-core test vector pins the wire format
+- [x] 7.3 `vbrain passphrase change`
+  - [x] Re-wrap the keyset under a new passphrase at the current key-derivation cost
+  - [x] Verify before writing, refresh a remembered OS credential, zeroize on every path
+- [ ] 7.4 `vbrain rekey`
+  - [ ] Fresh data keys and a re-encrypted vault, so a leaked passphrase has an answer
+  - [ ] Resumable: interrupt a re-key at a random object, resume, and assert the
+    vault is complete and consistent
+- [x] 7.5 Survivable keyrings: a second way in, a way to look inside, and a record of every change
   - [x] Recovery slot, so one forgotten passphrase or one damaged `keyring.json` is not
         the permanent loss of every note. The format already carries a slot list and
         reserves this slot; nothing writes one yet, and the keyring concentrated into
@@ -104,3 +142,4 @@ Each phase must ship a usable vertical slice and keep older vaults readable.
         touch key material append nothing, so "when did this vault's passphrase last
         change" has no answer. The `audit` key is permanent, so entries written before
         and after a change verify in the same chain.
+- [ ] Desktop passphrase-change and re-key interface

@@ -63,7 +63,7 @@ function legacyDocumentKey(vaultDir: string, passphrase: string): Buffer | null 
   if (
     manifest.version !== 1 ||
     manifest.kdf?.name !== "scrypt" ||
-    manifest.kdf.N !== LEGACY_SCRYPT_N ||
+    (manifest.kdf.N !== LEGACY_SCRYPT_N && manifest.kdf.N !== 2 ** 16) ||
     !manifest.kdf.salt ||
     typeof manifest.verifier !== "string" ||
     !/^[a-f0-9]{64}$/u.test(manifest.verifier)
