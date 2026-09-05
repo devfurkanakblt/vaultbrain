@@ -2,19 +2,23 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Close the three gaps Phase 7.4 and 7.5 left open where they touch each
-other and Phase 8: the Rust core silently destroying `legacyChangeIdentity` on
-every re-wrap, `vbrain rekey` writing nothing to the audit chain, and two
-documents that name behaviour the code does not have.
+**Goal:** Repair the re-key and everything downstream of it. Phase 10 left
+`vbrain rekey` refusing outright on any vault with a retention policy; the Rust
+core destroys `legacyChangeIdentity` on every re-wrap; `vbrain rekey` writes
+nothing to the audit chain; a recovery kit cannot restore the mid-re-key vault
+its own code says it supports; and two documents name behaviour that does not
+exist.
 
 **Architecture:** Nothing here changes a format, a key derivation, or an AAD.
-Task 1 teaches the Rust core to carry one optional keyset field it currently
-drops, proved by a second frozen cross-core vector alongside the existing one.
-Task 2 wraps `rekeyVault`'s existing mutation window in the paired
+Task 0 adds one branch to the re-key walk for an artifact Phase 10 shipped
+without it. Task 1 teaches the Rust core to carry one optional keyset field it
+currently drops, proved by a second frozen cross-core vector alongside the
+existing one. Task 2 wraps `rekeyVault`'s existing mutation window in the paired
 pending/allowed/denied audit events every other key-material command already
 writes, using the pinned `audit` key that is identical on both sides of a
 re-key. Task 3 corrects the documentation and replaces one misleading Rust
-error string.
+error string. Task 4 gives recovery verification the retiring-key fallback every
+other read path in the vault already has.
 
 **Tech Stack:** TypeScript, Node.js `node:test`, Rust (`serde`, `zeroize`,
 `aes-gcm`), Commander.
@@ -58,15 +62,50 @@ error string.
 - **Two tests fail in an OneDrive-backed checkout for environmental reasons.**
   `test/durability.test.mjs` and `test/format-conformance.test.mjs` both call
   `fs.cpSync` on `test/fixtures`, which hard-crashes Node (exit 127, no
-  catchable error) under OneDrive. Baseline before this plan is **337/339**. If
-  you need a clean 339/339, run the suite from a worktree outside the OneDrive
-  tree. Do not "fix" these two.
+  catchable error) under OneDrive. Measured at 337/339 before Phase 9 and 10
+  merged; those added five test files, so the totals have moved but the two
+  failures and their cause have not. Measure your own baseline before Task 0 and
+  compare against that, not against a number written here. For a clean run, use
+  a worktree outside the OneDrive tree. Do not "fix" these two.
 - All production changes follow failing-test-first development, and each task
   ends with its own commit.
 
 ---
 
+## Execution order and what each task closes
+
+Task 0 first, then 1, 2, 3, 4. Only Task 0 is order-critical: it repairs a
+command the other tasks describe, and every test that calls `seedVault` fails
+until it lands. Tasks 1 through 4 are independent of each other.
+
+| Task | Closes |
+|---|---|
+| 0 | `vbrain rekey` refuses on any vault with a retention policy — a live defect Phase 10 introduced against the 7.4 walk |
+| 1 | The Rust core parses `legacyChangeIdentity`, ignores it, and writes it back out missing |
+| 2 | `vbrain rekey` appends nothing to the audit chain |
+| 3 | `docs/FORMAT-1.0.md` names a flag that does not exist; the desktop blames a correct passphrase |
+| 4 | A restore against a mid-re-key vault is refused as an unauthenticated kit |
+
+Phase 7.7 is complete when all five are done and the ROADMAP bullets Task 3
+writes are checked off. Two of those bullets are decisions rather than code —
+the personal-memory stubs and where the accepted limits live — and they are
+recorded below as decisions, not tasks.
+
+**The rule Task 0 exists because nothing enforced:** a phase that adds an
+encrypted artifact has to teach the re-key walk to classify it, and no test
+fails when one does not. Task 0 fixes the instance. The general guard —
+something that enumerates `FORMAT_COMPATIBILITY` and asserts the walk accepts
+every in-vault path in it — is a Phase 13 concern, and Task 3's roadmap bullet
+says so.
+
+---
+
 ## File Structure
+
+**Task 0 — the re-key walk classifies `documents/retention.enc`** (run first)
+- Modify `src/keyring-rekey.ts`: one branch in `classifyDocument`.
+- Modify `test/rekey-vault.test.mjs`: `seedVault` writes a retention policy, and
+  the walk's own assertions cover it.
 
 **Task 1 — Rust keyset field passthrough**
 - Modify `src-tauri/src/keyring.rs`: `KeySet`, `KeySetFile`, `parse_key_set`,
@@ -85,6 +124,134 @@ error string.
 - Modify `src-tauri/src/keyring.rs`: `unwrap_keyring`'s error for a keyset the
   core cannot parse.
 - Modify `docs/FORMAT-1.0.md`, `docs/ROADMAP.md`, `CHANGELOG.md`, `SECURITY.md`.
+
+**Task 4 — recovery verification tries the retiring keys**
+- Modify `src/keyring-recovery-verify.ts`: `verifyRecoveryKeySet` takes the
+  retiring keys and falls back to them per artifact.
+- Modify `src/keyring-recovery.ts`: pass the kit's retiring keys to it.
+- Modify `test/keyring-recovery.test.mjs`: restore against a mid-re-key vault.
+
+---
+
+### Task 0: The re-key walk classifies `documents/retention.enc`
+
+**Why this runs before everything else:** Phase 10 added `documents/retention.enc`
+— a real encrypted artifact, sealed under the `documents` key with AAD
+`secondbrain-vault:retention-policy:v1`, catalogued in `src/format-version.ts`
+as `retentionPolicy` — and did not touch `src/keyring-rekey.ts`.
+`classifyDocument` handles single-segment paths under `documents/` by checking
+`DOCUMENT_PLAINTEXT`, then `index.enc`, then `plugin-policy.enc`; everything
+else reaches the closing `throw new Error("Refusing to re-key: cannot classify
+documents/…")`. **So `vbrain rekey` refuses outright on any vault where a
+retention policy has been written.** It fails closed — the guard doing its job,
+not a corruption — but the command that answers a leaked passphrase does not
+run, and nothing else in this plan is worth doing while that is true.
+
+Neither side tests the seam: `test/retention.test.mjs` and `test/purge.test.mjs`
+never mention `rekey`, `test/rekey-vault.test.mjs` never mentions retention, and
+`seedVault` writes no policy — which is why the suite is green.
+
+**Files:**
+- Modify: `src/keyring-rekey.ts`, `classifyDocument`'s single-segment block
+- Test: `test/rekey-vault.test.mjs` (`seedVault`, plus one new test)
+
+**Interfaces:**
+- Consumes: `AAD.retentionPolicy` from `src/format-version.ts`, and
+  `DocumentVault.setRetentionPolicy(policy: RetentionPolicy, now?: number):
+  RetentionSweepReport` from `src/documents.ts`. Both already exist.
+- Produces: nothing new is exported.
+
+- [ ] **Step 1: Make `seedVault` write a retention policy**
+
+In `test/rekey-vault.test.mjs`, `seedVault` currently seeds one of every
+artifact class the walk has to classify, and retention is now one of them. Add
+the policy write immediately before `vault.lock()`:
+
+```js
+  // `keepRevisions: 5` is deliberately above what this vault holds, so the
+  // sweep the setter runs cannot delete the history the other tests assert on.
+  // The point is the artifact's existence, not its effect.
+  vault.setRetentionPolicy({ version: 1, keepRevisions: 5, keepDays: null });
+```
+
+`setRetentionPolicy` must be called while the vault is still open — it is a
+`DocumentVault` method and takes the vault lock itself.
+
+- [ ] **Step 2: Write the failing test**
+
+Add to `test/rekey-vault.test.mjs`, beside the other walk tests:
+
+```js
+test("the walk classifies the retention policy, and a re-key preserves it", () => {
+  const { dir } = seedVault();
+
+  const items = planRekey(dir);
+  const byPath = new Map(items.map((item) => [item.path, item]));
+  assert.deepEqual(byPath.get("documents/retention.enc"), {
+    path: "documents/retention.enc",
+    kind: "document",
+    identity: "secondbrain-vault:retention-policy:v1",
+  });
+
+  const next = "phase-77-retention-passphrase";
+  rekeyVault(dir, PASSPHRASE, next);
+  forgetVaultKeys();
+
+  // The policy must open under the new keys and still say what it said.
+  const vault = new DocumentVault(dir, next);
+  assert.deepEqual(vault.getRetentionPolicy(), {
+    version: 1,
+    keepRevisions: 5,
+    keepDays: null,
+  });
+  vault.lock();
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+```
+
+If `DocumentVault` is not already imported in this file it is — `seedVault`
+uses it — and `forgetVaultKeys` and `planRekey` are already imported too.
+
+- [ ] **Step 3: Run the tests to verify they fail**
+
+Run:
+
+```bash
+npm run build && node --test test/rekey-vault.test.mjs
+```
+
+Expected: a large number of failures, not one. Step 1 gives every test that
+calls `seedVault` a vault the walk cannot classify, so they fail with
+`Refusing to re-key: cannot classify documents/retention.enc` — which is
+precisely the live defect, reproduced. That is the signal to look for; do not
+proceed until you have seen it.
+
+- [ ] **Step 4: Add the classify branch**
+
+In `src/keyring-rekey.ts`, in `classifyDocument`'s `segments.length === 1`
+block, add a third line beside the two already there:
+
+```ts
+    if (segments[0] === "retention.enc") return item("document", AAD.retentionPolicy);
+```
+
+- [ ] **Step 5: Run the tests to verify they pass**
+
+Run:
+
+```bash
+npm run build && node --test test/rekey-vault.test.mjs test/keyring-rekey.test.mjs test/retention.test.mjs
+```
+
+Expected: PASS across all three files.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/keyring-rekey.ts test/rekey-vault.test.mjs
+git commit -m "fix(rekey): classify the retention policy, which was refusing every re-key"
+```
 
 ---
 
@@ -1121,15 +1288,21 @@ before `## Phase 8`:
         does not run. Nothing tests the seam from either side. The wider rule
         this broke should be stated somewhere a phase author will read it: an
         encrypted artifact is not shipped until the re-key walk classifies it.
-  - [ ] `verifyRecoveryKeySet` takes the re-key's object inventory and its
-        retiring fallback. `src/keyring-recovery-verify.ts` says in its own
-        comment that Phase 7.4's inventory "can extend this same boundary with
-        its full current/retiring scan when that branch is merged"; 7.4 merged
-        and the extension never happened. It still walks a hand-written list and
-        tries only the keys in force, so a restore against a vault caught
-        mid-re-key fails verification — precisely the moment recovery exists
-        for. It is also the second implementation of the walk `planRekey`
-        already owns, which is what Phase 13 is about.
+  - [ ] Recovery verification tries the retiring keys. `restoreVaultKeyring`
+        already carries a kit's retiring keys through and says in its own
+        comment that a kit "can itself be restored while a re-key is still
+        mid-flight", but it verifies against the keys in force only, so that
+        restore is refused as an unauthenticated kit — precisely the moment
+        recovery exists for. The inventory half of the promise
+        `src/keyring-recovery-verify.ts` has carried since before 7.4 merged is
+        declined on purpose: proving each key opens one artifact of its class is
+        the whole job, and walking every revision would cost more without
+        proving more.
+  - [ ] Nothing fails when a phase adds an encrypted artifact the re-key walk
+        cannot classify — which is how `documents/retention.enc` came to refuse
+        every re-key. A check that enumerates `FORMAT_COMPATIBILITY` and asserts
+        `classifyDocument` accepts every in-vault path in it belongs with the
+        other one-implementation-of-each-thing work in Phase 13.
   - [ ] A decision on the personal-memory work merged from `phase-7-6`.
         `src/memory/` is 278 lines of stub — an in-memory `Map` for a queue the
         commit message calls durable, no `src-tauri/src/memory/`, no `vbrain
@@ -1207,10 +1380,10 @@ npm run quality && npm run quality:rust
 ```
 
 Expected: lint, format, typecheck and the desktop build clean. `npm test` in an
-OneDrive-backed checkout reports **337/339** with `test/durability.test.mjs` and
-`test/format-conformance.test.mjs` failing on the pre-existing `fs.cpSync`
-crash — that is the unchanged baseline, not a regression from this plan. Confirm
-it by checking that no other test file is in the failure list. `cargo clippy`
+OneDrive-backed checkout fails exactly two files, `test/durability.test.mjs` and
+`test/format-conformance.test.mjs`, on the pre-existing `fs.cpSync` crash — the
+unchanged baseline, not a regression from this plan. Confirm it by checking that
+no other test file is in the failure list. `cargo clippy`
 must be clean with `-D warnings`.
 
 - [ ] **Step 10: Regenerate the graph**
@@ -1224,6 +1397,239 @@ graphify update .
 ```bash
 git add src-tauri/src/keyring.rs docs/FORMAT-1.0.md docs/ROADMAP.md SECURITY.md CHANGELOG.md graphify-out
 git commit -m "docs: record what a re-key leaves behind, and stop misnaming a mid-re-key vault"
+```
+
+---
+
+### Task 4: Recovery verification tries the retiring keys
+
+**Why:** `restoreVaultKeyring` already decided this. It unwraps the kit with
+`unwrapSlotKeySet` and carries `retiring` and `legacyChangeIdentity` into the
+new primary slot, and its comment says why in as many words: "a recovery kit can
+itself be restored while a re-key is still mid-flight (the recovery slot the kit
+mirrors is never touched by staging)". But two lines later it calls
+`verifyRecoveryKeySet(vaultDir, keys)` with the keys in force only. On a vault
+caught mid-re-key, the objects the interrupted run had not yet reached are still
+sealed under the retiring keys, verification throws, and the catch turns it into
+**"This recovery kit does not authenticate the selected vault."** — a restore
+refused in exactly the case the surrounding code was written to support, with a
+message that blames the kit.
+
+`src/keyring-recovery-verify.ts` says the same thing from the other side: Phase
+7.4's inventory "can extend this same boundary with its full current/retiring
+scan when that branch is merged". 7.4 merged; the scan never arrived.
+
+**The inventory half is declined, deliberately.** `planRekey` classifies every
+artifact because every one must be re-encrypted. Verification has a different
+job: prove each key in the recovered keyset opens something this vault wrote.
+`index.enc` proves `documents`, any `*.kv.enc` proves `kv`, a change proves
+`syncChange` and `syncEnvelope`, the chain proves `audit`. Walking every note
+revision and attachment chunk would multiply the cost of a restore without
+proving anything the first artifact of each class did not. Say so in the
+comment rather than leaving the promise open — the two lists are not the same
+list, and collapsing them to remove duplication would weaken a security check to
+save repetition.
+
+**Files:**
+- Modify: `src/keyring-recovery-verify.ts` — `verifyRecoveryKeySet`'s signature
+  and each decrypt attempt
+- Modify: `src/keyring-recovery.ts` — the one call site, inside
+  `restoreVaultKeyring`
+- Test: `test/keyring-recovery.test.mjs`
+
+**Interfaces:**
+- Consumes: `RetiringKeys` from `src/keyring.ts` (`{ documents, kv,
+  syncEnvelope }`, one `Buffer` each) — the type `unwrapSlotKeySet` already
+  returns as `retiring`.
+- Produces: `verifyRecoveryKeySet(vaultDir: string, keys: KeySet, retiring?:
+  RetiringKeys | null): number` — the third parameter is optional, so no other
+  caller changes.
+
+- [ ] **Step 1: Write the failing test**
+
+Add to `test/keyring-recovery.test.mjs`. It needs a vault deliberately left in
+the retiring state, which is what a keyring whose slot carries retiring keys
+is — `wrapKeySet`'s fourth argument, the same one `rekeyVault` uses at its
+commit point:
+
+```js
+test("a kit restores a vault caught mid-re-key, whose objects are still under the retiring keys", () => {
+  const { vault, kit } = tempLayout();
+  const keys = openOrCreateVaultKeys(vault, PASSPHRASE);
+  assert.ok(keys);
+  const created = createRecoveryKit(vault, PASSPHRASE, kit);
+
+  // Seed content under the keys in force, then republish the keyring with a
+  // fresh rotatable set in force and the keys that actually sealed that content
+  // recorded as retiring — the exact shape `commitRekey` publishes, and the
+  // shape a vault is left in when a re-key is interrupted after that point.
+  upsertEntry(vault, "health", "BLOOD_TYPE", "0 Rh+", "blood group", PASSPHRASE);
+  const rotated = randomKeySet();
+  for (const name of ["attachmentId", "syncChange", "audit"]) {
+    rotated[name].fill(0);
+    rotated[name] = Buffer.from(keys[name]);
+  }
+  const retiring = {
+    documents: Buffer.from(keys.documents),
+    kv: Buffer.from(keys.kv),
+    syncEnvelope: Buffer.from(keys.syncEnvelope),
+  };
+  writeKeyring(vault, {
+    version: KEYRING_VERSION,
+    slots: [wrapKeySet(rotated, PASSPHRASE, DEFAULT_SCRYPT_N, retiring), created.slot],
+  });
+  forgetVaultKeys();
+  zeroKeySet(keys);
+
+  // The kit mirrors the same slot, so it carries the same retiring keys. The
+  // restore must verify against them rather than blaming the kit.
+  const report = restoreVaultKeyring(vault, kit, created.recoveryCode, NEW_PASSPHRASE);
+  assert.ok(report.verifiedObjects > 0);
+
+  assert.equal(loadVaultFile(vault, "health", NEW_PASSPHRASE)[0].value, "0 Rh+");
+});
+```
+
+`created.slot` is the recovery slot `createRecoveryKit` installed; if the report
+does not expose it, read it back with `readKeyring(vault)` and take the slot
+whose `label` is `"recovery"`. Add any of `randomKeySet`, `writeKeyring`,
+`wrapKeySet`, `readKeyring`, `KEYRING_VERSION`, `DEFAULT_SCRYPT_N`,
+`forgetVaultKeys`, `zeroKeySet` or `upsertEntry` that the file does not already
+import.
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run:
+
+```bash
+npm run build && node --test test/keyring-recovery.test.mjs
+```
+
+Expected: FAIL with `This recovery kit does not authenticate the selected
+vault.` — the defect, reproduced.
+
+- [ ] **Step 3: Give `verifyRecoveryKeySet` the fallback**
+
+In `src/keyring-recovery-verify.ts`, take the retiring keys and try them when
+the key in force does not authenticate. Replace the signature and add a helper
+above it:
+
+```ts
+/**
+ * Try the key in force, then the outgoing one. A vault caught between the
+ * commit point of a re-key and its last installed object holds both: the
+ * keyring publishes the new keyset with the old rotatable keys recorded as
+ * retiring, and every read path falls back the same way. Safe because each
+ * artifact's AAD already binds its identity, so a fallback cannot succeed
+ * against the wrong object — it can only succeed against the right object
+ * sealed under the previous key.
+ */
+function openWithFallback<T>(open: (key: Buffer) => T, current: Buffer, outgoing: Buffer | undefined): T {
+  try {
+    return open(current);
+  } catch (error) {
+    if (!outgoing) throw error;
+    return open(outgoing);
+  }
+}
+
+/**
+ * Prove that independently recovered keys belong to this vault before replacing
+ * keyring.json.
+ *
+ * Deliberately not `planRekey`'s inventory. That walk classifies every artifact
+ * because every one must be re-encrypted; this one only has to prove each key
+ * opens something the vault wrote, and one artifact of each class does that.
+ * Walking every revision and chunk would multiply the cost of a restore without
+ * proving anything more.
+ */
+export function verifyRecoveryKeySet(
+  vaultDir: string,
+  keys: KeySet,
+  retiring: RetiringKeys | null = null,
+): number {
+```
+
+Then wrap each decrypt in the existing body. The `documents`-key artifacts —
+`documents/index.enc` and `documents/sync/applied.enc`:
+
+```ts
+    openWithFallback(
+      (key) => JSON.parse(decryptDocument(readPayload<DocumentPayload>(indexPath), key, AAD.documentIndex)),
+      keys.documents,
+      retiring?.documents,
+    );
+```
+
+the `kv`-key artifacts — each `*.kv.enc` and `grants.enc`:
+
+```ts
+      openWithFallback(
+        (key) => decryptWithKey(readPayload<KeyedEncryptedPayload>(filePath), key, logicalName),
+        keys.kv,
+        retiring?.kv,
+      );
+```
+
+and each sync change, where `syncChange` is pinned and only the envelope key
+rotates:
+
+```ts
+      openWithFallback(
+        (key) =>
+          openSyncChange(readPayload(resolveInside(vaultDir, path.join("documents", "sync", "changes", entry.name))), {
+            syncChangeKey: keys.syncChange,
+            syncEnvelopeKey: key,
+          }),
+        keys.syncEnvelope,
+        retiring?.syncEnvelope,
+      );
+```
+
+The audit chain gets no fallback: `audit` is pinned and never rotates, so a
+failure there is a real mismatch. Import `RetiringKeys` as a type from
+`./keyring.js` beside the existing `KeySet` import.
+
+- [ ] **Step 4: Pass the kit's retiring keys at the call site**
+
+In `src/keyring-recovery.ts`, inside `restoreVaultKeyring`, the call already has
+`retiring` in scope — it is unwrapped from the kit a few lines above and carried
+into the new primary slot:
+
+```ts
+      verifiedObjects = verifyRecoveryKeySet(vaultDir, keys, retiring);
+```
+
+- [ ] **Step 5: Run the tests to verify they pass**
+
+Run:
+
+```bash
+npm run build && node --test test/keyring-recovery.test.mjs test/rekey-vault.test.mjs
+```
+
+Expected: PASS. `test/rekey-vault.test.mjs` is in the list because its
+recovery-during-re-key tests exercise the same call site.
+
+- [ ] **Step 6: Say it in `SECURITY.md`**
+
+In the "Keyring and recovery limits" section, after the recovery-slot bullets,
+add:
+
+```markdown
+- A recovery kit restores a vault caught mid-re-key. Between a re-key's commit
+  point and its last installed object, the vault holds objects under both the
+  new and the outgoing keys; the kit carries both, and verification tries the
+  outgoing key when the one in force does not authenticate. Each artifact's
+  AAD binds its own identity, so the fallback cannot succeed against the wrong
+  object. The audit chain has no fallback, because its key is never rotated.
+```
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/keyring-recovery-verify.ts src/keyring-recovery.ts test/keyring-recovery.test.mjs SECURITY.md
+git commit -m "fix(recovery): verify a mid-re-key vault against its retiring keys"
 ```
 
 ---
@@ -1244,65 +1650,3 @@ These stay where they are and are **not** part of Phase 7.7:
   as a decision to make; it is not something this plan's tasks resolve, and it
   is not a bug to fix. Whoever takes it decides between writing it up as a phase
   and removing the stubs, and both are larger than a correction to shipped work.
-
-## Found while rebasing onto Phase 10: `vbrain rekey` is refusing today
-
-**This is a live defect on `main`, not a gap in shipped 7.4 work, and it is the
-most urgent item in this document.** Phase 10 added a new encrypted in-vault
-artifact — `documents/retention.enc`, sealed under the `documents` key with AAD
-`secondbrain-vault:retention-policy:v1`, catalogued in `src/format-version.ts`
-as `retentionPolicy` — and did not touch `src/keyring-rekey.ts`.
-
-`classifyDocument` matches single-segment paths under `documents/` against
-`DOCUMENT_PLAINTEXT`, then `index.enc`, then `plugin-policy.enc`, and every
-unmatched path falls through to its closing
-`throw new Error("Refusing to re-key: cannot classify documents/…")`.
-`retention.enc` matches none of them. **So on any vault where a retention policy
-has been written, `vbrain rekey` now refuses outright** — the command that exists
-to answer a leaked passphrase does not run at all.
-
-It fails closed, which is the guard working exactly as 7.4 designed it: an
-unclassifiable artifact stops the re-key rather than being silently left sealed
-under a key that is about to be retired. Nothing is lost or corrupted. But the
-refusal is total, and nothing reports why to a user who did not write the walk.
-
-Nothing tests the seam in either direction: `test/retention.test.mjs` and
-`test/purge.test.mjs` never mention `rekey`, and `test/rekey-vault.test.mjs`
-never mentions retention. `seedVault` writes no retention policy, which is why
-the suite is green.
-
-The fix is one classify branch beside the two that are already there, returning
-a `document` item under `AAD.retentionPolicy`, plus a `seedVault` that writes a
-retention policy so the walk's own tests cover it. It is small, but it is a
-behaviour change to the re-key walk and it needs its own task written the way
-Tasks 1–3 are written, with the failing test first. **Do it before Tasks 1–3, or
-at least before 7.7 is checked off** — the two documentation tasks here describe
-a command that a class of vaults cannot currently run.
-
-The wider point belongs on the roadmap rather than in this plan: any phase that
-adds an encrypted artifact has to teach the re-key walk about it, and there is
-no test that fails when one does not.
-
-## Known gap in this plan
-
-Task 3 adds a `verifyRecoveryKeySet` bullet to ROADMAP 7.7, and **Tasks 1–3 do
-not implement it.** It is recorded there because it belongs to this phase's
-subject — what 7.4 left behind in 7.5's code — and because its own source
-comment has been promising it since before 7.4 merged. It needs its own task,
-written the way Tasks 1–3 are written, before 7.7 can be checked off:
-
-- Decide whether the verification walk should call `planRekey` directly or
-  whether the two should share an extracted inventory. `planRekey` classifies
-  by AAD for re-encryption; verification only needs to prove each key opens
-  something. They are not obviously the same list, and collapsing them wrongly
-  would weaken a security check to save duplication.
-- Decide what a restore against a mid-re-key vault should do: verify against the
-  retiring keys as well and proceed, or refuse with a message naming `vbrain
-  rekey`. Refusing is the smaller change and may be the right one — a keyring
-  being restored while a re-key is half-committed is two recovery operations
-  racing each other.
-- Whichever is chosen, the test that matters is a restore against a vault
-  deliberately left in the retiring state, which `test/rekey-vault.test.mjs`
-  already knows how to produce.
-
-Nothing else in this plan depends on that task, so Tasks 1–3 can land first.
