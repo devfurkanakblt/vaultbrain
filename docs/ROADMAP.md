@@ -227,21 +227,23 @@ and no command or documented procedure says so to a user.
 
 ## Phase 10 — Deletion that deletes, and history that ends
 
-`remove` archives a revision before it unlinks the object, so a deleted note's
-content stays under `documents/history/` for the life of the vault. For a
+`remove` archived a revision before it unlinked the object, so a deleted note's
+content stayed under `documents/history/` for the life of the vault. For a
 product that invites medical, financial and identity data, "I need this gone"
-has no answer. Nothing prunes revisions either, so a note edited daily grows a
+had no answer. Nothing pruned revisions either, so a note edited daily grew a
 file per edit forever.
 
-- [ ] `vbrain purge`: permanent removal of a note, canvas or attachment and
+- [x] `vbrain purge`: permanent removal of a note, canvas or attachment and
       every revision of it. Distinct from `remove`, and refusing to run without
       an explicit confirmation.
-- [ ] A revision retention policy the vault carries and both cores honour, with
+- [x] A revision retention policy the vault carries and both cores honour, with
       a command that applies it to history that already exists.
-- [ ] Say plainly what a purge cannot reach: a purged object still exists in any
+- [x] Say plainly what a purge cannot reach: a purged object still exists in any
       backup taken before it, in any sync change already pushed to a relay, and
       on any device that pulled it. Whether a purge propagates as a tombstone is
       a separate decision, and this phase records which one is taken.
+      [`docs/DELETION.md`](DELETION.md) states the limits and records the
+      decision: a purge is local, and 1.x ships no tombstone.
 
 ## Phase 11 — macOS and Linux
 
