@@ -163,6 +163,25 @@ function epochKeyPath(rootDir: string, epoch: number): string {
   return resolveInside(epochKeyDir(rootDir), `${assertStorableEpoch(epoch)}.key.enc`);
 }
 
+/**
+ * Whether this device already holds the content key for `epoch`. A probe, not
+ * a read: it answers without decrypting anything, so there is no key buffer to
+ * own or to zero.
+ */
+export function hasEpochKey(rootDir: string, epoch: number): boolean {
+  const filePath = epochKeyPath(rootDir, epoch);
+  if (!fs.existsSync(filePath)) return false;
+  assertNotSymlink(filePath);
+  return true;
+}
+
+/**
+ * The epoch's content key, decrypted into a fresh buffer that the caller owns
+ * and should zero once it is done with it -- the same ownership model as
+ * `unwrapEpochKey`. `undefined` means this device was never handed that
+ * epoch's key; when the question is only whether it is present, use
+ * `hasEpochKey` and decrypt nothing.
+ */
 export function readEpochKey(rootDir: string, vaultKey: Buffer, epoch: number): Buffer | undefined {
   const filePath = epochKeyPath(rootDir, epoch);
   if (!fs.existsSync(filePath)) return undefined;

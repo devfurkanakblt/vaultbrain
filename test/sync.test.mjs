@@ -631,8 +631,30 @@ test("enrollment stores an X25519 agreement key that never leaves the device", (
     assert.ok(fs.existsSync(keyFile), "the agreement private key is written locally");
     assert.doesNotMatch(fs.readFileSync(keyFile, "utf8"), /-----BEGIN/u, "it is stored as ciphertext");
 
-    // It is absent from everything the owner ever sends.
-    assert.doesNotMatch(JSON.stringify(owner.exportRegistry()), new RegExp(DEVICE_B, "u"));
+    // The bundle the owner sends is opaque on the wire...
+    const bundle = owner.exportRegistry();
+    assert.doesNotMatch(JSON.stringify(bundle), new RegExp(DEVICE_B, "u"));
+
+    // ...and decrypting it shows what it actually carries, which is the point:
+    // grepping ciphertext for a UUID only ever proves that it is ciphertext.
+    // Each record is exactly a certificate and its signature, and the
+    // certificate is exactly the device's public halves -- no field of the
+    // enrolling device's private material rides along.
+    const plain = owner.inspectRegistry(bundle);
+    const record = plain.body.devices.find((item) => item.certificate.deviceId === DEVICE_B);
+    assert.deepEqual(Object.keys(record).sort(), ["certificate", "certificateSignature"]);
+    assert.deepEqual(Object.keys(record.certificate).sort(), [
+      "deviceId",
+      "enrolledAt",
+      "epoch",
+      "keyAgreementKey",
+      "name",
+      "publicKey",
+      "serial",
+      "version",
+    ]);
+    assert.equal(record.certificate.keyAgreementKey, request.keyAgreementKey, "only the public half travels");
+    assert.equal(record.certificate.publicKey, request.publicKey);
   } finally {
     owner.close();
     peer.close();
@@ -764,6 +786,88 @@ test("revoking a device rotates the epoch and locks it out of later changes", ()
     const revoked = rotated.body.devices.find((r) => r.certificate.deviceId === DEVICE_B);
     assert.equal(revoked.certificate.epoch, 1);
     assert.ok(revoked.revokedAt);
+  } finally {
+    owner.close();
+    peer.close();
+  }
+});
+
+
+test("a failed agreement-key write rolls the identity key back so the request can be retried", () => {
+  const vaultDir = tempVault("enroll-rollback");
+  const manager = new SyncDeviceManager(vaultDir, PASSPHRASE);
+  try {
+    manager.initializeOwner("Owner laptop", DEVICE_A);
+    const identityDir = path.join(vaultDir, "documents", "sync", "identity");
+    // Occupy the agreement key's path with a directory, so the second of the
+    // two writes fails after the first one has already landed.
+    fs.mkdirSync(path.join(identityDir, `${DEVICE_B}.x25519.key.enc`), { recursive: true });
+
+    assert.throws(() => manager.createEnrollmentRequest("Travel laptop", DEVICE_B));
+    assert.ok(
+      !fs.existsSync(path.join(identityDir, `${DEVICE_B}.key.enc`)),
+      "the identity key written first did not survive the failure",
+    );
+
+    // So the retry reaches the real fault instead of the pending-key guard.
+    assert.throws(
+      () => manager.createEnrollmentRequest("Travel laptop", DEVICE_B),
+      (error) => !/pending private key/u.test(error.message),
+      "a retry is not blocked by a half-written enrollment",
+    );
+  } finally {
+    manager.close();
+  }
+});
+test("revocation refuses to rotate while another active device still holds a version 1 certificate", () => {
+  const ownerVault = tempVault("rotate-legacy-owner");
+  const owner = new SyncDeviceManager(ownerVault, PASSPHRASE);
+  owner.initializeOwner("Owner laptop", DEVICE_A);
+
+  const peerVault = tempVault("rotate-legacy-peer");
+  fs.rmSync(peerVault, { recursive: true, force: true });
+  fs.cpSync(ownerVault, peerVault, { recursive: true });
+  fs.rmSync(path.join(peerVault, "documents", "sync", "identity", "authority.key.enc"));
+  fs.rmSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.key.enc`));
+  fs.rmSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.x25519.key.enc`));
+  const peer = new SyncDeviceManager(peerVault, PASSPHRASE);
+  try {
+    owner.enroll(peer.createEnrollmentRequest("Travel laptop", DEVICE_B));
+
+    // A third device enrolled the way an older build did: version 1, no
+    // agreement key, so a new epoch key could never be wrapped to it.
+    const legacyPair = crypto.generateKeyPairSync("ed25519");
+    const unsigned = {
+      version: 1,
+      deviceId: DEVICE_C,
+      name: "Legacy build laptop",
+      publicKey: legacyPair.publicKey.export({ format: "der", type: "spki" }).toString("base64"),
+      requestedAt: "2026-09-03T09:00:00.000Z",
+      nonce: crypto.randomBytes(32).toString("base64"),
+    };
+    const proof = crypto
+      .sign(null, Buffer.from(canonicalSyncJson(unsigned), "utf8"), legacyPair.privateKey)
+      .toString("base64");
+    const enrolled = owner.enroll({ ...unsigned, proof }, "2026-09-03T09:01:00.000Z");
+    assert.equal(enrolled.body.epoch, 1, "enrolling a legacy device does not rotate on its own");
+
+    // Revoking the *other* device would have to wrap the new epoch key to the
+    // legacy device, which has nothing to wrap it to. Refuse instead of
+    // rotating a device silently out of the vault.
+    assert.throws(
+      () => owner.revoke(DEVICE_B, 0),
+      new RegExp(`${DEVICE_C} predates key agreement`, "u"),
+      "the guard names the offending device",
+    );
+
+    // The refusal is total: no epoch advance, no half-applied revocation.
+    const after = owner.state();
+    assert.equal(after.body.epoch, 1, "the epoch did not advance");
+    assert.equal(after.body.revision, enrolled.body.revision, "no new signed revision was written");
+    assert.ok(
+      !after.body.devices.find((record) => record.certificate.deviceId === DEVICE_B).revokedAt,
+      "the target device is still active",
+    );
   } finally {
     owner.close();
     peer.close();

@@ -44,6 +44,7 @@ import {
   generateAgreementKeyPair,
   validateEpochKeyWrap,
   EPOCH_KEY_BYTES,
+  hasEpochKey,
   readEpochKey,
   saveEpochKey,
   wrapEpochKey,
@@ -876,6 +877,15 @@ function validateSignedDeviceRegistry(value: unknown): SignedSyncDeviceRegistry 
     legacyChangeIds,
     devices,
   };
+  // The registry version and its epoch move together: version 2 exists to carry
+  // wrapped epoch keys, and epoch 1 is sealed with the vault key. Checking the
+  // pair here, before the keys themselves, keeps an epoch-1 version-2 registry
+  // to one message whether or not it carried epoch keys.
+  if ((raw.version === 2) !== (body.epoch >= 2)) {
+    throw new Error(
+      "A device registry is version 2 exactly when its epoch is 2 or above: epoch 1 is sealed with the vault key.",
+    );
+  }
   if (raw.version === 2) {
     if (!Array.isArray(raw.epochKeys)) throw new Error("A version 2 device registry must list epoch keys.");
     body.epochKeys = raw.epochKeys.map((wrap) => validateEpochKeyWrap(wrap));
@@ -890,11 +900,8 @@ function validateSignedDeviceRegistry(value: unknown): SignedSyncDeviceRegistry 
     }
   }
 
-  if (body.epoch === 1) {
-    if (body.epochKeys !== undefined) {
-      throw new Error("Epoch 1 is sealed with the vault key and carries no wrapped epoch keys.");
-    }
-  } else {
+  if (body.epoch >= 2) {
+    // Restates the pair rule above, and is what narrows epochKeys below.
     if (body.version !== 2 || !body.epochKeys) {
       throw new Error("A registry at epoch 2 or above must be version 2 and carry epoch keys.");
     }
@@ -1409,7 +1416,16 @@ export class SyncDeviceManager {
         this.key(),
         syncDeviceKeyAad(deviceId),
       );
-      saveAgreementKey(this.session.rootDir, this.key(), deviceId, agreement.privateKey);
+      try {
+        saveAgreementKey(this.session.rootDir, this.key(), deviceId, agreement.privateKey);
+      } catch (error) {
+        // The two keys are one unit: a device holding an identity key but no
+        // agreement key can never be issued an epoch wrap, and the pending-key
+        // guard above would then refuse the retry that would fix it. Undo the
+        // first write so asking again is all it takes.
+        fs.rmSync(deviceKeyPath(this.session.rootDir, deviceId), { force: true });
+        throw error;
+      }
       return validateEnrollmentRequest(request);
     });
   }
@@ -1597,9 +1613,12 @@ export class SyncDeviceManager {
         }
       }
       // Adopt the epoch key wrapped to whichever local device this vault holds.
-      if (incoming.body.epoch > 1 && incoming.body.epochKeys) {
+      if (
+        incoming.body.epoch > 1 &&
+        incoming.body.epochKeys &&
+        !hasEpochKey(this.session.rootDir, incoming.body.epoch)
+      ) {
         for (const wrap of incoming.body.epochKeys) {
-          if (readEpochKey(this.session.rootDir, this.key(), incoming.body.epoch)) break;
           if (!fs.existsSync(agreementKeyPath(this.session.rootDir, wrap.deviceId))) continue;
           const privateKey = readAgreementKey(this.session.rootDir, this.key(), wrap.deviceId);
           const epochKey = unwrapEpochKey(wrap, incoming.body.epoch, wrap.deviceId, privateKey);
