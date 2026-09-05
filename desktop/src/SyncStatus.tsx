@@ -1,8 +1,10 @@
-import { AlertTriangle, Ban, CheckCircle2, Fingerprint, RefreshCw } from "lucide-react";
+import { AlertTriangle, Ban, CheckCircle2, Fingerprint, RefreshCw, ShieldAlert, ShieldCheck } from "lucide-react";
 import type { SyncStatusData } from "./types";
 
 interface SyncStatusProps {
   status: SyncStatusData | null;
+  /** Owner-signature check from `sync_verify_registry`; `null` until it answers. */
+  registryVerified?: boolean | null;
 }
 
 /**
@@ -13,7 +15,7 @@ interface SyncStatusProps {
  * sync protocol keeps exactly one authoritative implementation. This panel
  * only ever reads what `sync_status` and `sync_verify_registry` report.
  */
-export function SyncStatus({ status }: SyncStatusProps) {
+export function SyncStatus({ status, registryVerified = null }: SyncStatusProps) {
   if (!status || !status.enrolled) return null;
 
   return <section className="sync-view" aria-label="Sync status">
@@ -34,6 +36,15 @@ export function SyncStatus({ status }: SyncStatusProps) {
         </div>
         <div><span><b>Epoch</b><code>epoch {status.epoch}</code></span></div>
         <div><span><b>Registry revision</b><code>{status.registryRevision}</code></span></div>
+        {registryVerified === null ? null : registryVerified
+          ? <div>
+              <ShieldCheck size={14} />
+              <span><b>Owner signature</b><code>verified</code></span>
+            </div>
+          : <div className="sync-unverified">
+              <ShieldAlert size={14} />
+              <span><b>Owner signature</b><code>does not verify</code></span>
+            </div>}
       </section>
 
       <section className="sync-devices" aria-label="Enrolled devices">
@@ -63,11 +74,13 @@ export function SyncStatus({ status }: SyncStatusProps) {
       <section className="sync-counts" aria-label="Change counts">
         <p>{status.changeCount} changes recorded, {status.appliedObjectCount} objects synced</p>
       </section>
-
-      <footer className="sync-footer">
-        <p>Sync is read-only in the desktop app. Run mutations from the CLI:</p>
-        <code>vbrain --experimental-trusted-sync sync devices list</code>
-      </footer>
     </>}
+
+    {/* Guidance, not interpreted vault data: it stays true, and stays useful,
+        even when the registry itself is from a format this build cannot read. */}
+    <footer className="sync-footer">
+      <p>Sync is read-only in the desktop app. Run mutations from the CLI:</p>
+      <code>vbrain --experimental-trusted-sync sync devices list</code>
+    </footer>
   </section>;
 }

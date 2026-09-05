@@ -65,9 +65,33 @@ describe("SyncStatus", () => {
   });
 
   it("explains an unreadable newer format instead of failing, and hides the interpreted detail", () => {
-    render(<SyncStatus status={{ ...base, readable: false, registryVersion: 99 }} />);
+    render(<SyncStatus status={{ ...base, readable: false, registryVersion: 99 }} registryVerified={true} />);
     expect(screen.getByText(/newer format this build cannot display/i)).toBeInTheDocument();
     expect(screen.queryByText("Owner laptop")).not.toBeInTheDocument();
-    expect(screen.queryByText(/vbrain --experimental-trusted-sync/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/verified/i)).not.toBeInTheDocument();
+  });
+
+  it("keeps the CLI-only guidance even when the registry cannot be displayed", () => {
+    render(<SyncStatus status={{ ...base, readable: false, registryVersion: 99 }} />);
+    expect(screen.getByText(/read-only/i)).toBeInTheDocument();
+    expect(screen.getByText(/vbrain --experimental-trusted-sync sync devices list/)).toBeInTheDocument();
+  });
+
+  it("claims nothing about the owner signature until the check answers", () => {
+    render(<SyncStatus status={base} />);
+    expect(screen.queryByText(/owner signature/i)).not.toBeInTheDocument();
+  });
+
+  it("reports a registry the owner signed", () => {
+    render(<SyncStatus status={base} registryVerified={true} />);
+    const summary = within(screen.getByLabelText("Registry summary"));
+    expect(summary.getByText(/owner signature/i)).toBeInTheDocument();
+    expect(summary.getByText("verified")).toBeInTheDocument();
+  });
+
+  it("flags a registry whose owner signature does not verify", () => {
+    render(<SyncStatus status={base} registryVerified={false} />);
+    const summary = within(screen.getByLabelText("Registry summary"));
+    expect(summary.getByText("does not verify")).toBeInTheDocument();
   });
 });

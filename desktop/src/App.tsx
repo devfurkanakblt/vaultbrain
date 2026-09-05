@@ -299,6 +299,7 @@ export function App() {
   const revealToken = useRef(0);
   const documentBody = useRef<HTMLDivElement>(null);
   const [syncStatus, setSyncStatus] = useState<SyncStatusData | null>(null);
+  const [syncRegistryVerified, setSyncRegistryVerified] = useState<boolean | null>(null);
   const [notice, setNotice] = useState("");
   const [lockNotice, setLockNotice] = useState("");
   const [idleMinutes, setIdleMinutes] = useState(readIdlePreference);
@@ -485,7 +486,7 @@ export function App() {
     pluginHost.current?.stopAll();
     setPlugins([]); setPluginStates([]); setPluginCommands([]); setPluginPanels([]);
     setWorkspaceView("notes"); setGraph({ nodes: [], edges: [] }); setPropertyRows([]); setSavedViews([]);
-    setCanvases([]); setAttachments([]); setSyncStatus(null);
+    setCanvases([]); setAttachments([]); setSyncStatus(null); setSyncRegistryVerified(null);
     setLockNotice(reason === "inactivity"
       ? `Locked automatically after ${idleMinutes} minute${idleMinutes === 1 ? "" : "s"} without activity. The clipboard was cleared too.`
       : "");
@@ -674,7 +675,13 @@ export function App() {
     }
     if (next === "canvas" || next === "files") await refreshAssets();
     if (next === "plugins") await refreshPlugins();
-    if (next === "sync") setSyncStatus(await vaultBridge.syncStatus());
+    if (next === "sync") {
+      const status = await vaultBridge.syncStatus();
+      setSyncStatus(status);
+      // The signature check is a second read, not part of the status payload:
+      // a registry that parses is not the same as a registry the owner signed.
+      setSyncRegistryVerified(status.enrolled ? await vaultBridge.syncVerifyRegistry() : null);
+    }
   }
 
   async function installPlugin(manifest: unknown, source: string) {
@@ -975,7 +982,7 @@ export function App() {
         onNotice={setNotice}
       />
       : workspaceView === "sync" ? (syncStatus?.enrolled
-        ? <SyncStatus status={syncStatus} />
+        ? <SyncStatus status={syncStatus} registryVerified={syncRegistryVerified} />
         : <div className="sync-empty">
             <RefreshCw size={30} />
             <h3>This vault isn't enrolled in sync</h3>
