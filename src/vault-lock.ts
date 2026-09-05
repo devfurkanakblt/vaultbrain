@@ -13,6 +13,14 @@ export interface LockRecord {
   pid: number;
   host: string;
   acquiredAt: string;
+  /**
+   * How long the holder intends this lock to stay fresh. Written so that
+   * other processes judge the record by the holder's window rather than their
+   * own: a long operation (a re-key) must not be reclaimed out from under
+   * itself by a short one. Absent on records written by older builds, which
+   * are therefore judged by the acquirer's window alone, exactly as before.
+   */
+  staleMs?: number;
 }
 
 export class VaultBusyError extends Error {
@@ -49,7 +57,12 @@ function readRecord(lockPath: string): LockRecord | undefined {
 function isStale(record: LockRecord | undefined, staleMs: number): boolean {
   if (!record) return true; // unreadable or truncated: a crash artefact, not a live holder
   const age = Date.now() - Date.parse(record.acquiredAt);
-  return !Number.isFinite(age) || age > staleMs;
+  // The holder's own window wins when it is longer: it knows how long its
+  // operation runs, and reclaiming it early is what corrupts the vault. A
+  // record from an older build carries no window and falls back to ours.
+  const declared = typeof record.staleMs === "number" && Number.isFinite(record.staleMs) && record.staleMs > 0 ? record.staleMs : 0;
+  const window = Math.max(declared, staleMs);
+  return !Number.isFinite(age) || age > window;
 }
 
 /**
@@ -82,7 +95,13 @@ export function withVaultLock<T>(
 
   fs.mkdirSync(path.dirname(lockPath), { recursive: true, mode: 0o700 });
   const token = crypto.randomUUID();
-  const record: LockRecord = { token, pid: process.pid, host: os.hostname(), acquiredAt: new Date().toISOString() };
+  const record: LockRecord = {
+    token,
+    pid: process.pid,
+    host: os.hostname(),
+    acquiredAt: new Date().toISOString(),
+    staleMs,
+  };
   const deadline = Date.now() + waitMs;
 
   for (;;) {

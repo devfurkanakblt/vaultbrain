@@ -34,6 +34,7 @@ import {
 import { loadVaultFile, upsertEntry } from "../dist/store.js";
 import { saveGrants, emptyGrantFile } from "../dist/grants.js";
 import { SyncChangeLog } from "../dist/sync.js";
+import { VaultBusyError, lockHolder } from "../dist/vault-lock.js";
 
 const PASSPHRASE = "phase-74-current-passphrase";
 
@@ -1301,5 +1302,58 @@ test("a failure partway through the installs leaves the journal for recovery", (
   assert.match(vault.get(noteId).body, /second revision/u);
   vault.lock();
 
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// A re-key holds the vault lock for far longer than the 30-second default a
+// short write judges by, so the window it intends has to travel in the lock
+// record itself. Kills the mutation "stop recording `staleMs` in the lock
+// file": without it a note write sees a two-minute-old re-key lock, calls it
+// stale, unlinks it and writes under the keyset the commit is about to orphan.
+test("a re-key's lock records its own stale window, and a short write honours it", () => {
+  const { dir } = seedVault();
+  const lockPath = path.join(dir, ".sbrain.lock");
+
+  // Snapshot the record the re-key actually writes, from inside its own run.
+  let holder;
+  const realRenameSync = fs.renameSync;
+  try {
+    fs.renameSync = (...args) => {
+      holder ??= lockHolder(dir);
+      return realRenameSync(...args);
+    };
+    rekeyVault(dir, PASSPHRASE, NEW_PASSPHRASE);
+  } finally {
+    fs.renameSync = realRenameSync;
+  }
+  assert.ok(holder, "the re-key must hold the lock while it works");
+  assert.ok(
+    holder.staleMs > 30_000,
+    `the re-key must record a window longer than the 30s default, got ${String(holder.staleMs)}`,
+  );
+
+  forgetVaultKeys();
+  const vault = new DocumentVault(dir, NEW_PASSPHRASE);
+
+  // Older than the default window a short write judges by, well inside the
+  // window the re-key declared: it is a live holder, not a crash artefact.
+  const aged = new Date(Date.now() - 120_000).toISOString();
+  assert.ok(120_000 < holder.staleMs, "the aged record must still sit inside the re-key window");
+  fs.writeFileSync(lockPath, JSON.stringify({ ...holder, acquiredAt: aged }));
+  assert.throws(
+    () => vault.put({ path: "Atlas/Concurrent.md", body: "# Concurrent" }),
+    (error) => error instanceof VaultBusyError,
+    "a short write must not reclaim a re-key's lock inside the window it declared",
+  );
+  assert.equal(fs.existsSync(lockPath), true, "the re-key's lock must survive the refused write");
+
+  // Backward compatibility: a record from a build that recorded no window is
+  // judged by the acquirer's own window, exactly as before.
+  const { staleMs: _dropped, ...legacy } = holder;
+  fs.writeFileSync(lockPath, JSON.stringify({ ...legacy, acquiredAt: aged }));
+  vault.put({ path: "Atlas/Concurrent.md", body: "# Concurrent" });
+  assert.equal(fs.existsSync(lockPath), false, "a windowless stale record is still reclaimed");
+
+  vault.lock();
   fs.rmSync(dir, { recursive: true, force: true });
 });

@@ -488,9 +488,16 @@ export function recoverRekey(vaultDir: string): "none" | "rolled-back" | "finish
  * every object in the vault and derives scrypt at the current cost on top of
  * that, so on a large vault it passes 30 seconds routinely. Under the default
  * another process would reclaim the lock as stale mid-run and could write a
- * note under the keyset this commit is about to orphan.
+ * note under the keyset this commit is about to orphan. The window is recorded
+ * in the lock file, so every other process honours it too.
+ *
+ * Fifteen minutes covers a re-key of a very large vault with room to spare
+ * while keeping the cost of a crash small: the window is also how long a
+ * killed re-key wedges the vault, and there is no command to break the lock
+ * deliberately — recovery is deleting `.sbrain.lock` by hand, as
+ * `VaultBusyError` says.
  */
-const REKEY_STALE_MS = 6 * 60 * 60 * 1_000;
+const REKEY_STALE_MS = 15 * 60 * 1_000;
 
 /** The three keys that protect content, and therefore rotate. */
 export const ROTATED_KEYS: KeyName[] = ["documents", "kv", "syncEnvelope"];
