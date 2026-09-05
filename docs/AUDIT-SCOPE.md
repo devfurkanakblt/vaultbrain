@@ -20,18 +20,23 @@ so is being considered.
 Line counts below were measured directly against this branch with
 `wc -l src/*.ts` and `wc -l src-tauri/src/lib.rs`; they are not estimates.
 
-TypeScript core (`src/*.ts`, 13,869 lines, plus `src/sync/*.ts`, 1,484).
+TypeScript core (`src/*.ts`, 14,133 lines, plus `src/sync/*.ts`, 1,484).
 The modules most load-bearing for the security properties this review is
 about:
 
 | File | Lines | Role |
 |---|---:|---|
+| `src/keyring.ts` | 455 | The vault keyring: scrypt-wrapped keyset, slot headers, and every key the rest of the codebase asks for. |
+| `src/keyring-passphrase.ts` | 169 | Passphrase change: re-wrapping the keyset without touching a single encrypted object. |
+| `src/keyring-migrate.ts` | 200 | One-way migration of a pre-keyring vault, including the manifest version tombstone. |
+| `src/passphrase.ts` | 124 | Passphrase acquisition: masked prompt, environment variable, OS credential store precedence. |
+| `src/keychain.ts` | 279 | OS credential store adapters (DPAPI, Keychain, libsecret). |
 | `src/crypto.ts` | 239 | Top-level vault envelope (`*.kv.enc`): key derivation, AEAD seal/open. |
 | `src/document-crypto.ts` | 164 | Document-vault key-derivation manifest and per-object encrypted payload shape. |
-| `src/sync.ts` | 3,393 | Change envelopes, device certificates/registry, freshness checkpoints, canonical JSON/base64, attachment snapshot validation, apply logic. |
-| `src/sync-epoch.ts` | 187 | Epoch key hierarchy and per-device X25519 wrap construction. |
-| `src/sync-relay.ts` | 603 | Relay HTTP client/server: opaque storage, bearer auth, containment checks, blob upload/download. |
-| `src/sync-blobs.ts` | 104 | Attachment blob sealing, SHA-256 blob identity and the staged blob store. |
+| `src/sync.ts` | 3,455 | Change envelopes, device certificates/registry, freshness checkpoints, canonical JSON/base64, attachment snapshot validation, apply logic. |
+| `src/sync-epoch.ts` | 206 | Epoch key hierarchy and per-device X25519 wrap construction. |
+| `src/sync-relay.ts` | 615 | Relay HTTP client/server: opaque storage, bearer auth, containment checks, blob upload/download. |
+| `src/sync-blobs.ts` | 116 | Attachment blob sealing, SHA-256 blob identity and the staged blob store. |
 | `src/grants.ts` | 432 | Per-agent grant policy and redaction. |
 | `src/plugin-signatures.ts` | 131 | Plugin manifest/package signature verification. |
 
@@ -54,6 +59,42 @@ must never materialize a partial attachment or leave a receipt behind when
 it refuses. `docs/FORMAT-1.0.md` specifies the manifest body and the blob
 identity; `test/fixtures/sync-attachment-blobs-v3/` is the committed
 evidence.
+
+The key hierarchy, newest since this document was first written: the
+passphrase no longer derives the content key directly. It unwraps a keyring
+(`src/keyring.ts`), which holds the random data keys every object is actually
+encrypted under, so `vbrain passphrase change` (`src/keyring-passphrase.ts`)
+re-wraps the keyset and rewrites nothing else, and the scrypt cost is a
+per-vault slot value rather than a constant compiled into the build. Two
+properties deserve the reviewer's attention specifically: that attachment
+content IDs and sync change IDs, which are keyed HMACs and are permanent
+identities, survive a passphrase change byte-for-byte; and that a build
+predating the keyring fails closed on the manifest version tombstone instead
+of misreading a migrated vault. `test/fixtures/keyring-v2/` is the committed
+evidence and `test/fixtures/keyring-vector.json` is a deterministic cross-core
+test vector that pins the TypeScript and Rust readers to the same wire format.
+`vbrain rekey` — fresh data keys after a passphrase leak — is designed but not
+built; see `docs/ROADMAP.md` Phase 7.4.
+
+**A known gap in the frozen format, and the largest one in this package.**
+`docs/FORMAT-1.0.md` and `FORMAT_COMPATIBILITY` (`src/format-version.ts`) were
+frozen before the keyring existed, and Phase 7 did not update either. Two
+specific divergences, both verifiable in a minute and neither hidden:
+
+- `keyring.json` — the root of the key hierarchy, and the first file both
+  cores read — has no entry in `FORMAT_COMPATIBILITY` and no subsection in the
+  artifact catalogue. Its slot format (scrypt `N`/`r`/`p`, salt, wrapped
+  keyset, the nested keyset version) is specified only by `src/keyring.ts`,
+  `src-tauri/src/lib.rs` and the cross-core vector.
+- `documents/manifest.json` is declared `reads: [1], writes: [1]`, but a
+  keyring-native vault writes `{ "version": 2, "keyring": true }` as a
+  tombstone (`src/keyring.ts`) and this build reads it
+  (`src/document-crypto.ts`). Under the §2 compatibility policy an artifact
+  version bump is a 2.0 event, so either the freeze needs an explicit carve-out
+  for the tombstone or the format version itself needs revisiting. This is an
+  open question for the maintainer, not a resolved position, and the reviewer
+  should treat the two implementations and the cross-core vector — not this
+  document — as the authority on the keyring's wire format.
 
 ## 3. Trust boundaries
 

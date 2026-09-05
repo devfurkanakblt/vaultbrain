@@ -5,6 +5,26 @@ Versioning once the encrypted storage format reaches 1.0.
 
 ## Unreleased
 
+- Renamed the command-line program and its environment variables from `sbrain`
+  to `vbrain` and from `SBRAIN_*` to `VBRAIN_*`, which breaks existing scripts
+  and MCP configurations. The advisory writer lock stays `.sbrain.lock` on
+  purpose, so a renamed build and an older one still serialize against each
+  other.
+- Moved attachment bytes out of the sync change envelope: a `version: 3` change
+  body carries a manifest of content-addressed, AEAD-sealed 1 MiB blobs, so an
+  attachment of any size the vault accepts can now synchronize. Push and pull
+  are per-chunk and idempotent, an apply fails closed while a chunk is missing,
+  and `vbrain sync blobs status/fetch/prune` covers the recovery paths.
+  `sync export --bundle` and `sync import` move the same ciphertext without a
+  relay.
+- Bound each per-change device signature to the change body version, so a
+  version 3 body cannot be replayed as a version 2 one.
+- The desktop sync panel now reports whether the device registry carries a
+  valid owner signature, and keeps its "mutation is CLI-only" guidance visible
+  even for a vault whose format the build cannot display.
+- A failed agreement-key write during sync enrollment no longer leaves a
+  half-written device behind: the identity key is rolled back, so simply
+  asking again works instead of tripping the pending-key guard.
 - `vbrain passphrase change`: re-wraps the vault keyring under a new passphrase
   at the current key-derivation cost, without re-encrypting any object.
 - Taught the Rust desktop core to open passphrase-wrapped keyring vaults, and
@@ -14,6 +34,27 @@ Versioning once the encrypted storage format reaches 1.0.
   corrupted now reports that the keyring is unreadable rather than a generic
   missing-field error. The wire format is pinned by a deterministic cross-core
   test vector shared by both cores' test suites.
+- Froze the on-disk format at 1.0, documented it artifact by artifact in
+  `docs/FORMAT-1.0.md`, added `vbrain format` for the version matrix, and
+  committed conformance fixtures that both cores read.
+- Added a read-only sync status panel to the desktop app: authority
+  fingerprint, active epoch, registry revision, device list, pinned checkpoint
+  and change counts. Sync mutation stays in the CLI.
+- Added epoch-based content-key rotation: each epoch gets a random content key
+  wrapped to every active device's X25519 key, revoking an owner-signed device
+  rotates automatically, and rotation is forward-only — a revoked device keeps
+  read access to everything written before it.
+- Added an automated recovery drill that restores an encrypted backup and then
+  catches the vault up from the relay.
+- Added an authenticated opaque relay server and a self-hosted deployment
+  guide: it checks bearer tokens and content addresses and never holds a key.
+- Added owner-signed freshness checkpoints with explicit first-pin
+  verification, so a relay cannot silently withhold history.
+- Added owner-signed device enrollment and sequence-bounded removal: Ed25519
+  proof-of-possession requests, signed certificates, an encrypted registry
+  exchange, per-change device signatures, authority pinning and rollback
+  rejection.
+- Extended sync capture to plugin packages and the plugin policy.
 - Added synchronized document sessions that automatically capture note, canvas
   and attachment puts/deletes, keep an encrypted per-object application cursor,
   and idempotently apply conflict-free remote histories to the live vault.

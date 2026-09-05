@@ -696,7 +696,14 @@ push/pull from the app) and the independent security audit remain open — see
 [`docs/AUDIT-SCOPE.md`](docs/AUDIT-SCOPE.md) for the audit readiness package.
 iOS/Android clients are out of scope: Vault Brain stays local-first with
 optional self-hosted sync rather than putting the passphrase, and a hosted
-relay dependency, on a phone. The maintained checklist is in
+relay dependency, on a phone.
+
+Phase 7 replaced the passphrase-derived content key with a wrapped keyring, so
+`vbrain passphrase change` re-wraps the keyset without re-encrypting a single
+object, both cores read the new format, and the key-derivation cost can be
+raised per vault. `vbrain rekey` — the answer to a leaked passphrase — the
+recovery-key slot and a desktop passphrase-change interface are the remaining
+Phase 7 work. The maintained checklist is in
 [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## License

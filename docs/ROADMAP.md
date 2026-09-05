@@ -101,4 +101,34 @@ about. Vault Brain stays local-first with optional self-hosted sync.
 - [x] Automated encrypted-backup plus relay catch-up recovery drill
 - [ ] External security audit and stable 1.0 format
   - [x] Stable 1.0 on-disk format with committed conformance fixtures
+  - [ ] Bring the frozen format inventory back in line with the keyring
+    (Phase 7): `keyring.json` has no `FORMAT_COMPATIBILITY` entry and no
+    artifact-catalogue subsection, and `documents/manifest.json` is declared
+    `writes: [1]` while a keyring-native vault writes the version 2 tombstone.
+    Needs a decision first: an explicit 1.x carve-out for the tombstone, or a
+    format version bump. Disclosed in `docs/AUDIT-SCOPE.md` §2.
   - [ ] External security audit (readiness package in `docs/AUDIT-SCOPE.md`)
+
+## Phase 7 — Key wrapping, passphrase change and re-key
+
+The passphrase unwraps a keyring instead of deriving the content key directly,
+so it can change without re-encrypting the vault and the key-derivation cost
+can be raised per vault. Design contract:
+[`docs/superpowers/specs/2026-09-03-vault-keyring-design.md`](superpowers/specs/2026-09-03-vault-keyring-design.md).
+
+- [x] 7.1 Keyring format and migration (TypeScript)
+  - [x] `keyring.json` with a scrypt-wrapped keyset, kv envelope v2 and `vbrain migrate`
+  - [x] Committed v1 fixtures migrate with byte-identical attachment and sync change IDs
+- [x] 7.2 Rust read parity
+  - [x] The desktop core opens keyring vaults; new vaults are keyring-native in both cores
+  - [x] A manifest version tombstone makes an older build fail closed, not misread
+  - [x] A deterministic cross-core test vector pins the wire format
+- [x] 7.3 `vbrain passphrase change`
+  - [x] Re-wrap the keyset under a new passphrase at the current key-derivation cost
+  - [x] Verify before writing, refresh a remembered OS credential, zeroize on every path
+- [ ] 7.4 `vbrain rekey`
+  - [ ] Fresh data keys and a re-encrypted vault, so a leaked passphrase has an answer
+  - [ ] Resumable: interrupt a re-key at a random object, resume, and assert the
+    vault is complete and consistent
+  - [ ] The recovery-key slot the keyring format already reserves
+- [ ] Desktop passphrase-change and re-key interface
