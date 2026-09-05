@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { createBackup, restoreBackup, verifyBackup } from "../dist/backup.js";
 import { DocumentVault } from "../dist/documents.js";
+import { rekeyVault } from "../dist/keyring-rekey.js";
 
 const PASSPHRASE = "vault-backup-test-passphrase";
 
@@ -186,4 +187,33 @@ test("a backup refuses to overwrite a file or to be written inside the vault", (
     /outside the vault it protects/u,
   );
   assert.equal(fs.existsSync(path.join(dir, "inside.vbrainbackup")), false);
+});
+
+test("a backup taken either side of a re-key restores and opens with its own passphrase", () => {
+  const { dir, note } = seededVault();
+  const outside = tempDirectory("vault-brain-backup-rekey-");
+  const before = path.join(outside, "before.vbrainbackup");
+  const after = path.join(outside, "after.vbrainbackup");
+  const NEXT = "vault-backup-test-passphrase-after-rekey";
+
+  createBackup(dir, before, PASSPHRASE);
+  rekeyVault(dir, PASSPHRASE, NEXT);
+  createBackup(dir, after, NEXT);
+
+  // Each archive carries the keyring it was taken with, so each opens with the
+  // passphrase that was current at the time and neither opens with the other.
+  assert.throws(() => verifyBackup(before, NEXT), /Unable to unlock/u);
+  assert.throws(() => verifyBackup(after, PASSPHRASE), /Unable to unlock/u);
+
+  const restoredBefore = path.join(outside, "restored-before");
+  restoreBackup(before, restoredBefore, PASSPHRASE);
+  assert.equal(new DocumentVault(restoredBefore, PASSPHRASE).get(note.id).body.trim(), "# Ada\n\nEdited.".trim());
+
+  const restoredAfter = path.join(outside, "restored-after");
+  restoreBackup(after, restoredAfter, NEXT);
+  const reopened = new DocumentVault(restoredAfter, NEXT);
+  assert.equal(reopened.get(note.id).body.trim(), "# Ada\n\nEdited.".trim());
+  // A re-key pins the attachment identity key, so the id survives the rotation
+  // and the restored vault still finds it under the same address.
+  assert.equal(reopened.listAttachments().length, 1);
 });

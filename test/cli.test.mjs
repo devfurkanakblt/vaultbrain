@@ -33,6 +33,46 @@ test("sync devices list reports the active epoch and per-device state", () => {
   fs.rmSync(vaultDir, { recursive: true, force: true });
 });
 
+// Important finding: the journal guard (src/cli.ts preAction hook) used to
+// exempt any command whose bare leaf name is "init", which let a journaled
+// vault be opened by `sync devices init` — a leaf command that happens to
+// share a name with the exempt top-level `init`, but that (unlike top-level
+// `init`) opens the vault with the passphrase and writes devices.enc and
+// identity keys. The guard only checks that the journal file exists, so a
+// hand-planted empty one is enough to exercise it without staging a real
+// interrupted re-key.
+test("the journal guard matches the full command path, not just a leaf named \"init\"", () => {
+  const vaultDir = tempVault("journal-guard");
+  const env = { VBRAIN_PASSPHRASE: "cli-journal-guard-passphrase" };
+  const flags = ["--vault", vaultDir, "--experimental-trusted-sync"];
+
+  // A real, already-initialized registry: before the fix, a wrongly-exempted
+  // `sync devices init` would sail past the journal guard and reach
+  // `initializeOwner`'s own "already initialized" refusal instead — a
+  // different error that would prove the guard never ran at all.
+  runCli([...flags, "sync", "devices", "init", "Owner laptop", "--device-id", DEVICE_A], env);
+
+  const journalDir = path.join(vaultDir, ".rekey");
+  fs.mkdirSync(journalDir, { recursive: true });
+  fs.writeFileSync(path.join(journalDir, "journal.json"), "{}");
+
+  assert.throws(
+    () => runCli([...flags, "sync", "devices", "init", "Second device"], env),
+    (error) => {
+      const stderr = error.stderr ? error.stderr.toString("utf8") : "";
+      return /interrupted re-key is still journaled/u.test(stderr);
+    },
+    "sync devices init must not be exempt from the journal guard just because its leaf name is \"init\"",
+  );
+
+  // The top-level `init` command is genuinely exempt (it only ensures the
+  // vault directory exists) and must remain so: its own full path is "init",
+  // not merely a leaf that happens to be named that.
+  assert.doesNotThrow(() => runCli(["--vault", vaultDir, "init"]));
+
+  fs.rmSync(vaultDir, { recursive: true, force: true });
+});
+
 test("vbrain format prints the frozen version matrix", () => {
   const output = JSON.parse(runCli(["format"]));
   assert.equal(output.formatVersion, "1.0");

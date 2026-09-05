@@ -444,7 +444,7 @@ test("the CLI changes the passphrase end to end", () => {
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Passphrase changed/u);
   assert.match(result.stdout, /does not re-encrypt/u);
-  assert.match(result.stdout, /vbrain rekey/u);
+  assert.match(result.stdout, /If the old passphrase leaked, run 'vbrain rekey'/u);
 
   forgetVaultKeys();
   assert.ok(openVaultKeys(dir, NEW_PASSPHRASE));

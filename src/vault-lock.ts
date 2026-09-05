@@ -14,6 +14,14 @@ export interface LockRecord {
   pid: number;
   host: string;
   acquiredAt: string;
+  /**
+   * How long the holder intends this lock to stay fresh. Written so that
+   * other processes judge the record by the holder's window rather than their
+   * own: a long operation (a re-key) must not be reclaimed out from under
+   * itself by a short one. Absent on records written by older builds, which
+   * are therefore judged by the acquirer's window alone, exactly as before.
+   */
+  staleMs?: number;
 }
 
 export class VaultBusyError extends Error {
@@ -65,7 +73,18 @@ function isReclaimable(record: LockRecord | undefined, staleMs: number): boolean
   // an explicit owner recovery action because their liveness is unknowable.
   if (!record || record.host.toLocaleLowerCase() !== os.hostname().toLocaleLowerCase()) return false;
   const age = Date.now() - Date.parse(record.acquiredAt);
-  return Number.isFinite(age) && age > staleMs && !processIsAlive(record.pid);
+  // The holder's own window wins outright, longer or shorter: it is the only
+  // party that knows how long its operation runs. Reclaiming it early is what
+  // corrupts the vault; holding to an acquirer's longer window instead only
+  // wedges the vault, so a 15-minute re-key would wait out a crashed
+  // 30-second writer for a quarter of an hour. A record from an older build
+  // carries no window and falls back to ours.
+  const declared =
+    typeof record.staleMs === "number" && Number.isFinite(record.staleMs) && record.staleMs > 0
+      ? record.staleMs
+      : 0;
+  const window = declared || staleMs;
+  return Number.isFinite(age) && age > window && !processIsAlive(record.pid);
 }
 
 /**
@@ -98,7 +117,13 @@ export function withVaultLock<T>(
 
   fs.mkdirSync(path.dirname(lockPath), { recursive: true, mode: 0o700 });
   const token = crypto.randomUUID();
-  const record: LockRecord = { token, pid: process.pid, host: os.hostname(), acquiredAt: new Date().toISOString() };
+  const record: LockRecord = {
+    token,
+    pid: process.pid,
+    host: os.hostname(),
+    acquiredAt: new Date().toISOString(),
+    staleMs,
+  };
   const deadline = Date.now() + waitMs;
 
   for (;;) {

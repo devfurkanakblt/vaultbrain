@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { assertNotSymlink, writeFileAtomic } from "./fs-safe.js";
 import {
+  DEFAULT_SCRYPT_N,
   KEY_NAMES,
   KEYRING_VERSION,
   detectVaultFormat,
@@ -11,14 +12,17 @@ import {
   readKeyring,
   unwrapKeyring,
   unwrapSlot,
+  unwrapSlotKeySet,
   validateSlot,
   wrapKeySet,
   wrapKeySetSlot,
   writeKeyring,
   zeroKeySet,
+  zeroRetiringKeys,
   type KeyringSlot,
   type KeyringFile,
   type KeySet,
+  type RetiringKeys,
 } from "./keyring.js";
 import {
   appendKeyringAudit,
@@ -254,8 +258,19 @@ export function restoreVaultKeyring(
   parsedSecret.fill(0);
   const kit = readRecoveryKit(kitPath);
   let keys: KeySet;
+  // Carried through unchanged into the freshly wrapped primary slot below:
+  // a recovery kit can itself be restored while a re-key is still mid-flight
+  // (the recovery slot the kit mirrors is never touched by staging), and
+  // dropping either one here would silently discard the retiring keys of
+  // that in-progress re-key or the legacy identity key that recomputes older
+  // sync-change ids — the same bug `changeVaultPassphrase` already fixed.
+  let retiring: RetiringKeys | null;
+  let legacyChangeIdentity: Buffer | null;
   try {
-    keys = unwrapSlot(kit.slot, recoveryCode);
+    const unwrapped = unwrapSlotKeySet(kit.slot, recoveryCode);
+    keys = unwrapped.keys;
+    retiring = unwrapped.retiring;
+    legacyChangeIdentity = unwrapped.legacyChangeIdentity;
   } catch {
     throw new Error("The recovery code could not authenticate this recovery kit.");
   }
@@ -271,7 +286,7 @@ export function restoreVaultKeyring(
       const auditOperation = newKeyringAuditKey("recovery-restore");
       appendKeyringAuditWithKey(vaultDir, keys.audit, auditOperation, "pending");
       try {
-        const primary = wrapKeySet(keys, newPassphrase);
+        const primary = wrapKeySet(keys, newPassphrase, DEFAULT_SCRYPT_N, retiring, legacyChangeIdentity);
         verifySlotCarries(primary, newPassphrase, keys);
         const backupPath = backupKeyring(vaultDir);
         writeKeyring(vaultDir, { version: KEYRING_VERSION, slots: [primary, kit.slot] });
@@ -298,6 +313,8 @@ export function restoreVaultKeyring(
     });
   } finally {
     zeroKeySet(keys);
+    if (retiring) zeroRetiringKeys(retiring);
+    legacyChangeIdentity?.fill(0);
   }
 }
 

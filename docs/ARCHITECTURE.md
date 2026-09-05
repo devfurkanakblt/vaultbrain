@@ -139,7 +139,27 @@ The link index is updated in the same logical transaction as a note revision:
   `allowed`/`denied` afterwards. The `audit` key is permanent, so migration,
   passphrase changes and recovery operations remain in one verifiable chain.
 - Notes and attachment chunks use an authenticated encryption mode with unique nonces.
-- Key rotation re-wraps data keys instead of rewriting every object.
+- Changing the passphrase re-wraps the keyset and rewrites no object. Re-keying
+  (`vbrain rekey`) replaces the keyset and rewrites every object, which is what
+  a leaked passphrase requires.
+
+  Three of the six keys rotate: `documents`, `kv` and `syncEnvelope`. They
+  protect content, and every envelope they cover binds an AAD that is a pure
+  function of the artifact's own path, so a re-key can reproduce each identity
+  byte for byte while changing the key underneath it.
+
+  Three do not. `attachmentId` and `syncChange` derive identities rather than
+  protecting content — a content address that names a directory, an AAD, a
+  canvas node and a sync object; a change ID that every descendant lists as a
+  parent — so rotating either is an identity migration that diverges from any
+  peer that has not run it. `audit` signs a chain the format gives no key epoch,
+  so rotating it would invalidate every entry written before the rotation.
+
+  Pinning the two identity keys leaves a confirmation oracle: someone holding
+  the old keyset can compute a candidate file's content address and check
+  whether a directory of that name exists, learning that the vault holds that
+  exact file without decrypting anything. Closing it is an identity migration
+  and has not been done.
 - Session keys are kept only in the privileged core and zeroized on lock.
 - Per-device sync keys and per-agent grants are derived/separated by purpose.
 - Every encrypted record authenticates its format version and logical identity as associated data.

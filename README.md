@@ -178,6 +178,9 @@ node dist/cli.js --vault ./vault/personal keyring recovery create --out ../perso
 
 # Restore a missing or damaged keyring and choose a new primary passphrase
 node dist/cli.js --vault ./vault/personal keyring recovery restore --from ../personal-recovery.json
+
+# Replace the vault's keys and re-encrypt every object under them
+node dist/cli.js --vault ./vault/personal rekey
 ```
 
 Encrypted files carry an explicit envelope version, cipher name and the exact
@@ -215,6 +218,17 @@ earlier formats so a future change has to prove it can still read them.
 Key-material commands add paired `pending` and `allowed`/`denied` entries to
 the same authenticated audit chain as content access. Recovery codes, kit
 paths and key material are never included in those entries.
+- `vbrain rekey` replaces the vault's keys and re-encrypts every object under
+  them. Use it when a passphrase has leaked: a passphrase change re-wraps the
+  same keys, so the leaked passphrase would still open a copy of
+  `keyring.json` taken before the change. It asks for a new passphrase, and
+  `--keep-passphrase` skips that when the keys, not the passphrase, are what
+  is suspect. It drops every keyring slot the passphrase you give it cannot
+  open: a recovery slot, or a second person's slot, stops working the moment
+  the re-key commits, so re-add it afterwards. Attachment identities, sync
+  change IDs and the audit chain are
+  deliberately unchanged, so attachments keep their content addresses, peers
+  keep converging and `vbrain audit verify` keeps validating the whole chain.
 
 ## Encrypted Markdown documents
 

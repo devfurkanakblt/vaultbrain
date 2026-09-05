@@ -210,7 +210,11 @@ function changeId(body: SyncChangeBody, key: Buffer): string {
     .digest("hex");
 }
 
-function changeEncryptionKey(key: Buffer, id: string): Buffer {
+/**
+ * The per-change body key. Exported for the re-key, which must derive the
+ * same subkey under the old and the new `syncEnvelope` key for one change ID.
+ */
+export function changeEncryptionKey(key: Buffer, id: string): Buffer {
   return crypto.createHmac("sha256", key).update(CHANGE_KEY_CONTEXT).update("\0").update(id).digest();
 }
 
