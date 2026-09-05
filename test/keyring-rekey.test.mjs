@@ -1028,6 +1028,20 @@ test("a re-key rewrites every ciphertext and keeps every plaintext", () => {
   assert.equal(report.passphraseChanged, true);
   assert.equal(report.resumed, false);
 
+  // The counts the Task 6 CLI prints. Pinned against the plan the walk
+  // produces rather than against literals, so a hard-coded zero anywhere in
+  // `reencrypted` goes red here.
+  const items = planRekey(dir);
+  assert.equal(report.reencrypted.total, items.length);
+  assert.equal(report.reencrypted.documents, items.filter((item) => item.kind === "document").length);
+  assert.equal(report.reencrypted.kv, items.filter((item) => item.kind === "kv").length);
+  assert.equal(report.reencrypted.syncChanges, items.filter((item) => item.kind === "sync-change").length);
+  assert.ok(report.reencrypted.documents > 0 && report.reencrypted.kv > 0);
+  assert.equal(
+    report.reencrypted.documents + report.reencrypted.kv + report.reencrypted.syncChanges,
+    report.reencrypted.total,
+  );
+
   const after = hashVault(dir);
   for (const item of planRekey(dir)) {
     assert.notEqual(after[item.path], before[item.path], `${item.path} must have been re-encrypted`);
@@ -1054,6 +1068,32 @@ test("the old passphrase no longer opens a re-keyed vault", () => {
   forgetVaultKeys();
   assert.ok(openVaultKeys(dir, NEW_PASSPHRASE));
   assert.throws(() => openVaultKeys(dir, PASSPHRASE), /wrong passphrase/iu);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// Kills the mutation "drop the same-passphrase refusal": without it the run
+// completes and reports `passphraseChanged: true` while the passphrase the
+// user is re-keying away from still opens the vault.
+test("a re-key to the passphrase already in use is refused unless it is asked for", () => {
+  const { dir } = seedVault();
+  const before = hashVault(dir);
+
+  assert.throws(
+    () => rekeyVault(dir, PASSPHRASE, PASSPHRASE),
+    /same as the current one/u,
+  );
+  assertVaultUnchanged(dir, before);
+
+  // The escape hatch still performs the full rotation.
+  const report = rekeyVault(dir, PASSPHRASE, PASSPHRASE, { allowSamePassphrase: true });
+  assert.equal(report.passphraseChanged, true);
+  const after = hashVault(dir);
+  for (const item of planRekey(dir)) {
+    assert.notEqual(after[item.path], before[item.path], `${item.path} must have been re-encrypted`);
+  }
+  forgetVaultKeys();
+  assert.ok(openVaultKeys(dir, PASSPHRASE));
 
   fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -1109,8 +1149,9 @@ test("--keep-passphrase rotates the keyset under the same passphrase", () => {
   assert.equal(report.passphraseChanged, false);
   forgetVaultKeys();
   assert.ok(openVaultKeys(dir, PASSPHRASE));
+  const after = hashVault(dir);
   for (const item of planRekey(dir)) {
-    assert.notEqual(hashVault(dir)[item.path], before[item.path]);
+    assert.notEqual(after[item.path], before[item.path]);
   }
 
   fs.rmSync(dir, { recursive: true, force: true });

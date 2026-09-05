@@ -27,9 +27,9 @@ import {
   KEYRING_VERSION,
   detectVaultFormat,
   forgetVaultKeys,
-  openVaultKeys,
   randomKeySet,
   readKeyring,
+  unwrapKeyring,
   unwrapSlot,
   wrapKeySet,
   writeKeyring,
@@ -482,6 +482,16 @@ export function recoverRekey(vaultDir: string): "none" | "rolled-back" | "finish
   return "finished";
 }
 
+/**
+ * How long a re-key's lock stays fresh. `withVaultLock`'s 30-second default
+ * suits the short writes every other caller performs; a re-key re-encrypts
+ * every object in the vault and derives scrypt at the current cost on top of
+ * that, so on a large vault it passes 30 seconds routinely. Under the default
+ * another process would reclaim the lock as stale mid-run and could write a
+ * note under the keyset this commit is about to orphan.
+ */
+const REKEY_STALE_MS = 6 * 60 * 60 * 1_000;
+
 /** The three keys that protect content, and therefore rotate. */
 export const ROTATED_KEYS: KeyName[] = ["documents", "kv", "syncEnvelope"];
 
@@ -541,104 +551,122 @@ export function rekeyVault(
   vaultDir: string,
   currentPassphrase: string,
   newPassphrase: string,
-  options: { keepPassphrase?: boolean } = {},
+  options: { keepPassphrase?: boolean; allowSamePassphrase?: boolean } = {},
 ): RekeyReport {
   if (!currentPassphrase) throw new Error("A non-empty vault passphrase is required.");
   const keepPassphrase = Boolean(options.keepPassphrase);
   if (!keepPassphrase && newPassphrase.length < MIN_PASSPHRASE_LENGTH) {
     throw new Error(`The new passphrase must be at least ${MIN_PASSPHRASE_LENGTH} characters.`);
   }
+  // Reporting `passphraseChanged: true` while the passphrase the user is
+  // re-keying away from still opens the vault would contradict the one
+  // property this command exists for.
+  if (!keepPassphrase && newPassphrase === currentPassphrase && !options.allowSamePassphrase) {
+    throw new Error(
+      "The new passphrase is the same as the current one, so a leaked passphrase would still open the vault. Pass --keep-passphrase (or --allow-same-passphrase) to rotate the keyset without changing it.",
+    );
+  }
   const wrapPassphrase = keepPassphrase ? currentPassphrase : newPassphrase;
 
-  return withVaultLock(vaultDir, () => {
-    // An interrupted earlier run is finished or discarded before anything
-    // else looks at the vault, so the rest of this function only ever sees a
-    // consistent one.
-    if (recoverRekey(vaultDir) === "finished") {
-      return emptyReport({ resumed: true, passphraseChanged: false });
-    }
+  return withVaultLock(
+    vaultDir,
+    () => {
+      // An interrupted earlier run is finished or discarded before anything
+      // else looks at the vault, so the rest of this function only ever sees a
+      // consistent one.
+      if (recoverRekey(vaultDir) === "finished") {
+        // The install just replaced live objects under a keyset this process
+        // may still be caching from before the interruption.
+        forgetVaultKeys(vaultDir);
+        return emptyReport({ resumed: true, passphraseChanged: false });
+      }
 
-    if (detectVaultFormat(vaultDir) !== "keyring") {
-      throw new Error("This vault is not in the keyring format yet. Run 'vbrain migrate' first.");
-    }
-    const file = readKeyring(vaultDir);
-    if (!file) throw new Error("This vault has no keyring to re-key.");
+      if (detectVaultFormat(vaultDir) !== "keyring") {
+        throw new Error("This vault is not in the keyring format yet. Run 'vbrain migrate' first.");
+      }
+      const file = readKeyring(vaultDir);
+      if (!file) throw new Error("This vault has no keyring to re-key.");
 
-    let oldKeys: KeySet | undefined;
-    let newKeys: KeySet | undefined;
-    const droppedSlots: DroppedSlot[] = [];
+      let oldKeys: KeySet | undefined;
+      let newKeys: KeySet | undefined;
+      const droppedSlots: DroppedSlot[] = [];
 
-    try {
-      for (const slot of file.slots) {
-        let opened: KeySet;
-        try {
-          opened = unwrapSlot(slot, currentPassphrase);
-        } catch {
-          // Wrapped around the keyset this run supersedes, so it is dropped
-          // rather than preserved — the deliberate opposite of a passphrase
-          // change, which keeps a recovery slot alive.
-          droppedSlots.push({ id: slot.id, label: slot.label, createdAt: slot.createdAt });
-          continue;
+      try {
+        for (const slot of file.slots) {
+          let opened: KeySet;
+          try {
+            opened = unwrapSlot(slot, currentPassphrase);
+          } catch {
+            // Wrapped around the keyset this run supersedes, so it is dropped
+            // rather than preserved — the deliberate opposite of a passphrase
+            // change, which keeps a recovery slot alive.
+            droppedSlots.push({ id: slot.id, label: slot.label, createdAt: slot.createdAt });
+            continue;
+          }
+          if (oldKeys) zeroKeySet(opened);
+          else oldKeys = opened;
         }
-        if (oldKeys) zeroKeySet(opened);
-        else oldKeys = opened;
+        if (!oldKeys) {
+          throw new Error("Unable to unlock this vault: wrong passphrase, or the keyring is damaged.");
+        }
+
+        newKeys = randomKeySet();
+        for (const { name } of PINNED_KEYS) {
+          newKeys[name].fill(0);
+          newKeys[name] = Buffer.from(oldKeys[name]);
+        }
+
+        const items = planRekey(vaultDir);
+        stageRekey(vaultDir, oldKeys, newKeys, items);
+
+        const slot: KeyringSlot = wrapKeySet(newKeys, wrapPassphrase, DEFAULT_SCRYPT_N);
+        commitRekey(
+          vaultDir,
+          { version: 1, slotId: slot.id, files: items.map((item) => item.path) },
+          { version: KEYRING_VERSION, slots: [slot] },
+        );
+        forgetVaultKeys(vaultDir);
+
+        // Prove the vault on disk opens under the passphrase the user was just
+        // given before reporting success. `unwrapKeyring` rather than
+        // `openVaultKeys`, because the latter would leave the brand-new keyset
+        // resident and un-zeroized in the process key cache — the very cache
+        // the `forgetVaultKeys` above just cleared.
+        const written = readKeyring(vaultDir);
+        if (!written) throw new Error("The re-keyed vault could not be reopened.");
+        zeroKeySet(unwrapKeyring(written, wrapPassphrase));
+
+        return {
+          rotated: [...ROTATED_KEYS],
+          pinned: PINNED_KEYS.map((entry) => ({ ...entry })),
+          reencrypted: {
+            documents: items.filter((item) => item.kind === "document").length,
+            kv: items.filter((item) => item.kind === "kv").length,
+            syncChanges: items.filter((item) => item.kind === "sync-change").length,
+            total: items.length,
+          },
+          droppedSlots,
+          passphraseChanged: !keepPassphrase,
+          resumed: false,
+        };
+      } catch (error) {
+        // Fail closed, but only on this side of the commit point. A journal
+        // under the staging root means `commitRekey` already replaced
+        // `keyring.json`, and the staged remainder beside it is the only copy
+        // of files the vault now depends on: clearing it here would destroy
+        // exactly what `recoverRekey` needs to finish the job, and would defeat
+        // the refusal `stageRekey` raises for that same reason. Before the
+        // commit point there is no journal, nothing live has been touched, and
+        // the half-built shadow tree goes.
+        if (!fs.existsSync(journalPath(vaultDir))) {
+          fs.rmSync(stagingRoot(vaultDir), { recursive: true, force: true });
+        }
+        throw error;
+      } finally {
+        if (oldKeys) zeroKeySet(oldKeys);
+        if (newKeys) zeroKeySet(newKeys);
       }
-      if (!oldKeys) {
-        throw new Error("Unable to unlock this vault: wrong passphrase, or the keyring is damaged.");
-      }
-
-      newKeys = randomKeySet();
-      for (const { name } of PINNED_KEYS) {
-        newKeys[name].fill(0);
-        newKeys[name] = Buffer.from(oldKeys[name]);
-      }
-
-      const items = planRekey(vaultDir);
-      stageRekey(vaultDir, oldKeys, newKeys, items);
-
-      const slot: KeyringSlot = wrapKeySet(newKeys, wrapPassphrase, DEFAULT_SCRYPT_N);
-      commitRekey(
-        vaultDir,
-        { version: 1, slotId: slot.id, files: items.map((item) => item.path) },
-        { version: KEYRING_VERSION, slots: [slot] },
-      );
-      forgetVaultKeys(vaultDir);
-
-      // Prove the vault on disk opens under the passphrase the user was just
-      // given before reporting success.
-      const written = openVaultKeys(vaultDir, wrapPassphrase);
-      if (!written) throw new Error("The re-keyed vault could not be reopened.");
-      zeroKeySet(written);
-
-      return {
-        rotated: [...ROTATED_KEYS],
-        pinned: PINNED_KEYS.map((entry) => ({ ...entry })),
-        reencrypted: {
-          documents: items.filter((item) => item.kind === "document").length,
-          kv: items.filter((item) => item.kind === "kv").length,
-          syncChanges: items.filter((item) => item.kind === "sync-change").length,
-          total: items.length,
-        },
-        droppedSlots,
-        passphraseChanged: !keepPassphrase,
-        resumed: false,
-      };
-    } catch (error) {
-      // Fail closed, but only on this side of the commit point. A journal
-      // under the staging root means `commitRekey` already replaced
-      // `keyring.json`, and the staged remainder beside it is the only copy
-      // of files the vault now depends on: clearing it here would destroy
-      // exactly what `recoverRekey` needs to finish the job, and would defeat
-      // the refusal `stageRekey` raises for that same reason. Before the
-      // commit point there is no journal, nothing live has been touched, and
-      // the half-built shadow tree goes.
-      if (!fs.existsSync(journalPath(vaultDir))) {
-        fs.rmSync(stagingRoot(vaultDir), { recursive: true, force: true });
-      }
-      throw error;
-    } finally {
-      if (oldKeys) zeroKeySet(oldKeys);
-      if (newKeys) zeroKeySet(newKeys);
-    }
-  });
+    },
+    { staleMs: REKEY_STALE_MS },
+  );
 }
