@@ -5,6 +5,26 @@ Versioning once the encrypted storage format reaches 1.0.
 
 ## Unreleased
 
+- A sync change's identity no longer depends on a key a re-key rotates. An
+  epoch 1 change used to be sealed under the bare documents key, which made its
+  id depend on that key; rotating it would have renamed every change in the
+  causal DAG along with every parent reference, cursor and pinned checkpoint.
+  New epoch 1 changes take their id from the permanent `syncChange` key and
+  their body from `syncEnvelope`. Changes an earlier build wrote keep their old
+  ids and still open.
+- Attachment transport blobs are sealed under a key derived from the permanent
+  `syncChange` key rather than the documents key, for the same reason: a blob
+  id is the SHA-256 of its sealed bytes and those ids travel inside a version 3
+  change body. A blob staged by an earlier build still opens.
+- Groundwork for `vbrain rekey`, which has not shipped: the keyset can carry the
+  outgoing rotatable keys while a re-key is in flight, and every read path tries
+  the key in force before falling back to the retiring one, so a vault caught
+  mid-re-key stays fully readable. Nothing writes such a keyset yet.
+- iOS and Android clients are no longer carried as planned work. Vault Brain is
+  a desktop product and sync is desktop-to-desktop; the phase plan and design
+  spec lost their mobile sections and `docs/AUDIT-SCOPE.md` records the boundary
+  for reviewers.
+
 - Added `vbrain keyring status` plus offline recovery-kit create, restore and
   remove commands. Recovery uses a checksummed 256-bit code stored separately
   from the wrapped keyset and verifies available vault ciphertext before a
