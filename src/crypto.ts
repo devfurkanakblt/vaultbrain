@@ -222,12 +222,29 @@ export function encryptWithKey(plaintext: string, key: Buffer, name: string): Ke
   };
 }
 
-export function decryptWithKey(payload: KeyedEncryptedPayload, key: Buffer, name: string): string {
+/** The `kv` key to read with, or the ordered list to try. See `DocumentReadKey`. */
+export type KeyedReadKey = Buffer | readonly Buffer[];
+
+export function decryptWithKey(payload: KeyedEncryptedPayload, key: KeyedReadKey, name: string): string {
   if (payload.version !== KEYED_ENVELOPE_VERSION) {
     throw new Error(`Unsupported keyed envelope version: ${String(payload.version)}`);
   }
   if (payload.cipher !== ALGO) throw new Error("Unsupported cipher in encrypted envelope.");
   if (payload.keyId !== "kv") throw new Error(`Unsupported key ID in encrypted envelope: ${String(payload.keyId)}`);
+  const candidates = Buffer.isBuffer(key) ? [key] : key;
+  if (candidates.length === 0) throw new Error("No key was offered to decrypt this envelope.");
+  let failure: unknown;
+  for (const candidate of candidates) {
+    try {
+      return decryptUnderKey(payload, candidate, name);
+    } catch (error) {
+      failure = error;
+    }
+  }
+  throw failure;
+}
+
+function decryptUnderKey(payload: KeyedEncryptedPayload, key: Buffer, name: string): string {
   if (key.length !== KEY_LEN) throw new Error("A 256-bit key is required.");
   const decipher = crypto.createDecipheriv(ALGO, key, base64Bytes(payload.iv, 12, 12, "iv"));
   decipher.setAAD(keyedAad(name));

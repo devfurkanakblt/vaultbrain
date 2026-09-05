@@ -102,3 +102,39 @@ test("opening a vault whose re-key never finished fails closed with an instructi
   forgetVaultKeys(vaultDir);
   assert.throws(() => openVaultKeys(vaultDir, PASSPHRASE), /unfinished re-key/u);
 });
+
+test("a decrypt helper offered a list tries each key in order", async () => {
+  const { decryptDocument, encryptDocument } = await import("../dist/document-crypto.js");
+  const older = crypto.randomBytes(32);
+  const newer = crypto.randomBytes(32);
+  const aad = "secondbrain-vault:note:v1:some-note";
+  const payload = encryptDocument("still under the old key", older, aad);
+
+  assert.equal(decryptDocument(payload, [newer, older], aad), "still under the old key");
+  assert.equal(decryptDocument(payload, [older], aad), "still under the old key");
+  assert.throws(() => decryptDocument(payload, [newer], aad));
+  assert.throws(() => decryptDocument(payload, [], aad), /No key was offered/u);
+});
+
+test("a fallback key cannot open an object it was not written for", async () => {
+  const { decryptDocument, encryptDocument } = await import("../dist/document-crypto.js");
+  const older = crypto.randomBytes(32);
+  const newer = crypto.randomBytes(32);
+  const payload = encryptDocument("one note", older, "secondbrain-vault:note:v1:a");
+  // The AAD binds the object's identity, so offering every key in the vault
+  // still cannot make one object's ciphertext open as another's.
+  assert.throws(() => decryptDocument(payload, [newer, older], "secondbrain-vault:note:v1:b"));
+});
+
+test("the keyed envelope helper takes the same ordered list", async () => {
+  const { decryptWithKey, encryptWithKey } = await import("../dist/crypto.js");
+  const older = crypto.randomBytes(32);
+  const newer = crypto.randomBytes(32);
+  const payload = encryptWithKey("workspace state", older, "workspace");
+
+  assert.equal(decryptWithKey(payload, [newer, older], "workspace"), "workspace state");
+  assert.throws(() => decryptWithKey(payload, [newer], "workspace"));
+  assert.throws(() => decryptWithKey(payload, [], "workspace"), /No key was offered/u);
+  // A short key inside the list is still refused, not skipped over silently.
+  assert.throws(() => decryptWithKey(payload, [crypto.randomBytes(16)], "workspace"), /256-bit key/u);
+});

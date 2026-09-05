@@ -139,12 +139,36 @@ export function encryptDocumentBytes(data: Buffer, key: Buffer, aad: string): Do
   };
 }
 
-export function decryptDocument(payload: DocumentPayload, key: Buffer, aad: string): string {
+/**
+ * A key to read with, or the ordered list to try. A list is how an object
+ * written before an unfinished re-key is still read: the key in force comes
+ * first and the retiring one after it. Trying a second key is safe because
+ * the AAD already binds the object's identity, so a fallback cannot succeed
+ * against the wrong object — only against the right object under the older
+ * key. Writers always take a single key.
+ */
+export type DocumentReadKey = Buffer | readonly Buffer[];
+
+export function decryptDocument(payload: DocumentPayload, key: DocumentReadKey, aad: string): string {
   return decryptDocumentBytes(payload, key, aad).toString("utf8");
 }
 
-export function decryptDocumentBytes(payload: DocumentPayload, key: Buffer, aad: string): Buffer {
+export function decryptDocumentBytes(payload: DocumentPayload, key: DocumentReadKey, aad: string): Buffer {
   if (payload.version !== 1) throw new Error("Unsupported encrypted document version.");
+  const candidates = Buffer.isBuffer(key) ? [key] : key;
+  if (candidates.length === 0) throw new Error("No key was offered to decrypt this object.");
+  let failure: unknown;
+  for (const candidate of candidates) {
+    try {
+      return decryptDocumentUnder(payload, candidate, aad);
+    } catch (error) {
+      failure = error;
+    }
+  }
+  throw failure;
+}
+
+function decryptDocumentUnder(payload: DocumentPayload, key: Buffer, aad: string): Buffer {
   const decipher = crypto.createDecipheriv(
     "aes-256-gcm",
     key,
