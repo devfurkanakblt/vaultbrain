@@ -1854,6 +1854,7 @@ fn load_saved_views(session: &VaultSession) -> Result<Vec<SavedView>, String> {
 }
 
 fn write_saved_views(session: &VaultSession, views: &[SavedView]) -> Result<(), String> {
+    audit_write(session, "saved-views", "saved-views")?;
     let file = SavedViewFile {
         version: 1,
         views: views.to_vec(),
@@ -2526,6 +2527,7 @@ fn load_plugin_policy(session: &VaultSession) -> Result<PluginSecurityPolicy, St
 }
 
 fn save_plugin_policy(session: &VaultSession, policy: &PluginSecurityPolicy) -> Result<(), String> {
+    audit_write(session, "plugin-policy", "plugin-policy")?;
     let mut normalized = policy.clone();
     normalized.version = 1;
     normalized.revoked_signers.sort();
@@ -2789,6 +2791,7 @@ fn begin_plugin_journal(session: &VaultSession, id: &str) -> Result<(), String> 
 }
 
 fn write_plugin(session: &mut VaultSession, plugin: &PluginPackage) -> Result<(), String> {
+    audit_write(session, "plugins", &plugin.id)?;
     let payload = encrypt(
         &serde_json::to_vec(plugin).map_err(|error| error.to_string())?,
         session.key.as_ref(),
@@ -2958,6 +2961,7 @@ fn write_plugin_storage(
     id: &str,
     data: &HashMap<String, String>,
 ) -> Result<(), String> {
+    audit_write(session, "plugin-store", id)?;
     let serialized = serde_json::to_vec(data).map_err(|error| error.to_string())?;
     if serialized.len() > MAX_PLUGIN_STORAGE_BYTES {
         return Err(format!(
@@ -3000,6 +3004,7 @@ fn load_workspace(session: &VaultSession) -> Result<WorkspaceState, String> {
 }
 
 fn write_workspace(session: &VaultSession, state: &WorkspaceState) -> Result<(), String> {
+    audit_write(session, "workspace", "workspace")?;
     let payload = encrypt(
         &serde_json::to_vec(state).map_err(|error| error.to_string())?,
         session.key.as_ref(),
@@ -4701,6 +4706,7 @@ fn put_canvas(session: &mut VaultSession, input: CanvasInput) -> Result<CanvasDo
     store_canvas_index(session, &canvases)?;
     save_index(session)?;
     end_journal(session)?;
+    audit_write(session, "documents", &canvas.id)?;
     Ok(canvas)
 }
 
@@ -4774,6 +4780,7 @@ fn delete_canvas(reference: String, state: State<'_, AppState>) -> Result<Canvas
         store_canvas_index(session, &canvases)?;
         save_index(session)?;
         end_journal(session)?;
+        audit_write(session, "documents", &id)?;
         Ok(canvas)
     })
 }
@@ -4942,6 +4949,7 @@ fn put_attachment(
         &manifest_path,
         &serde_json::to_vec(&payload).map_err(|error| error.to_string())?,
     )?;
+    audit_write(session, "documents", &info.id)?;
     Ok(info)
 }
 
@@ -5004,6 +5012,7 @@ fn remove_attachment(session: &VaultSession, id: &str) -> Result<AttachmentInfo,
     let info = read_attachment_manifest(session, id)?;
     fs::remove_dir_all(attachment_dir(&session.root_dir, id)?)
         .map_err(|error| error.to_string())?;
+    audit_write(session, "documents", id)?;
     Ok(info)
 }
 
