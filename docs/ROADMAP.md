@@ -129,9 +129,9 @@ can be raised per vault. Design contract:
 - [x] 7.3 `vbrain passphrase change`
   - [x] Re-wrap the keyset under a new passphrase at the current key-derivation cost
   - [x] Verify before writing, refresh a remembered OS credential, zeroize on every path
-- [ ] 7.4 `vbrain rekey`
-  - [ ] Fresh data keys and a re-encrypted vault, so a leaked passphrase has an answer
-  - [ ] Resumable: interrupt a re-key at a random object, resume, and assert the
+- [x] 7.4 `vbrain rekey`
+  - [x] Fresh data keys and a re-encrypted vault, so a leaked passphrase has an answer
+  - [x] Resumable: interrupt a re-key at a random object, resume, and assert the
     vault is complete and consistent
 - [x] 7.5 Survivable keyrings: a second way in, a way to look inside, and a record of every change
   - [x] Recovery slot, so one forgotten passphrase or one damaged `keyring.json` is not
@@ -148,6 +148,23 @@ can be raised per vault. Design contract:
         touch key material append nothing, so "when did this vault's passphrase last
         change" has no answer. The `audit` key is permanent, so entries written before
         and after a change verify in the same chain.
+- [ ] 7.6 What the re-key leaves behind
+  - [ ] Attachment identity migration, closing the confirmation oracle a re-key
+        leaves. Rotating `attachmentId` renames every attachment directory and
+        rewrites every canvas object, canvas history revision and index
+        reference that names one, and every peer must run it at the same time
+        or their attachment IDs diverge. `syncChange` has to move with it — a
+        change ID is referenced as a `parent` by every descendant, so rotating
+        one rewrites the rest of the DAG — and the oracle stays open until both
+        do.
+  - [ ] A deliberate lock-break path. Nothing in the CLI can reclaim a vault
+        lock on purpose; a crashed `vbrain rekey` holds it for up to 15 minutes
+        (`REKEY_STALE_MS`), and until it expires or a person deletes
+        `.sbrain.lock` by hand, every command that touches the vault refuses to
+        run. `lock` and `keychain-status` are unaffected; neither takes the lock.
+  - [ ] An audit entry for `rekey`. `migrate` and `passphrase change` now append
+        to the chain; the command that replaces every key still appends nothing,
+        so "when were this vault's keys last replaced" has no answer.
 
 ## Phase 8 — Key management the desktop can reach
 

@@ -55,6 +55,26 @@ scope that leaks a value it should mask — through the flow above.
   survive re-key, so an old kit still exposes those stable identities and can
   open ciphertext backups made before the re-key.
 
+- Changing the passphrase does not re-encrypt content. It replaces the wrapping
+  around the vault's keys, nothing more. Anyone who already knew the old
+  passphrase and holds a copy of the vault reads what that copy contains, before
+  and after. `vbrain rekey` is the answer to a leaked passphrase: it replaces
+  the keys and re-encrypts every object under them.
+- A re-key does not retract what a leaked passphrase already exposed. An
+  attacker who held the passphrase and a copy of the vault has already read
+  what that copy contained. `vbrain rekey` is forward-looking: afterwards no
+  byte on disk opens under the old passphrase or the old keys.
+- A re-key keeps exactly one keyring slot: the one wrapping the passphrase it
+  was given. Every other slot is dropped, deliberately — a slot this passphrase
+  cannot open is wrapped around the keyset the re-key supersedes, so preserving
+  it would keep the leaked passphrase's keys reachable. A vault carrying a
+  recovery slot or a second person's slot loses it, and the run reports each
+  one it dropped. Re-add them after the re-key.
+- A re-key pins the two keys that derive identities, `attachmentId` and
+  `syncChange`. Someone who kept the old keyset can therefore still confirm
+  that a guessed file or a guessed sync change is present, from directory
+  names alone, without decrypting anything. They cannot read its contents.
+
 ## Disclosure
 
 Maintainers will acknowledge a complete report, reproduce it privately, prepare

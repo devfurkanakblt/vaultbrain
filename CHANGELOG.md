@@ -5,6 +5,13 @@ Versioning once the encrypted storage format reaches 1.0.
 
 ## Unreleased
 
+- `vbrain rekey`: a new vault keyset with every object re-encrypted under it,
+  for when a passphrase has leaked and re-wrapping the same keys is not
+  enough. Staged beside the live vault, verified, then committed through a
+  journal, so an interrupted run either rolls back or is finished by the next
+  one. `documents`, `kv` and `syncEnvelope` rotate; `attachmentId`,
+  `syncChange` and `audit` are pinned, so attachment identities, sync change
+  IDs and the audit chain survive.
 - The desktop application can now manage the keys that decide whether a vault
   survives. It shows what the keyring holds — every slot with its label,
   creation time and key-derivation cost — changes the passphrase, and writes a
@@ -34,10 +41,9 @@ Versioning once the encrypted storage format reaches 1.0.
   `syncChange` key rather than the documents key, for the same reason: a blob
   id is the SHA-256 of its sealed bytes and those ids travel inside a version 3
   change body. A blob staged by an earlier build still opens.
-- Groundwork for `vbrain rekey`, which has not shipped: the keyset can carry the
-  outgoing rotatable keys while a re-key is in flight, and every read path tries
-  the key in force before falling back to the retiring one, so a vault caught
-  mid-re-key stays fully readable. Nothing writes such a keyset yet.
+- The keyset can carry the outgoing rotatable keys while a re-key is in flight,
+  and every read path tries the key in force before falling back to the retiring
+  one, so a vault caught mid-re-key stays fully readable.
 - iOS and Android clients are no longer carried as planned work. Vault Brain is
   a desktop product and sync is desktop-to-desktop; the phase plan and design
   spec lost their mobile sections and `docs/AUDIT-SCOPE.md` records the boundary

@@ -3,12 +3,11 @@ import path from "node:path";
 import { verifyAuditWithKey } from "./audit.js";
 import { decryptWithKey, type KeyedEncryptedPayload } from "./crypto.js";
 import { decryptDocument, type DocumentPayload } from "./document-crypto.js";
+import { AAD } from "./format-version.js";
 import { assertNotSymlink } from "./fs-safe.js";
 import type { KeySet } from "./keyring.js";
 import { resolveInside } from "./safety.js";
 import { APPLIED_AAD, openSyncChange } from "./sync/protocol.js";
-
-const INDEX_AAD = "secondbrain-vault:document-index:v1";
 
 function readPayload<T>(filePath: string): T {
   assertNotSymlink(filePath);
@@ -24,7 +23,7 @@ export function verifyRecoveryKeySet(vaultDir: string, keys: KeySet): number {
   let verified = 0;
   const indexPath = resolveInside(vaultDir, path.join("documents", "index.enc"));
   if (fs.existsSync(indexPath)) {
-    JSON.parse(decryptDocument(readPayload<DocumentPayload>(indexPath), keys.documents, INDEX_AAD));
+    JSON.parse(decryptDocument(readPayload<DocumentPayload>(indexPath), keys.documents, AAD.documentIndex));
     verified += 1;
   }
 
