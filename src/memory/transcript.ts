@@ -14,7 +14,9 @@ export function parseCodexTranscript(input: string, options: TranscriptOptions):
     if (!value || typeof value !== "object") throw new Error(`Invalid transcript record at line ${index + 1}.`);
     const record = value as Record<string, unknown>;
     if (record.version !== 1) throw new Error("Unsupported transcript version.");
-    if (record.type !== "message") continue;
+    if (record.type === "tool" || record.type === "compaction" || record.type === "reasoning" || record.type === "subagent" || record.type === "worker") continue;
+    if (record.type !== "message") throw new Error(`Unsupported transcript record type at line ${index + 1}.`);
+    if (record.sessionKind === "subagent" || record.sessionKind === "worker") continue;
     if (record.role !== "user" && record.role !== "assistant") continue;
     const timestamp = new Date(String(record.createdAt));
     if (!Number.isFinite(timestamp.getTime())) throw new Error(`Invalid transcript timestamp at line ${index + 1}.`);
@@ -25,4 +27,3 @@ export function parseCodexTranscript(input: string, options: TranscriptOptions):
   }
   return records;
 }
-

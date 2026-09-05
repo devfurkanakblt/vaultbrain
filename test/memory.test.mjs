@@ -29,6 +29,7 @@ test("parses only visible post-enrollment user and assistant messages", () => {
 
 test("rejects unsupported transcript records and sensitive candidate content", () => {
   assert.throws(() => parseCodexTranscript(JSON.stringify({ version: 9, type: "message", role: "user", id: "x", createdAt: "2026-09-05T00:00:00Z", text: "x" }), { sessionId: "s", enrolledAt: "2026-09-04T00:00:00Z" }), /unsupported/i);
+  assert.throws(() => parseCodexTranscript(JSON.stringify({ version: 1, type: "future-message", id: "x" }), { sessionId: "s", enrolledAt: "2026-09-04T00:00:00Z" }), /unsupported/i);
   const candidate = { kind: "fact", title: "Token", body: "api_key=synthetic-secret", evidence: [{ messageId: "u1", quote: "api_key=synthetic-secret" }], sourceKind: "user-stated", sensitive: false, links: [] };
   assert.equal(classifyCandidate(candidate).status, "rejected");
 });
