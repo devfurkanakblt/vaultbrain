@@ -1,3 +1,9 @@
+/** How a message should read: a confirmation, or something that went wrong. */
+export type NoticeTone = "info" | "error";
+
+/** Hands a message up to whatever surface the workspace shows messages on. */
+export type Notify = (message: string, tone?: NoticeTone) => void;
+
 export interface VaultInfo {
   name: string;
   path: string;

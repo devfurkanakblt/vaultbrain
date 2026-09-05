@@ -127,5 +127,19 @@ can be raised per vault. Design contract:
   - [ ] Fresh data keys and a re-encrypted vault, so a leaked passphrase has an answer
   - [ ] Resumable: interrupt a re-key at a random object, resume, and assert the
     vault is complete and consistent
-  - [ ] The recovery-key slot the keyring format already reserves
+- [x] 7.5 Survivable keyrings: a second way in, a way to look inside, and a record of every change
+  - [x] Recovery slot, so one forgotten passphrase or one damaged `keyring.json` is not
+        the permanent loss of every note. The format already carries a slot list and
+        reserves this slot; nothing writes one yet, and the keyring concentrated into
+        one small file what used to be derived from the passphrase directly.
+  - [x] `vbrain keyring status`, listing every slot with its id, label, creation time
+        and KDF cost. Without it a slot someone else added is invisible — a passphrase
+        change deliberately preserves the slots it cannot open — and a user has no way
+        to learn their vault still sits at the old cost, which makes the upgrade path
+        undiscoverable.
+  - [x] Audit entries for `migrate` and `passphrase change`. Every content command
+        already appends to the passphrase-authenticated chain; the two commands that
+        touch key material append nothing, so "when did this vault's passphrase last
+        change" has no answer. The `audit` key is permanent, so entries written before
+        and after a change verify in the same chain.
 - [ ] Desktop passphrase-change and re-key interface

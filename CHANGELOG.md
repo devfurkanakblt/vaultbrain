@@ -5,6 +5,12 @@ Versioning once the encrypted storage format reaches 1.0.
 
 ## Unreleased
 
+- Added `vbrain keyring status` plus offline recovery-kit create, restore and
+  remove commands. Recovery uses a checksummed 256-bit code stored separately
+  from the wrapped keyset and verifies available vault ciphertext before a
+  damaged keyring is replaced.
+- Keyring migration, passphrase changes and recovery mutations now add paired,
+  value-free operation records to the permanent authenticated audit chain.
 - Brought the frozen 1.0 format inventory in line with the keyring, which
   Phase 7 had added without declaring: `keyring.json` is now a catalogue entry
   with its slot format, AAD construction and keyset layout specified, the

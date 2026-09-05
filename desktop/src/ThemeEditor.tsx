@@ -1,11 +1,12 @@
 import { Palette, RotateCcw, X } from "lucide-react";
-import { contrastRatio, DEFAULT_THEME, EDITOR_FONTS, isHexColor, PRESETS, presetSettings, type EditorFont, type ThemeSettings } from "./theme";
+import { contrastRatio, DEFAULT_THEME, EDITOR_FONTS, isHexColor, PRESETS, presetSettings, shade, type EditorFont, type ThemeSettings } from "./theme";
 
 const COLORS = [
   { key: "shell", label: "Chrome", hint: "Sidebar, title bar and lock screen" },
   { key: "surface", label: "Surface", hint: "The page a note is written on" },
   { key: "ink", label: "Ink", hint: "Body text" },
   { key: "accent", label: "Accent", hint: "Active states and links" },
+  { key: "muted", label: "Secondary", hint: "Sidebar text, metadata, captions" },
 ] as const;
 
 const FONT_LABELS: Record<EditorFont, string> = { serif: "Newsreader", sans: "Plex Sans", mono: "Plex Mono" };
@@ -17,6 +18,10 @@ export function ThemeEditor({ settings, onChange, onClose }: {
 }) {
   const readable = contrastRatio(settings.ink, settings.surface);
   const chrome = contrastRatio(settings.accent, settings.shell);
+  const quiet = contrastRatio(settings.muted, settings.surface);
+  // The accent is never painted raw on paper — links and icons take the
+  // darkened variant — so this reports the colour the page actually shows.
+  const linked = contrastRatio(shade(settings.accent, -0.34), settings.surface);
 
   function update(change: Partial<ThemeSettings>) {
     onChange({ ...settings, ...change });
@@ -79,6 +84,12 @@ export function ThemeEditor({ settings, onChange, onClose }: {
           <div className={readable < 4.5 ? "weak" : ""}>
             <dt>Ink on surface</dt><dd>{readable.toFixed(1)}:1 {readable < 4.5 ? "· below AA" : "· AA"}</dd>
           </div>
+          <div className={quiet < 4.5 ? "weak" : ""}>
+            <dt>Secondary on surface</dt><dd>{quiet.toFixed(1)}:1 {quiet < 4.5 ? "· below AA" : "· AA"}</dd>
+          </div>
+          <div className={linked < 4.5 ? "weak" : ""}>
+            <dt>Links on surface</dt><dd>{linked.toFixed(1)}:1 {linked < 4.5 ? "· below AA" : "· AA"}</dd>
+          </div>
           <div className={chrome < 3 ? "weak" : ""}>
             <dt>Accent on chrome</dt><dd>{chrome.toFixed(1)}:1 {chrome < 3 ? "· below AA large" : "· AA large"}</dd>
           </div>
@@ -86,7 +97,7 @@ export function ThemeEditor({ settings, onChange, onClose }: {
       </div>
 
       <footer>
-        <button type="button" className="theme-reset" onClick={() => onChange(DEFAULT_THEME)}><RotateCcw size={13} />Reset to Archive</button>
+        <button type="button" className="theme-reset" onClick={() => onChange(DEFAULT_THEME)}><RotateCcw size={13} />Reset to {PRESETS[0].label}</button>
         <button type="button" className="theme-done" onClick={onClose}>Done</button>
       </footer>
     </section>

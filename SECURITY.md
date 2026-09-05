@@ -42,6 +42,19 @@ a boundary against a model:
 Report a grant that can be bypassed *without* the passphrase — for example a
 scope that leaks a value it should mask — through the flow above.
 
+## Keyring and recovery limits
+
+- Without a recovery kit, a vault keeps its only wrapped data-key copies in
+  `keyring.json`; the correct primary passphrase alone cannot reconstruct a
+  lost or corrupted keyring. `vbrain keyring recovery create` writes an
+  independently usable wrapped copy outside the vault. Store its 256-bit code
+  separately: possession of both kit and code is equivalent to vault access.
+- Removing a recovery slot does not erase offline kit copies. A suspected kit
+  disclosure requires removing the slot, re-keying the content and creating a
+  new kit. Permanent attachment-ID, sync-change-ID and audit keys deliberately
+  survive re-key, so an old kit still exposes those stable identities and can
+  open ciphertext backups made before the re-key.
+
 ## Disclosure
 
 Maintainers will acknowledge a complete report, reproduce it privately, prepare

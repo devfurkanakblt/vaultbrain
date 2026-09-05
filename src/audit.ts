@@ -7,7 +7,7 @@ import { withVaultLock } from "./vault-lock.js";
 
 export interface AuditEntry {
   timestamp: string;
-  actor: "cli-direct" | "mcp-agent" | "cli-direct-write" | "mcp-agent-write";
+  actor: "cli-direct" | "mcp-agent" | "cli-direct-write" | "mcp-agent-write" | "cli-keyring";
   file: string;
   key: string;
   /** Which agent identity asked, when a grant policy governs the vault. */
@@ -176,6 +176,20 @@ export function appendAudit(
   entry: Omit<AuditEntry, "timestamp" | "prevHash" | "hash">,
   passphrase: string
 ): void {
+  appendAuditWithKey(vaultDir, entry, chainKeyForAppend(vaultDir, passphrase));
+}
+
+/**
+ * Append with an already-open audit key, including before a keyring is
+ * installed or restored. Holds the same vault lock and advances the same
+ * signed-head record as the passphrase entry point: an append that skipped
+ * either would leave the chain verifiable but the head stale.
+ */
+export function appendAuditWithKey(
+  vaultDir: string,
+  entry: Omit<AuditEntry, "timestamp" | "prevHash" | "hash">,
+  key: Buffer,
+): void {
   withVaultLock(vaultDir, () => {
     fs.mkdirSync(vaultDir, { recursive: true, mode: 0o700 });
     const p = auditPath(vaultDir);
@@ -185,7 +199,6 @@ export function appendAudit(
     const previousSigned = [...existing].reverse().find((item) => item.hash);
     const prevHash = previousSigned?.hash ?? GENESIS_HASH;
     const unsigned = { timestamp: new Date().toISOString(), ...entry, prevHash };
-    const key = chainKeyForAppend(vaultDir, passphrase);
     const hash = calculateHash(unsigned, key);
     const full: AuditEntry = { ...unsigned, hash };
     fs.appendFileSync(p, JSON.stringify(full) + "\n", { encoding: "utf8", mode: 0o600 });
@@ -233,6 +246,21 @@ export function verifyAudit(vaultDir: string, passphrase: string): AuditVerifica
     key = auditKey(vaultDir, passphrase, meta);
   }
 
+  return verifySignedEntries(vaultDir, entries, key);
+}
+
+/** Verify using key material recovered independently of a readable keyring. */
+export function verifyAuditWithKey(vaultDir: string, key: Buffer): AuditVerification {
+  return verifySignedEntries(vaultDir, readAudit(vaultDir), key);
+}
+
+function verifySignedEntries(vaultDir: string, entries: AuditEntry[], key: Buffer): AuditVerification {
+  const legacyEntries = entries.filter((entry) => !entry.hash || !entry.prevHash).length;
+  const signed = entries.filter(
+    (entry): entry is AuditEntry & { hash: string; prevHash: string } =>
+      Boolean(entry.hash && entry.prevHash),
+  );
+  if (signed.length === 0) return { valid: true, signedEntries: 0, legacyEntries };
   let expectedPrevious = GENESIS_HASH;
   for (let index = 0; index < signed.length; index += 1) {
     const entry = signed[index];

@@ -6,6 +6,12 @@ export interface ThemeSettings {
   surface: string;
   ink: string;
   accent: string;
+  /**
+   * Secondary text. Everything quieter than body copy is mixed from it — the
+   * sidebar's whole text ladder on one side, a note's metadata on the other —
+   * so the theme's second colour keeps its hue instead of drifting to grey.
+   */
+  muted: string;
   readingSize: number;
   editorFont: EditorFont;
 }
@@ -23,11 +29,17 @@ export const EDITOR_FONTS: Record<EditorFont, string> = {
   mono: '"IBM Plex Mono", ui-monospace, monospace',
 };
 
+/**
+ * Every preset carries its own danger colour rather than sharing one, because
+ * a warm accent and a warm red are the same colour at a glance. Clay's accent
+ * clears its red by 2.9:1; Archive's green clears it by 4.2:1.
+ */
 export const PRESETS: ThemePreset[] = [
-  { preset: "archive", label: "Archive", shell: "#151713", surface: "#f1eee4", ink: "#25271f", accent: "#c7ef55", danger: "#a84e38", readingSize: 17, editorFont: "serif" },
-  { preset: "slate", label: "Slate", shell: "#14171c", surface: "#eef1f5", ink: "#1e242b", accent: "#8bb8ff", danger: "#c05a45", readingSize: 17, editorFont: "sans" },
-  { preset: "ember", label: "Ember", shell: "#191411", surface: "#f5efe6", ink: "#2a221d", accent: "#eb9a4f", danger: "#b04a34", readingSize: 18, editorFont: "serif" },
-  { preset: "contrast", label: "High contrast", shell: "#000000", surface: "#ffffff", ink: "#000000", accent: "#ffd400", danger: "#c81e1e", readingSize: 18, editorFont: "sans" },
+  { preset: "clay", label: "Clay", shell: "#111014", surface: "#f4f1ec", ink: "#111014", accent: "#c9794a", muted: "#5f5b66", danger: "#7f2430", readingSize: 17, editorFont: "serif" },
+  { preset: "archive", label: "Archive", shell: "#151713", surface: "#f1eee4", ink: "#25271f", accent: "#c7ef55", muted: "#5f6157", danger: "#a84e38", readingSize: 17, editorFont: "serif" },
+  { preset: "slate", label: "Slate", shell: "#14171c", surface: "#eef1f5", ink: "#1e242b", accent: "#8bb8ff", muted: "#5b6470", danger: "#c05a45", readingSize: 17, editorFont: "sans" },
+  { preset: "ember", label: "Ember", shell: "#191411", surface: "#f5efe6", ink: "#2a221d", accent: "#eb9a4f", muted: "#635a51", danger: "#b04a34", readingSize: 18, editorFont: "serif" },
+  { preset: "contrast", label: "High contrast", shell: "#000000", surface: "#ffffff", ink: "#000000", accent: "#ffd400", muted: "#3d3d3d", danger: "#c81e1e", readingSize: 18, editorFont: "sans" },
 ];
 
 export const DEFAULT_THEME: ThemeSettings = settingsOf(PRESETS[0]);
@@ -87,8 +99,8 @@ export function themeVariables(settings: ThemeSettings): Record<string, string> 
     "--paper-line": shade(settings.surface, -0.115),
     "--ink": settings.ink,
     "--ink-soft": shade(settings.ink, 0.22),
-    "--muted": shade(settings.ink, 0.48),
-    "--muted-2": shade(settings.ink, 0.45),
+    "--muted": settings.muted,
+    "--muted-2": shade(settings.muted, 0.3),
     "--acid": settings.accent,
     "--acid-deep": shade(settings.accent, -0.34),
     "--rust": danger,
@@ -108,7 +120,7 @@ export function loadTheme(): ThemeSettings {
     const stored = JSON.parse(raw) as Partial<ThemeSettings>;
     const preset = typeof stored.preset === "string" ? stored.preset : DEFAULT_THEME.preset;
     const base = presetSettings(preset);
-    const colors = (["shell", "surface", "ink", "accent"] as const).reduce<Partial<ThemeSettings>>((carry, key) => {
+    const colors = (["shell", "surface", "ink", "accent", "muted"] as const).reduce<Partial<ThemeSettings>>((carry, key) => {
       const value = stored[key];
       if (typeof value === "string" && isHexColor(value)) carry[key] = value;
       return carry;

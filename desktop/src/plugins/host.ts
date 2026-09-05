@@ -1,5 +1,5 @@
 import { capabilityFor, isPluginCapability, permits, type PluginCapability, type PluginManifest } from "./manifest";
-import type { PluginSummary } from "../types";
+import type { PluginSummary, NoticeTone } from "../types";
 import { sandboxSource } from "./sandbox";
 import type {
   HostToPlugin,
@@ -59,7 +59,7 @@ export interface PluginHostBindings {
     method: string,
     params: Record<string, unknown>
   ) => Promise<unknown>;
-  onNotice: (pluginName: string, message: string) => void;
+  onNotice: (pluginName: string, message: string, tone?: NoticeTone) => void;
   onCommandsChanged: (commands: RegisteredCommand[]) => void;
   onPanelsChanged: (panels: PluginPanel[]) => void;
   onStateChanged: (states: PluginRuntimeState[]) => void;

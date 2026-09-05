@@ -4,6 +4,7 @@ import {
   DEFAULT_THEME,
   isHexColor,
   loadTheme,
+  PRESETS,
   presetSettings,
   saveTheme,
   shade,
@@ -21,15 +22,26 @@ describe("theme tokens", () => {
     expect(shade("#abc", 0)).toBe("#aabbcc");
   });
 
-  it("derives every workspace token from four editable colours", () => {
+  it("derives every workspace token from the editable colours", () => {
     const tokens = themeVariables(DEFAULT_THEME);
     expect(tokens["--night"]).toBe(DEFAULT_THEME.shell);
     expect(tokens["--paper"]).toBe(DEFAULT_THEME.surface);
     expect(tokens["--acid-deep"]).toBe(shade(DEFAULT_THEME.accent, -0.34));
+    // The secondary colour is chosen, not derived: it carries the sidebar's
+    // whole text ladder, so a preset that picks a hue keeps it.
+    expect(tokens["--muted"]).toBe(DEFAULT_THEME.muted);
+    expect(tokens["--muted-2"]).toBe(shade(DEFAULT_THEME.muted, 0.3));
     expect(tokens["--reading-size"]).toBe("17px");
     expect(tokens["--font-editor"]).toContain("Newsreader");
     // chrome shades stay lighter than the shell they came from
     expect(tokens["--night-2"] > tokens["--night"]).toBe(true);
+  });
+
+  it("keeps every preset's secondary colour readable and its danger clear of its accent", () => {
+    for (const preset of PRESETS) {
+      expect(contrastRatio(preset.muted, preset.surface)).toBeGreaterThanOrEqual(4.5);
+      expect(contrastRatio(preset.danger, preset.accent)).toBeGreaterThan(2);
+    }
   });
 
   it("reports WCAG contrast so an unreadable theme is visible as one", () => {
@@ -48,7 +60,7 @@ describe("theme tokens", () => {
   });
 
   it("round-trips a saved theme and repairs a corrupted one", () => {
-    const custom = { ...presetSettings("slate"), accent: "#ff8800", preset: "custom", readingSize: 20 };
+    const custom = { ...presetSettings("slate"), accent: "#ff8800", muted: "#606060", preset: "custom", readingSize: 20 };
     saveTheme(custom);
     expect(loadTheme()).toEqual(custom);
 
@@ -56,7 +68,8 @@ describe("theme tokens", () => {
     expect(loadTheme()).toEqual(DEFAULT_THEME);
 
     localStorage.setItem("vbrain:theme", JSON.stringify({ preset: "archive", accent: "chartreuse", readingSize: 900, editorFont: "comic" }));
-    expect(loadTheme()).toEqual(DEFAULT_THEME);
+    // A stored preset that still exists survives; only the invalid fields fall back to it.
+    expect(loadTheme()).toEqual(presetSettings("archive"));
   });
 
   it("falls back to the default preset when an unknown one is stored", () => {

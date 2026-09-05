@@ -15,6 +15,7 @@ import {
   type KeySet,
 } from "./keyring.js";
 import { withVaultLock } from "./vault-lock.js";
+import { appendKeyringAudit, appendKeyringAuditWithKey, newKeyringAuditKey } from "./keyring-audit.js";
 
 /**
  * NIST SP 800-63B's floor for a user-chosen secret. It applies to the new
@@ -89,6 +90,8 @@ export function changeVaultPassphrase(
     const preserved: PreservedSlot[] = [];
     const slots: KeyringSlot[] = [];
     const newlyWrapped: KeyringSlot[] = [];
+    let auditOperation: string | undefined;
+    let auditCompleted = false;
 
     try {
       for (const slot of file.slots) {
@@ -140,6 +143,9 @@ export function changeVaultPassphrase(
         }
       }
 
+      auditOperation = newKeyringAuditKey("passphrase-change");
+      appendKeyringAudit(vaultDir, currentPassphrase, auditOperation, "pending");
+
       writeKeyring(vaultDir, { version: KEYRING_VERSION, slots });
       forgetVaultKeys(vaultDir);
 
@@ -160,8 +166,16 @@ export function changeVaultPassphrase(
         zeroKeySet(verified);
       }
 
+      appendKeyringAudit(vaultDir, newPassphrase, auditOperation, "allowed");
+      auditCompleted = true;
+
       const rewritten = slots.length - slotsPreserved;
       return { slotsRewritten: rewritten, slotsPreserved, preserved, previousN, newN: DEFAULT_SCRYPT_N };
+    } catch (error) {
+      if (auditOperation && opened && !auditCompleted) {
+        appendKeyringAuditWithKey(vaultDir, opened.audit, auditOperation, "denied");
+      }
+      throw error;
     } finally {
       if (opened) zeroKeySet(opened);
     }

@@ -268,13 +268,39 @@ export function wrapKeySet(
   retiring: RetiringKeys | null = null,
   legacyChangeIdentity: Buffer | null = null,
 ): KeyringSlot {
+  return wrapKeySetSlot(keys, passphrase, { N, label: "primary", retiring, legacyChangeIdentity });
+}
+
+export interface WrapKeySetSlotOptions {
+  N?: number;
+  label: string;
+  id?: string;
+  createdAt?: string;
+  /** The outgoing rotatable keys of a re-key that has not finished. */
+  retiring?: RetiringKeys | null;
+  /** The documents key a completed re-key replaced. See `VaultKeySet`. */
+  legacyChangeIdentity?: Buffer | null;
+}
+
+/** Wrap the keyset in a named slot without changing the on-disk slot format. */
+export function wrapKeySetSlot(
+  keys: KeySet,
+  passphrase: string,
+  options: WrapKeySetSlotOptions,
+): KeyringSlot {
   if (!passphrase) throw new Error("A non-empty vault passphrase is required.");
   const header = {
-    id: crypto.randomUUID(),
+    id: options.id ?? crypto.randomUUID(),
     type: "passphrase" as const,
-    label: "primary",
-    kdf: validateKdf({ name: "scrypt", N, r: SCRYPT_R, p: SCRYPT_P, salt: crypto.randomBytes(16).toString("base64") }),
-    createdAt: new Date().toISOString(),
+    label: options.label,
+    kdf: validateKdf({
+      name: "scrypt",
+      N: options.N ?? DEFAULT_SCRYPT_N,
+      r: SCRYPT_R,
+      p: SCRYPT_P,
+      salt: crypto.randomBytes(16).toString("base64"),
+    }),
+    createdAt: options.createdAt ?? new Date().toISOString(),
   };
   const derived = deriveSlotKey(passphrase, header.kdf);
   try {
@@ -282,7 +308,10 @@ export function wrapKeySet(
     const cipher = crypto.createCipheriv("aes-256-gcm", derived, iv);
     cipher.setAAD(slotAad(header));
     const ciphertext = Buffer.concat([
-      cipher.update(serializeKeySet(keys, retiring, legacyChangeIdentity), "utf8"),
+      cipher.update(
+        serializeKeySet(keys, options.retiring ?? null, options.legacyChangeIdentity ?? null),
+        "utf8",
+      ),
       cipher.final(),
     ]);
     return {

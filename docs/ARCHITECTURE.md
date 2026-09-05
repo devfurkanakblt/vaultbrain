@@ -40,7 +40,7 @@ The target vault is versioned and self-describing:
 ```text
 vault/
   manifest.json              # format/KDF versions; no content
-  keyring.json               # wrapped keyset; every new and migrated vault; lost keyring loses vault
+  keyring.json               # wrapped keyset; every new and migrated vault
   objects/                   # encrypted notes and attachments
   index.db.enc               # encrypted derived search/link index
   views.enc                  # encrypted saved property queries
@@ -129,6 +129,15 @@ The link index is updated in the same logical transaction as a note revision:
   hierarchy and wire format. A passphrase change re-wraps the keyset in place:
   the slot gets a fresh salt at the current cost, the keys inside it do not
   move, and no object is rewritten.
+- A recovery kit is deliberately outside the vault. It contains an exact copy
+  of one recovery-labelled passphrase slot, but never its 256-bit recovery
+  code. Because each slot wraps the same keyset, the kit can reconstruct a
+  missing `keyring.json`; restore validates available document-index, keyed KV,
+  grant, sync and audit ciphertext before replacing the keyring.
+- Keyring mutations write two value-free entries to the authenticated audit
+  chain under one operation ID: `pending` before the mutation and
+  `allowed`/`denied` afterwards. The `audit` key is permanent, so migration,
+  passphrase changes and recovery operations remain in one verifiable chain.
 - Notes and attachment chunks use an authenticated encryption mode with unique nonces.
 - Key rotation re-wraps data keys instead of rewriting every object.
 - Session keys are kept only in the privileged core and zeroized on lock.
