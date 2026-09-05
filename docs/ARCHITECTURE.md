@@ -297,8 +297,14 @@ attachment and derived-index storage. Application walks the winning causal
 history in revision order and advances an encrypted per-object cursor only
 after each storage transaction succeeds. Repeating an application is therefore
 idempotent, and unresolved heads fail before touching live storage. Attachment
-bytes are carried inside v1 snapshots and consequently share the 8 MiB change
-limit; larger-attachment blob transport remains a later slice.
+bytes travel outside the change envelope: a version 3 change body carries a
+manifest of content-addressed, AEAD-sealed 1 MiB blobs whose ids are the
+SHA-256 of the sealed bytes, so an attachment of any size the vault accepts
+synchronizes without meeting the 8 MiB change limit. Push and pull are
+per-chunk and idempotent, so an interrupted transfer resumes, and an apply
+fails closed while any chunk is still missing. A version 1 snapshot may still
+carry its bytes inline, which keeps a pre-blob change readable and leaves that
+older form bound to the 8 MiB limit.
 
 Plugin package/policy transactions use the same causal capture and application
 path. Each active device has a separate Ed25519 signing key and an owner-signed
@@ -349,8 +355,7 @@ and deletion remain outside the confidentiality/integrity boundary, while signed
 registries, per-device changes and pinned checkpoints provide client-side trust.
 Operational details and recovery limits are in `docs/SYNC-RELAY.md`.
 
-Independently witnessed freshness, desktop-driven sync mutation, resumable
-chunked transport for attachments larger than the change limit and external
+Independently witnessed freshness, desktop-driven sync mutation and external
 cryptographic review remain later Phase 6 work. Mobile clients are out of
 scope; sync is desktop-to-desktop.
 The original format contract and threat analysis are recorded in
