@@ -279,6 +279,26 @@ export interface SyncCheckpointSummary {
  * one object) while `appliedObjectCount` is a per-object cursor, so the two
  * are different units and must never be subtracted against each other.
  */
+/** Mirrors `KeyringStatus` in src-tauri/src/keyring.rs and src/keyring-status.ts. */
+export type KeyringCostStatus = "below-default" | "default" | "above-default";
+
+export interface KeyringStatusSlot {
+  id: string;
+  type: string;
+  label: string;
+  createdAt: string;
+  recovery: boolean;
+  kdf: { name: string; N: number; r: number; p: number; cost: KeyringCostStatus };
+}
+
+export interface KeyringStatusData {
+  format: string;
+  version: number | null;
+  recommendedScryptN: number;
+  recoveryConfigured: boolean;
+  slots: KeyringStatusSlot[];
+}
+
 export interface SyncStatusData {
   enrolled: boolean;
   authorityFingerprint: string;

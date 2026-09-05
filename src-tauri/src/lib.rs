@@ -5380,6 +5380,33 @@ fn count_applied_objects(session: &VaultSession) -> Result<usize, String> {
     Ok(state.objects.len())
 }
 
+/// What the vault's keyring holds, without unwrapping any of it.
+///
+/// Slot headers are not secret and this needs no passphrase, but it still
+/// requires an unlocked session: the application has no vault to describe
+/// before one is chosen and opened, and there is no reason to widen what a
+/// locked window can read.
+#[tauri::command(async)]
+fn keyring_status(state: State<'_, AppState>) -> Result<keyring::KeyringStatus, String> {
+    let guard = state
+        .session
+        .lock()
+        .map_err(|_| "vault session lock poisoned")?;
+    let session = guard.as_ref().ok_or("vault is locked")?;
+    keyring::status(&session.vault_dir, vault_format(&session.vault_dir))
+}
+
+/// The three states `detectVaultFormat` distinguishes in `src/keyring.ts`.
+fn vault_format(vault_dir: &Path) -> &'static str {
+    if keyring::keyring_path(vault_dir).exists() {
+        return "keyring";
+    }
+    if vault_holds_legacy_material(vault_dir) {
+        return "legacy";
+    }
+    "empty"
+}
+
 #[tauri::command(async)]
 fn sync_status(state: State<'_, AppState>) -> Result<SyncStatus, String> {
     let guard = state
@@ -5527,6 +5554,7 @@ pub fn run() {
             read_attachment,
             list_attachments,
             delete_attachment,
+            keyring_status,
             sync_status,
             sync_verify_registry,
         ])

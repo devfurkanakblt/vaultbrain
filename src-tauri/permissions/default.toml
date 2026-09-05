@@ -248,6 +248,11 @@ description = "Allows removing one attachment and every chunk it owns from the u
 commands.allow = ["delete_attachment"]
 
 [[permission]]
+identifier = "allow-keyring-status"
+description = "Allows reading the vault keyring's slot headers after unlock: id, label, creation time and key-derivation cost. Unwraps nothing and needs no passphrase."
+commands.allow = ["keyring_status"]
+
+[[permission]]
 identifier = "allow-sync-status"
 description = "Allows read-only visibility into device enrollment, the active epoch, checkpoint freshness and change counts. Never decrypts a change envelope or unwraps an epoch key."
 commands.allow = ["sync_status"]

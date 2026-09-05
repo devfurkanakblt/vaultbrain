@@ -432,6 +432,58 @@ mod tests {
             .expect("parse the keyring vector")
     }
 
+    /// The same shape `readKeyringStatus` returns in `src/keyring-status.ts`,
+    /// so the application and `vbrain keyring status` describe one vault the
+    /// same way.
+    #[test]
+    fn status_reports_slot_headers_without_unwrapping_anything() {
+        let dir = std::env::temp_dir().join(format!("vbrain-status-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let keys = random_key_set();
+        let primary = wrap_key_set(&keys, "a status passphrase", 14).unwrap();
+        let mut recovery = wrap_key_set(&keys, "a recovery code", 14).unwrap();
+        // The label is display metadata and deliberately outside the slot AAD,
+        // the same way `a_recovery_labeled_passphrase_slot_opens_the_same_keyset`
+        // relies on.
+        recovery.label = RECOVERY_LABEL.to_string();
+        write(
+            &dir,
+            &KeyringFile {
+                version: KEYRING_VERSION,
+                slots: vec![primary, recovery],
+            },
+        )
+        .unwrap();
+
+        let status = status(&dir, "keyring").unwrap();
+        assert_eq!(status.version, Some(KEYRING_VERSION));
+        assert_eq!(status.recommended_scrypt_n, 1 << DEFAULT_SCRYPT_LOG_N);
+        assert!(
+            status.recovery_configured,
+            "a recovery slot must be visible"
+        );
+        assert_eq!(status.slots.len(), 2);
+        assert!(!status.slots[0].recovery);
+        assert!(status.slots[1].recovery);
+        // Both were written well below the current default, which is exactly
+        // the condition a user cannot otherwise discover.
+        for slot in &status.slots {
+            assert!(matches!(slot.kdf.cost, CostStatus::BelowDefault));
+        }
+
+        // A vault with no keyring reports the format rather than failing.
+        let empty = status_for_empty();
+        assert_eq!(empty.version, None);
+        assert!(empty.slots.is_empty());
+        assert!(!empty.recovery_configured);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    fn status_for_empty() -> KeyringStatus {
+        status(Path::new("does-not-matter"), "empty").unwrap()
+    }
+
     #[test]
     fn associated_data_matches_the_typescript_core_byte_for_byte() {
         let vector = vector();
@@ -632,4 +684,106 @@ mod tests {
             "zeroize must clear the string's content"
         );
     }
+}
+
+/// The recovery slot's label. `src/keyring-recovery.ts` writes exactly this,
+/// and it is what distinguishes a recovery slot from the primary one — the
+/// slot `type` stays `passphrase` for both, because the on-disk slot format
+/// did not change when recovery kits arrived.
+pub(crate) const RECOVERY_LABEL: &str = "recovery";
+
+/// Whether a slot's work factor is behind, at, or ahead of what this build
+/// writes for a new slot. A vault created before the default rose keeps its
+/// old cost until its passphrase is changed once, and without this nobody can
+/// discover that.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum CostStatus {
+    BelowDefault,
+    Default,
+    AboveDefault,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StatusKdf {
+    pub(crate) name: String,
+    #[serde(rename = "N")]
+    pub(crate) n: u32,
+    pub(crate) r: u32,
+    pub(crate) p: u32,
+    pub(crate) cost: CostStatus,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StatusSlot {
+    pub(crate) id: String,
+    #[serde(rename = "type")]
+    pub(crate) kind: String,
+    pub(crate) label: String,
+    pub(crate) created_at: String,
+    pub(crate) recovery: bool,
+    pub(crate) kdf: StatusKdf,
+}
+
+/// The same shape `readKeyringStatus` returns in `src/keyring-status.ts`, so
+/// the application and `vbrain keyring status` describe one vault the same way.
+/// Nothing here is unwrapped: this reads slot headers only and never needs the
+/// passphrase.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct KeyringStatus {
+    pub(crate) format: String,
+    pub(crate) version: Option<u8>,
+    pub(crate) recommended_scrypt_n: u32,
+    pub(crate) recovery_configured: bool,
+    pub(crate) slots: Vec<StatusSlot>,
+}
+
+pub(crate) fn default_scrypt_n() -> u32 {
+    1u32 << DEFAULT_SCRYPT_LOG_N
+}
+
+pub(crate) fn status(vault_dir: &Path, format: &str) -> Result<KeyringStatus, String> {
+    let recommended = default_scrypt_n();
+    if format != "keyring" {
+        return Ok(KeyringStatus {
+            format: format.to_string(),
+            version: None,
+            recommended_scrypt_n: recommended,
+            recovery_configured: false,
+            slots: Vec::new(),
+        });
+    }
+    let file = read(vault_dir)?.ok_or("this vault has no keyring")?;
+    let slots: Vec<StatusSlot> = file
+        .slots
+        .iter()
+        .map(|slot| StatusSlot {
+            id: slot.id.clone(),
+            kind: slot.kind.clone(),
+            label: slot.label.clone(),
+            created_at: slot.created_at.clone(),
+            recovery: slot.label == RECOVERY_LABEL,
+            kdf: StatusKdf {
+                name: slot.kdf.name.clone(),
+                n: slot.kdf.n,
+                r: slot.kdf.r,
+                p: slot.kdf.p,
+                cost: match slot.kdf.n.cmp(&recommended) {
+                    std::cmp::Ordering::Less => CostStatus::BelowDefault,
+                    std::cmp::Ordering::Equal => CostStatus::Default,
+                    std::cmp::Ordering::Greater => CostStatus::AboveDefault,
+                },
+            },
+        })
+        .collect();
+    Ok(KeyringStatus {
+        format: format.to_string(),
+        version: Some(file.version),
+        recommended_scrypt_n: recommended,
+        recovery_configured: slots.iter().any(|slot| slot.recovery),
+        slots,
+    })
 }
