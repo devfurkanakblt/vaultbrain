@@ -171,22 +171,22 @@ is to name the exact command. Restore in particular runs when `keyring.json`
 is already damaged — the moment the application cannot open the vault at all —
 so a graphical path to it would mostly be unreachable when it is needed.
 
-- [ ] The audit chain in the Rust core. Phase 7.5 requires every key-material
+- [x] The audit chain in the Rust core. Phase 7.5 requires every key-material
       command to append to the passphrase-authenticated chain, and the
       application has no way to. This is the larger bug underneath: `audit.log`
       is written only by `src/cli.ts`, so every note, canvas, attachment and
       plugin change made in the application today is absent from the chain
       entirely. A committed cross-core vector pins the entry and head
       constructions, the way `keyring-vector.json` pins the keyset.
-- [ ] `keyring status` in the application: every slot with its id, label,
+- [x] `keyring status` in the application: every slot with its id, label,
       creation time and key-derivation cost, so a user can see a slot they did
       not add and can learn their vault still sits at the old work factor.
-- [ ] Passphrase change from the application, including the key-derivation cost
+- [x] Passphrase change from the application, including the key-derivation cost
       upgrade the CLI command already performs.
-- [ ] Recovery-kit creation in the application, with first-run guidance that
+- [x] Recovery-kit creation in the application, with first-run guidance that
       asks for one before the vault holds anything worth losing. A recovery slot
       nobody is told about protects nobody.
-- [ ] Recovery restore and re-key remain CLI operations. The application
+- [x] Recovery restore and re-key remain CLI operations. The application
       detects when one is needed and shows the exact command, rather than
       pretending to offer what it cannot safely perform.
 

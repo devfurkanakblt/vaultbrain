@@ -787,6 +787,7 @@ kbd { font: 9px var(--font-mono); color: var(--on-shell-dim); border: 1px solid 
 .keyring-passphrase .keyring-hint { color: var(--rust); }
 .keyring-passphrase button { justify-self: start; font: 500 12px var(--font-editor); padding: 8px 14px; border: 1px solid var(--paper-line); background: var(--paper); color: var(--ink); cursor: pointer; }
 .keyring-passphrase button:disabled { opacity: .5; cursor: not-allowed; }
+.attention-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--rust); margin-left: auto; flex: none; }
 .keyring-recovery form { margin: 0 26px; padding: 14px 16px; border: 1px solid var(--paper-line); background: rgba(226,231,205,.36); display: grid; gap: 10px; max-width: 520px; }
 .keyring-recovery label { display: grid; gap: 4px; font-size: 12px; color: #4c4e45; }
 .keyring-recovery input { font: 13px var(--font-mono); padding: 7px 9px; border: 1px solid var(--paper-line); background: var(--paper); color: var(--ink); }

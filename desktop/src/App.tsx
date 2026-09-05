@@ -419,6 +419,15 @@ export function App() {
     setBookmarks(workspace.bookmarks);
     setLayouts(workspace.layouts);
     if (listed[0]) await openNote(listed[0].id);
+    // Read the keyring on every unlock, so a vault with no second way in says
+    // so before it holds anything worth losing. Slot headers only; no unwrap.
+    try {
+      setKeyringStatus(await vaultBridge.keyringStatus());
+    } catch {
+      // A vault whose keyring cannot be described still opens; the Keys panel
+      // is where that gets explained, not a failed unlock.
+      setKeyringStatus(null);
+    }
   }
 
   const openNote = useCallback(async (reference: string) => {
@@ -936,7 +945,13 @@ export function App() {
           <button className={workspaceView === "files" ? "active" : ""} onClick={() => void showWorkspace("files")}><Paperclip size={14} /><span>Files</span></button>
           <button className={workspaceView === "plugins" ? "active" : ""} onClick={() => void showWorkspace("plugins")}><Puzzle size={14} /><span>Plugins</span></button>
           <button className={workspaceView === "sync" ? "active" : ""} onClick={() => void showWorkspace("sync")}><RefreshCw size={14} /><span>Sync</span></button>
-          <button className={workspaceView === "keys" ? "active" : ""} onClick={() => void showWorkspace("keys")}><KeyRound size={14} /><span>Keys</span></button>
+          <button
+            className={workspaceView === "keys" ? "active" : ""}
+            onClick={() => void showWorkspace("keys")}
+            title={keyringStatus && !keyringStatus.recoveryConfigured ? "This vault has no recovery kit" : undefined}
+          ><KeyRound size={14} /><span>Keys</span>{keyringStatus && !keyringStatus.recoveryConfigured
+            ? <span className="attention-dot" aria-label="This vault has no recovery kit" />
+            : null}</button>
         </div>
         <button className="quick-find" onClick={() => setSearchOpen(true)}><Search size={15} /><span>Find anything…</span><kbd>⇧⌘F</kbd></button>
         {bookmarks.length > 0 && <div className="bookmark-block">
