@@ -4122,6 +4122,7 @@ dependencies = [
  "chrono",
  "ed25519-dalek",
  "hmac",
+ "libc",
  "rand",
  "regex",
  "scrypt",

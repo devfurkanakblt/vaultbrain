@@ -10,19 +10,17 @@ import {
   type AnyEncryptedPayload,
   type KeyedEncryptedPayload,
 } from "./crypto.js";
-import { openOrCreateVaultKey, openVaultKey } from "./keyring.js";
-import { assertNotSymlink, writeFileAtomic } from "./fs-safe.js";
+import { assertNotSymlink, readTextFileLimited, writeFileAtomic } from "./fs-safe.js";
+import { openOrCreateVaultKey, openVaultReadKeys } from "./keyring.js";
 import { isRedactionLevel, type RedactionLevel } from "./redaction.js";
 import { normalizeVaultName, resolveInside } from "./safety.js";
 
 /**
  * Per-agent scoped grants.
  *
- * The file's existence is the switch: a vault with no `grants.enc` behaves the
- * way it always has — one passphrase, no per-agent narrowing — and a vault with
- * one enforces every rule below. That keeps an existing vault working until its
- * owner decides to govern it, and makes "is this vault governed?" a question
- * with a yes/no answer rather than a policy to read.
+ * MCP access is fail-closed: no `grants.enc` means no agent access. Direct CLI
+ * operations remain available to the owner, but an MCP process cannot turn a
+ * missing policy into whole-vault access.
  */
 
 export type GrantAction = "discover" | "resolve" | "store";
@@ -86,7 +84,7 @@ export interface GrantDecision {
   redact: RedactionLevel;
   /** True when the caller must first obtain an approval for this exact key. */
   requiresConfirmation: boolean;
-  /** True when the vault has no grant file and is therefore ungoverned. */
+  /** True when the vault has no grant file (and access was denied). */
   ungoverned: boolean;
 }
 
@@ -144,10 +142,14 @@ export function loadGrants(vaultDir: string, passphrase: string): GrantFile | nu
   const path = grantsPath(vaultDir);
   if (!fs.existsSync(path)) return null;
   assertNotSymlink(path);
-  const payload: AnyEncryptedPayload = JSON.parse(fs.readFileSync(path, "utf8"));
+  const payload: AnyEncryptedPayload = JSON.parse(readTextFileLimited(path, 8 * 1024 * 1024, "Grant policy"));
   const parsed: GrantFile = JSON.parse(
     envelopeVersion(payload) === KEYED_ENVELOPE_VERSION
-      ? decryptWithKey(payload as KeyedEncryptedPayload, requireGrantsKey(vaultDir, passphrase), GRANTS_FILE_IDENTITY)
+      ? decryptWithKey(
+          payload as KeyedEncryptedPayload,
+          requireGrantsReadKeys(vaultDir, passphrase),
+          GRANTS_FILE_IDENTITY,
+        )
       : decrypt(payload, passphrase),
   );
   if (parsed.version !== 1 || !Array.isArray(parsed.grants)) {
@@ -156,10 +158,11 @@ export function loadGrants(vaultDir: string, passphrase: string): GrantFile | nu
   return { version: 1, grants: parsed.grants, requests: parsed.requests ?? [] };
 }
 
-function requireGrantsKey(vaultDir: string, passphrase: string): Buffer {
-  const key = openVaultKey(vaultDir, passphrase, "kv");
-  if (!key) throw new Error("The grant file is keyring-encrypted but the vault has no readable keyring.");
-  return key;
+/** The `kv` key in force, then the retiring one of an unfinished re-key. */
+function requireGrantsReadKeys(vaultDir: string, passphrase: string): Buffer[] {
+  const keys = openVaultReadKeys(vaultDir, passphrase, "kv");
+  if (!keys) throw new Error("The grant file is keyring-encrypted but the vault has no readable keyring.");
+  return keys;
 }
 
 export function saveGrants(vaultDir: string, file: GrantFile, passphrase: string): GrantFile {
@@ -261,9 +264,9 @@ function scopeCovers(scope: GrantScope, request: AccessRequest): boolean {
 export function decide(file: GrantFile | null, request: AccessRequest): GrantDecision {
   if (!file) {
     return {
-      allowed: true,
-      reason: "This vault has no grant policy, so every unlocked key is reachable.",
-      redact: "none",
+      allowed: false,
+      reason: "This vault has no grant policy. Ask the vault owner to run: vbrain grant add.",
+      redact: "full",
       requiresConfirmation: false,
       ungoverned: true,
     };
@@ -423,7 +426,7 @@ export function filterDiscoverable<T extends { key: string }>(
   entries: T[],
   now = new Date(),
 ): T[] {
-  if (!file) return entries;
+  if (!file) return [];
   return entries.filter(
     (entry) => decide(file, { agent, action: "discover", file: vaultFile, key: entry.key, now }).allowed,
   );

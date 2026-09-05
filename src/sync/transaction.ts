@@ -16,7 +16,6 @@ import {
   OBJECT_ID,
   assertSyncJson,
   canonicalSyncJson,
-  validateEncryptedSyncChange,
   type EncryptedSyncChange,
   type SyncChange,
   type SyncJson,
@@ -61,7 +60,7 @@ export interface SyncApplyLiveIdentity {
 export interface SyncApplyReceipt {
   version: 1;
   changeId: string;
-  objectType: Extract<SyncObjectType, "note" | "canvas" | "attachment">;
+  objectType: SyncObjectType;
   objectId: string;
   operation: SyncOperation;
   expectedLive: SyncApplyLiveIdentity;
@@ -69,7 +68,7 @@ export interface SyncApplyReceipt {
 }
 
 export interface SyncLocalStorageOperation {
-  objectType: "note" | "canvas" | "attachment";
+  objectType: "note" | "canvas" | "attachment" | "plugin" | "vault";
   objectId: string;
   operation: "put" | "delete";
   input: SyncJson;
@@ -101,6 +100,26 @@ function canonicalTimestamp(value: unknown): value is string {
   return Number.isFinite(parsed) && new Date(parsed).toISOString() === value;
 }
 
+function validatePendingEnvelope(value: unknown): EncryptedSyncChange {
+  const envelope = value as EncryptedSyncChange | undefined;
+  if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)) {
+    throw new Error("A pending sync transaction has an invalid encrypted change.");
+  }
+  if ((envelope.version !== 1 && envelope.version !== 2) || !CHANGE_ID.test(envelope.id)) {
+    throw new Error("A pending sync transaction has an invalid encrypted change.");
+  }
+  if (
+    (envelope.version === 1 && envelope.epoch !== undefined) ||
+    (envelope.version === 2 && (!Number.isSafeInteger(envelope.epoch) || (envelope.epoch ?? 0) < 2))
+  ) {
+    throw new Error("A pending sync transaction has an invalid sync epoch.");
+  }
+  if (!envelope.payload || envelope.payload.version !== 1) {
+    throw new Error("A pending sync transaction has an invalid encrypted payload.");
+  }
+  return structuredClone(envelope);
+}
+
 function storageRevision(value: unknown, label: string): number | null {
   if (value === null) return null;
   if (!Number.isSafeInteger(value) || (value as number) < 1) {
@@ -114,7 +133,13 @@ function validateStorageOperation(value: unknown): SyncLocalStorageOperation {
   if (!operation || typeof operation !== "object" || Array.isArray(operation)) {
     throw new Error("A pending sync storage operation must be an object.");
   }
-  if (operation.objectType !== "note" && operation.objectType !== "canvas" && operation.objectType !== "attachment") {
+  if (
+    operation.objectType !== "note" &&
+    operation.objectType !== "canvas" &&
+    operation.objectType !== "attachment" &&
+    operation.objectType !== "plugin" &&
+    operation.objectType !== "vault"
+  ) {
     throw new Error("A pending sync storage operation has an unsupported object type.");
   }
   if (typeof operation.objectId !== "string" || !OBJECT_ID.test(operation.objectId)) {
@@ -128,16 +153,33 @@ function validateStorageOperation(value: unknown): SyncLocalStorageOperation {
   assertSyncJson(operation.targetValue);
   const beforeStorageRevision = storageRevision(operation.beforeStorageRevision, "Expected storage revision");
   const targetStorageRevision = storageRevision(operation.targetStorageRevision, "Target storage revision");
-  if (operation.objectType === "attachment" && (beforeStorageRevision !== null || targetStorageRevision !== null)) {
-    throw new Error("Attachment storage operations cannot carry document revisions.");
+  if (
+    (operation.objectType === "attachment" || operation.objectType === "vault") &&
+    (beforeStorageRevision !== null || targetStorageRevision !== null)
+  ) {
+    throw new Error("Unrevisioned storage operations cannot carry document revisions.");
   }
-  if (operation.objectType !== "attachment" && operation.operation === "put" && targetStorageRevision === null) {
-    throw new Error("A note or canvas put needs a target storage revision.");
+  if (
+    operation.objectType !== "attachment" &&
+    operation.objectType !== "vault" &&
+    operation.operation === "put" &&
+    targetStorageRevision === null
+  ) {
+    throw new Error("A revisioned object put needs a target storage revision.");
   }
-  if (operation.objectType !== "attachment" && (operation.beforeValue === null) !== (beforeStorageRevision === null)) {
+  if (
+    operation.objectType !== "attachment" &&
+    operation.objectType !== "vault" &&
+    (operation.beforeValue === null) !== (beforeStorageRevision === null)
+  ) {
     throw new Error("A pending document operation has an inconsistent expected revision and snapshot.");
   }
-  if (operation.objectType !== "attachment" && operation.operation === "delete" && targetStorageRevision !== null) {
+  if (
+    operation.objectType !== "attachment" &&
+    operation.objectType !== "vault" &&
+    operation.operation === "delete" &&
+    targetStorageRevision !== null
+  ) {
     throw new Error("A pending document delete cannot carry a target storage revision.");
   }
   if (operation.operation === "delete" && operation.targetValue !== null) {
@@ -149,8 +191,12 @@ function validateStorageOperation(value: unknown): SyncLocalStorageOperation {
   if (operation.operation === "put" && operation.targetValue === null) {
     throw new Error("A pending put must carry a target snapshot.");
   }
+  if (operation.objectType === "vault" && operation.operation !== "put") {
+    throw new Error("A vault policy operation must be a put.");
+  }
   if (
     operation.operation === "put" &&
+    operation.objectType !== "plugin" &&
     canonicalSyncJson(operation.input) !== canonicalSyncJson(operation.targetValue)
   ) {
     throw new Error("A pending put's stable input does not match its target snapshot.");
@@ -202,7 +248,7 @@ function validatePendingIntent(value: unknown): SyncPendingIntent {
     createdAt: pending.createdAt,
     phase: pending.phase,
     operations: pending.operations.map(validateStorageOperation),
-    changes: pending.changes.map(validateEncryptedSyncChange),
+    changes: pending.changes.map(validatePendingEnvelope),
   };
 }
 
@@ -240,6 +286,12 @@ export class SyncLocalTransaction {
     return this.session.key;
   }
 
+  /** The write key, then the retiring one of an unfinished re-key. */
+  private readKeys(): readonly Buffer[] {
+    if (this.closed) throw new Error("Sync local transaction store is closed.");
+    return this.session.readKeys;
+  }
+
   private fault(phase: SyncTransactionPhase, timing: SyncTransactionFaultPoint["timing"]): void {
     this.options.faultInjector?.({ phase, timing });
   }
@@ -269,7 +321,7 @@ export class SyncLocalTransaction {
       throw new Error("The encrypted pending sync transaction is invalid or too large.");
     }
     const payload = JSON.parse(fs.readFileSync(this.pendingPath, "utf8")) as DocumentPayload;
-    const plaintext = decryptDocument(payload, this.key(), LOCAL_TRANSACTION_AAD);
+    const plaintext = decryptDocument(payload, this.readKeys(), LOCAL_TRANSACTION_AAD);
     if (Buffer.byteLength(plaintext, "utf8") > MAX_LOCAL_TRANSACTION_BYTES) {
       throw new Error("The pending sync transaction is too large.");
     }
@@ -343,7 +395,7 @@ function validateApplyReceipt(value: unknown): SyncApplyReceipt {
     throw new Error("Unsupported or invalid sync apply receipt.");
   }
   if (!CHANGE_ID.test(receipt.changeId)) throw new Error("A sync apply receipt has an invalid change ID.");
-  if (receipt.objectType !== "note" && receipt.objectType !== "canvas" && receipt.objectType !== "attachment") {
+  if (!["note", "canvas", "attachment", "plugin", "vault"].includes(receipt.objectType)) {
     throw new Error("A sync apply receipt has an unsupported object type.");
   }
   if (typeof receipt.objectId !== "string" || !OBJECT_ID.test(receipt.objectId)) {
@@ -407,6 +459,12 @@ export class SyncApplyReceiptStore {
     return this.session.key;
   }
 
+  /** The write key, then the retiring one of an unfinished re-key. */
+  private readKeys(): readonly Buffer[] {
+    if (this.closed) throw new Error("Sync apply receipt store is closed.");
+    return this.session.readKeys;
+  }
+
   fault(phase: SyncApplyPhase, timing: SyncApplyFaultPoint["timing"]): void {
     this.options.applyFaultInjector?.({ phase, timing });
   }
@@ -424,18 +482,11 @@ export class SyncApplyReceiptStore {
     if (!fs.existsSync(this.receiptPath)) return undefined;
     assertNotSymlink(this.receiptPath);
     const payload = JSON.parse(fs.readFileSync(this.receiptPath, "utf8")) as DocumentPayload;
-    return validateApplyReceipt(JSON.parse(decryptDocument(payload, this.key(), APPLY_RECEIPT_AAD)));
+    return validateApplyReceipt(JSON.parse(decryptDocument(payload, this.readKeys(), APPLY_RECEIPT_AAD)));
   }
 
   begin(change: SyncChange, expectedLive: SyncApplyLiveIdentity): SyncApplyReceipt {
     if (this.read()) throw new Error("A pending sync apply receipt must be recovered before another starts.");
-    if (
-      change.mutation.objectType !== "note" &&
-      change.mutation.objectType !== "canvas" &&
-      change.mutation.objectType !== "attachment"
-    ) {
-      throw new Error(`Live sync application is not implemented for ${change.mutation.objectType} objects.`);
-    }
     const receipt: SyncApplyReceipt = {
       version: 1,
       changeId: change.id,

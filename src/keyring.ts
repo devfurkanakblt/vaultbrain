@@ -1,24 +1,62 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { AAD } from "./format-version.js";
 import { assertNotSymlink, writeFileAtomic } from "./fs-safe.js";
 import { resolveInside } from "./safety.js";
 import { withVaultLock } from "./vault-lock.js";
 
 export const KEYRING_VERSION = 2;
 export const KEYSET_VERSION = 1;
+/**
+ * The version a keyset carries while a re-key is in flight, when it holds the
+ * outgoing rotatable keys alongside the new ones. Any build that does not
+ * understand the field rejects the whole keyset, which is the point: a vault
+ * caught mid-re-key must fail closed rather than be opened by a reader that
+ * would silently fail to decrypt the objects still holding old ciphertext.
+ */
+export const RETIRING_KEYSET_VERSION = 2;
 export const KEYRING_FILENAME = "keyring.json";
 export const DEFAULT_SCRYPT_N = 2 ** 17;
 
 const SCRYPT_R = 8;
 const SCRYPT_P = 1;
 const KEY_LENGTH = 32;
-const SLOT_AAD_CONTEXT = "secondbrain-vault:keyring-slot:v1";
+/** Declared in the frozen inventory with every other domain-separation string. */
+const SLOT_AAD_CONTEXT = AAD.keyringSlot;
 
 /** The order is part of the format: it is what `serializeKeySet` writes. */
 export const KEY_NAMES = ["documents", "kv", "attachmentId", "syncChange", "syncEnvelope", "audit"] as const;
 export type KeyName = (typeof KEY_NAMES)[number];
 export type KeySet = { [K in KeyName]: Buffer };
+
+/**
+ * The keys `vbrain rekey` replaces. The three left out are permanent by
+ * design: `attachmentId` keys content addresses, `syncChange` keys change IDs
+ * the causal DAG references, and `audit` keys a chain already signed. Rotating
+ * any of them would invalidate every reference already in the vault.
+ */
+export const ROTATABLE_KEY_NAMES = ["documents", "kv", "syncEnvelope"] as const;
+export type RotatableKeyName = (typeof ROTATABLE_KEY_NAMES)[number];
+export type RetiringKeys = { [K in RotatableKeyName]: Buffer };
+
+/**
+ * A keyset as it sits inside a slot: the keys in force, plus the outgoing
+ * rotatable keys while a re-key has not yet finished rewriting every object
+ * under the new ones. `retiring` is null in a settled vault.
+ */
+export interface VaultKeySet {
+  keys: KeySet;
+  retiring: RetiringKeys | null;
+  /**
+   * The documents key a completed re-key replaced, kept for one purpose only:
+   * recomputing the ids of sync changes an older build wrote, which derived
+   * them from that key. It decrypts nothing — a re-key re-seals every body
+   * under the new envelope key — and it grants no reader anything an owner of
+   * the old passphrase did not already have. Null unless a re-key has run.
+   */
+  legacyChangeIdentity: Buffer | null;
+}
 
 export interface SlotKdf {
   name: "scrypt";
@@ -140,22 +178,71 @@ function slotAad(slot: Omit<KeyringSlot, "wrapped">): Buffer {
   );
 }
 
-function serializeKeySet(keys: KeySet): string {
+function serializeKeySet(
+  keys: KeySet,
+  retiring: RetiringKeys | null,
+  legacyChangeIdentity: Buffer | null,
+): string {
   const encoded: Record<string, string> = {};
   for (const name of KEY_NAMES) encoded[name] = keys[name].toString("base64");
-  return JSON.stringify({ version: KEYSET_VERSION, keys: encoded });
+  const legacy = legacyChangeIdentity
+    ? { legacyChangeIdentity: legacyChangeIdentity.toString("base64") }
+    : {};
+  if (!retiring) return JSON.stringify({ version: KEYSET_VERSION, keys: encoded, ...legacy });
+  const outgoing: Record<string, string> = {};
+  for (const name of ROTATABLE_KEY_NAMES) outgoing[name] = retiring[name].toString("base64");
+  return JSON.stringify({
+    version: RETIRING_KEYSET_VERSION,
+    keys: encoded,
+    retiring: outgoing,
+    ...legacy,
+  });
 }
 
-function parseKeySet(plaintext: string): KeySet {
-  const parsed = JSON.parse(plaintext) as { version?: number; keys?: Record<string, unknown> };
-  if (parsed?.version !== KEYSET_VERSION) {
-    throw new Error(`Unsupported vault keyset version: ${String(parsed?.version)}`);
+function parseKeySet(plaintext: string): VaultKeySet {
+  const parsed = JSON.parse(plaintext) as {
+    version?: number;
+    keys?: Record<string, unknown>;
+    retiring?: Record<string, unknown>;
+    legacyChangeIdentity?: unknown;
+  };
+  const version = parsed?.version;
+  if (version !== KEYSET_VERSION && version !== RETIRING_KEYSET_VERSION) {
+    throw new Error(`Unsupported vault keyset version: ${String(version)}`);
   }
   const keys = {} as KeySet;
   for (const name of KEY_NAMES) {
     keys[name] = base64Bytes(parsed.keys?.[name], KEY_LENGTH, KEY_LENGTH, `${name} key`);
   }
-  return keys;
+  const legacyChangeIdentity =
+    parsed.legacyChangeIdentity === undefined
+      ? null
+      : base64Bytes(parsed.legacyChangeIdentity, KEY_LENGTH, KEY_LENGTH, "legacy change identity key");
+  if (version === KEYSET_VERSION) {
+    // Refused rather than ignored: a reader that silently dropped retiring
+    // keys it was not expecting would report success and then fail to open
+    // every object the interrupted re-key had not reached yet.
+    if (parsed.retiring !== undefined) {
+      zeroKeySet(keys);
+      throw new Error("A version 1 vault keyset must not carry retiring keys.");
+    }
+    return { keys, retiring: null, legacyChangeIdentity };
+  }
+  const retiring = {} as RetiringKeys;
+  for (const name of ROTATABLE_KEY_NAMES) {
+    retiring[name] = base64Bytes(parsed.retiring?.[name], KEY_LENGTH, KEY_LENGTH, `retiring ${name} key`);
+  }
+  return { keys, retiring, legacyChangeIdentity };
+}
+
+export function copyRetiringKeys(retiring: RetiringKeys): RetiringKeys {
+  const copy = {} as RetiringKeys;
+  for (const name of ROTATABLE_KEY_NAMES) copy[name] = Buffer.from(retiring[name]);
+  return copy;
+}
+
+export function zeroRetiringKeys(retiring: RetiringKeys): void {
+  for (const name of ROTATABLE_KEY_NAMES) retiring[name].fill(0);
 }
 
 export function randomKeySet(): KeySet {
@@ -174,21 +261,59 @@ export function zeroKeySet(keys: KeySet): void {
   for (const name of KEY_NAMES) keys[name].fill(0);
 }
 
-export function wrapKeySet(keys: KeySet, passphrase: string, N: number = DEFAULT_SCRYPT_N): KeyringSlot {
+export function wrapKeySet(
+  keys: KeySet,
+  passphrase: string,
+  N: number = DEFAULT_SCRYPT_N,
+  retiring: RetiringKeys | null = null,
+  legacyChangeIdentity: Buffer | null = null,
+): KeyringSlot {
+  return wrapKeySetSlot(keys, passphrase, { N, label: "primary", retiring, legacyChangeIdentity });
+}
+
+export interface WrapKeySetSlotOptions {
+  N?: number;
+  label: string;
+  id?: string;
+  createdAt?: string;
+  /** The outgoing rotatable keys of a re-key that has not finished. */
+  retiring?: RetiringKeys | null;
+  /** The documents key a completed re-key replaced. See `VaultKeySet`. */
+  legacyChangeIdentity?: Buffer | null;
+}
+
+/** Wrap the keyset in a named slot without changing the on-disk slot format. */
+export function wrapKeySetSlot(
+  keys: KeySet,
+  passphrase: string,
+  options: WrapKeySetSlotOptions,
+): KeyringSlot {
   if (!passphrase) throw new Error("A non-empty vault passphrase is required.");
   const header = {
-    id: crypto.randomUUID(),
+    id: options.id ?? crypto.randomUUID(),
     type: "passphrase" as const,
-    label: "primary",
-    kdf: validateKdf({ name: "scrypt", N, r: SCRYPT_R, p: SCRYPT_P, salt: crypto.randomBytes(16).toString("base64") }),
-    createdAt: new Date().toISOString(),
+    label: options.label,
+    kdf: validateKdf({
+      name: "scrypt",
+      N: options.N ?? DEFAULT_SCRYPT_N,
+      r: SCRYPT_R,
+      p: SCRYPT_P,
+      salt: crypto.randomBytes(16).toString("base64"),
+    }),
+    createdAt: options.createdAt ?? new Date().toISOString(),
   };
   const derived = deriveSlotKey(passphrase, header.kdf);
   try {
     const iv = crypto.randomBytes(12);
     const cipher = crypto.createCipheriv("aes-256-gcm", derived, iv);
     cipher.setAAD(slotAad(header));
-    const ciphertext = Buffer.concat([cipher.update(serializeKeySet(keys), "utf8"), cipher.final()]);
+    const ciphertext = Buffer.concat([
+      cipher.update(
+        serializeKeySet(keys, options.retiring ?? null, options.legacyChangeIdentity ?? null),
+        "utf8",
+      ),
+      cipher.final(),
+    ]);
     return {
       ...header,
       wrapped: {
@@ -208,6 +333,17 @@ export function wrapKeySet(keys: KeySet, passphrase: string, N: number = DEFAULT
  * passphrase-guessing oracle.
  */
 export function unwrapSlot(slot: KeyringSlot, passphrase: string): KeySet {
+  const opened = unwrapSlotKeySet(slot, passphrase);
+  if (opened.retiring) zeroRetiringKeys(opened.retiring);
+  return opened.keys;
+}
+
+/**
+ * `unwrapSlot`, but surfacing the retiring keys of a vault caught mid-re-key.
+ * Callers that only need the keys in force should use `unwrapSlot`, which
+ * zeroizes what it drops.
+ */
+export function unwrapSlotKeySet(slot: KeyringSlot, passphrase: string): VaultKeySet {
   const validated = validateSlot(slot);
   const derived = deriveSlotKey(passphrase, validated.kdf);
   let plaintext: Buffer | undefined;
@@ -256,9 +392,16 @@ export function writeKeyring(vaultDir: string, file: KeyringFile): void {
 }
 
 export function unwrapKeyring(file: KeyringFile, passphrase: string): KeySet {
+  const opened = unwrapKeyringKeySet(file, passphrase);
+  if (opened.retiring) zeroRetiringKeys(opened.retiring);
+  return opened.keys;
+}
+
+/** `unwrapKeyring`, surfacing the retiring keys of a vault caught mid-re-key. */
+export function unwrapKeyringKeySet(file: KeyringFile, passphrase: string): VaultKeySet {
   for (const slot of file.slots) {
     try {
-      return unwrapSlot(slot, passphrase);
+      return unwrapSlotKeySet(slot, passphrase);
     } catch {
       // Try the next slot: a keyring may hold several, and only one has to open.
     }
@@ -296,7 +439,23 @@ export function detectVaultFormat(vaultDir: string): VaultFormat {
  * in-process session; neither it nor the keyset is ever written to disk. This
  * is the pattern `audit.ts` already uses for its chain key.
  */
-const keySetCache = new Map<string, KeySet>();
+const keySetCache = new Map<string, VaultKeySet>();
+
+function copyVaultKeySet(opened: VaultKeySet): VaultKeySet {
+  return {
+    keys: copyKeySet(opened.keys),
+    retiring: opened.retiring ? copyRetiringKeys(opened.retiring) : null,
+    legacyChangeIdentity: opened.legacyChangeIdentity
+      ? Buffer.from(opened.legacyChangeIdentity)
+      : null,
+  };
+}
+
+function zeroVaultKeySet(opened: VaultKeySet): void {
+  zeroKeySet(opened.keys);
+  if (opened.retiring) zeroRetiringKeys(opened.retiring);
+  opened.legacyChangeIdentity?.fill(0);
+}
 
 function cacheId(vaultDir: string, passphrase: string, file: KeyringFile): string {
   const fingerprint = crypto
@@ -315,17 +474,55 @@ function cacheId(vaultDir: string, passphrase: string, file: KeyringFile): strin
  * they lock, and that must not blind the next caller.
  */
 export function openVaultKeys(vaultDir: string, passphrase: string): KeySet | null {
+  const opened = openVaultKeySet(vaultDir, passphrase);
+  if (!opened) return null;
+  if (opened.retiring) zeroRetiringKeys(opened.retiring);
+  return opened.keys;
+}
+
+/**
+ * `openVaultKeys`, surfacing the retiring keys of a vault whose re-key has not
+ * finished. Callers that read stored objects want this one: until the last
+ * object has been rewritten, some of them still hold ciphertext under the
+ * outgoing key.
+ */
+export function openVaultKeySet(vaultDir: string, passphrase: string): VaultKeySet | null {
   const file = readKeyring(vaultDir);
   if (!file) return null;
   if (!passphrase) throw new Error("A non-empty vault passphrase is required.");
 
   const id = cacheId(vaultDir, passphrase, file);
   const cached = keySetCache.get(id);
-  if (cached) return copyKeySet(cached);
+  if (cached) return copyVaultKeySet(cached);
 
-  const keys = unwrapKeyring(file, passphrase);
-  keySetCache.set(id, keys);
-  return copyKeySet(keys);
+  const opened = unwrapKeyringKeySet(file, passphrase);
+  keySetCache.set(id, opened);
+  return copyVaultKeySet(opened);
+}
+
+/**
+ * The ordered list a reader should try for one rotatable key: the key in
+ * force, then the retiring one when a re-key is still in flight. Returns null
+ * for a vault with no keyring, exactly like `openVaultKeys`.
+ */
+export function openVaultReadKeys(
+  vaultDir: string,
+  passphrase: string,
+  name: RotatableKeyName,
+): Buffer[] | null {
+  const opened = openVaultKeySet(vaultDir, passphrase);
+  if (!opened) return null;
+  const wanted = [opened.keys[name]];
+  if (opened.retiring) {
+    wanted.push(opened.retiring[name]);
+    for (const other of ROTATABLE_KEY_NAMES) {
+      if (other !== name) opened.retiring[other].fill(0);
+    }
+  }
+  for (const other of KEY_NAMES) {
+    if (other !== name) opened.keys[other].fill(0);
+  }
+  return wanted;
 }
 
 /**
@@ -351,14 +548,14 @@ export function openVaultKey(vaultDir: string, passphrase: string, name: KeyName
 /** Drops cached key material, for one vault or for all of them. */
 export function forgetVaultKeys(vaultDir?: string): void {
   if (vaultDir === undefined) {
-    for (const keys of keySetCache.values()) zeroKeySet(keys);
+    for (const opened of keySetCache.values()) zeroVaultKeySet(opened);
     keySetCache.clear();
     return;
   }
   const prefix = `${resolveInside(vaultDir, ".")}\0`;
-  for (const [id, keys] of keySetCache) {
+  for (const [id, opened] of keySetCache) {
     if (!id.startsWith(prefix)) continue;
-    zeroKeySet(keys);
+    zeroVaultKeySet(opened);
     keySetCache.delete(id);
   }
 }
@@ -405,7 +602,15 @@ function writeManifestTombstone(vaultDir: string): void {
  * cannot happen is migration's job, not this function's.
  */
 export function openOrCreateVaultKeys(vaultDir: string, passphrase: string): KeySet | null {
-  const existing = openVaultKeys(vaultDir, passphrase);
+  const opened = openOrCreateVaultKeySet(vaultDir, passphrase);
+  if (!opened) return null;
+  if (opened.retiring) zeroRetiringKeys(opened.retiring);
+  return opened.keys;
+}
+
+/** `openOrCreateVaultKeys`, surfacing the retiring keys of an unfinished re-key. */
+export function openOrCreateVaultKeySet(vaultDir: string, passphrase: string): VaultKeySet | null {
+  const existing = openVaultKeySet(vaultDir, passphrase);
   if (existing) return existing;
   if (!passphrase) throw new Error("A non-empty vault passphrase is required.");
   if (detectVaultFormat(vaultDir) === "legacy") return null;
@@ -415,7 +620,7 @@ export function openOrCreateVaultKeys(vaultDir: string, passphrase: string): Key
     // Re-checked under the lock: two processes racing on the same fresh vault
     // must not each write a keyset of their own, or whichever lost the race
     // would have encrypted its first write under keys nobody keeps.
-    const raced = openVaultKeys(vaultDir, passphrase);
+    const raced = openVaultKeySet(vaultDir, passphrase);
     if (raced) return raced;
     if (detectVaultFormat(vaultDir) === "legacy") return null;
 
@@ -430,7 +635,7 @@ export function openOrCreateVaultKeys(vaultDir: string, passphrase: string): Key
     // Read back rather than returning what we just generated: this proves the
     // keyring on disk really unwraps before one byte is encrypted under it,
     // and it populates the process cache every other caller expects.
-    const created = openVaultKeys(vaultDir, passphrase);
+    const created = openVaultKeySet(vaultDir, passphrase);
     if (!created) throw new Error("Failed to create a vault keyring.");
     return created;
   });

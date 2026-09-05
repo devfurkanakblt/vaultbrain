@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { readTextFileLimited } from "./fs-safe.js";
 
 const LOCK_FILENAME = ".sbrain.lock";
 const DEFAULT_STALE_MS = 30_000;
@@ -47,15 +48,30 @@ function sleepSync(ms: number): void {
 
 function readRecord(lockPath: string): LockRecord | undefined {
   try {
-    const record = JSON.parse(fs.readFileSync(lockPath, "utf8")) as LockRecord;
+    const record = JSON.parse(readTextFileLimited(lockPath, 64 * 1024, "Vault lock")) as LockRecord;
     return typeof record?.token === "string" && typeof record.acquiredAt === "string" ? record : undefined;
   } catch {
     return undefined;
   }
 }
 
-function isStale(record: LockRecord | undefined, staleMs: number): boolean {
-  if (!record) return true; // unreadable or truncated: a crash artefact, not a live holder
+function processIsAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    // EPERM means the process exists but cannot be signalled. Unknown errors
+    // also fail closed: a stuck lock is safer than overlapping writers.
+    return code !== "ESRCH";
+  }
+}
+
+function isReclaimable(record: LockRecord | undefined, staleMs: number): boolean {
+  // Corrupt and remote-host locks are never deleted automatically. They need
+  // an explicit owner recovery action because their liveness is unknowable.
+  if (!record || record.host.toLocaleLowerCase() !== os.hostname().toLocaleLowerCase()) return false;
   const age = Date.now() - Date.parse(record.acquiredAt);
   // The holder's own window wins outright, longer or shorter: it is the only
   // party that knows how long its operation runs. Reclaiming it early is what
@@ -63,9 +79,12 @@ function isStale(record: LockRecord | undefined, staleMs: number): boolean {
   // wedges the vault, so a 15-minute re-key would wait out a crashed
   // 30-second writer for a quarter of an hour. A record from an older build
   // carries no window and falls back to ours.
-  const declared = typeof record.staleMs === "number" && Number.isFinite(record.staleMs) && record.staleMs > 0 ? record.staleMs : 0;
+  const declared =
+    typeof record.staleMs === "number" && Number.isFinite(record.staleMs) && record.staleMs > 0
+      ? record.staleMs
+      : 0;
   const window = declared || staleMs;
-  return !Number.isFinite(age) || age > window;
+  return Number.isFinite(age) && age > window && !processIsAlive(record.pid);
 }
 
 /**
@@ -74,8 +93,8 @@ function isStale(record: LockRecord | undefined, staleMs: number): boolean {
  * is advisory between Vault Brain processes — it protects against a
  * second CLI/MCP/desktop session, not against someone editing files by hand.
  *
- * A lock left behind by a crashed process goes stale and is reclaimed, which
- * is why every write is also crash-recoverable on its own.
+ * A same-host lock left behind by a process proven dead is reclaimed after the
+ * grace period. A live PID, remote host, or malformed lock always fails closed.
  */
 export function withVaultLock<T>(
   vaultDir: string,
@@ -116,7 +135,7 @@ export function withVaultLock<T>(
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       const holder = readRecord(lockPath);
-      if (isStale(holder, staleMs)) {
+      if (isReclaimable(holder, staleMs)) {
         try {
           fs.unlinkSync(lockPath);
         } catch {

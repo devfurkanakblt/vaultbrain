@@ -11,7 +11,12 @@ import {
   type DocumentKeySession,
   type DocumentPayload,
 } from "./document-crypto.js";
-import { assertNoSymlinkComponents, assertNotSymlink, writeFileAtomic } from "./fs-safe.js";
+import {
+  assertNoSymlinkComponents,
+  assertNotSymlink,
+  readTextFileLimited,
+  writeFileAtomic,
+} from "./fs-safe.js";
 import { forgetVaultKeys } from "./keyring.js";
 import {
   analyzeMarkdown,
@@ -24,6 +29,17 @@ import {
 import { resolveInside } from "./safety.js";
 import { applyFrontmatter, parseFrontmatter, stringifyFrontmatter } from "./frontmatter.js";
 import { withVaultLock } from "./vault-lock.js";
+import {
+  AAD,
+  attachmentChunkAad,
+  attachmentManifestAad,
+  canvasAad,
+  canvasHistoryAad,
+  noteAad,
+  noteHistoryAad,
+  pluginAad,
+  pluginStoreAad,
+} from "./format-version.js";
 import {
   SemanticNoteIndex,
   type EmbeddingAdapter,
@@ -342,54 +358,8 @@ export interface AttachmentInfo {
   createdAt: string;
 }
 
-export const INDEX_AAD = "secondbrain-vault:document-index:v1";
-export const PLUGIN_POLICY_AAD = "secondbrain-vault:plugin-policy:v1";
-const ATTACHMENT_CHUNK_SIZE = 1024 * 1024;
-const MAX_ATTACHMENT_SIZE = 250 * 1024 * 1024;
-
-export function noteAad(id: string): string {
-  return `secondbrain-vault:note:v1:${id}`;
-}
-
-export function historyAad(id: string, revision: number): string {
-  return `secondbrain-vault:note-history:v1:${id}:${revision}`;
-}
-
-/**
- * The AAD names the object type, so decrypting a canvas object as a note fails
- * GCM authentication outright. Type confusion between the two sibling object
- * types is therefore caught cryptographically: no separate check is needed, and
- * none can be bypassed.
- */
-export function canvasAad(id: string): string {
-  return `secondbrain-vault:canvas:v1:${id}`;
-}
-
-/** Same type-confusion argument as `canvasAad`, for the third object type. */
-export function pluginAad(id: string): string {
-  return `secondbrain-vault:plugin:v1:${id}`;
-}
-
-/**
- * A plugin's own settings live in a separate object from its code, so writing a
- * setting never rewrites the code — and a reader that only wants the settings
- * never decrypts the code at all.
- */
-export function pluginStoreAad(id: string): string {
-  return `secondbrain-vault:plugin-store:v1:${id}`;
-}
-
-export function canvasHistoryAad(id: string, revision: number): string {
-  return `secondbrain-vault:canvas-history:v1:${id}:${revision}`;
-}
-
-export function attachmentManifestAad(id: string): string {
-  return `secondbrain-vault:attachment-manifest:v1:${id}`;
-}
-
-export function attachmentChunkAad(id: string, index: number): string {
-  return `secondbrain-vault:attachment-chunk:v1:${id}:${index}`;
-}
+export const ATTACHMENT_CHUNK_SIZE = 1024 * 1024;
+export const MAX_ATTACHMENT_SIZE = 250 * 1024 * 1024;
 
 function normalizeText(value: string): string {
   return value.normalize("NFKC").toLocaleLowerCase("en-US");
@@ -527,6 +497,10 @@ export class DocumentVault {
     this.session.attachmentIdKey.fill(0);
     this.session.syncChangeKey.fill(0);
     this.session.syncEnvelopeKey.fill(0);
+    // Entry 0 of each list is the key already wiped above; the rest are the
+    // retiring keys of an unfinished re-key and must not outlive the session.
+    for (const key of this.session.readKeys) key.fill(0);
+    for (const key of this.session.syncEnvelopeReadKeys) key.fill(0);
     forgetVaultKeys(this.vaultDir);
     this.indexCache = undefined;
     this.notesCache = undefined;
@@ -588,8 +562,12 @@ export class DocumentVault {
     const manifestPath = this.attachmentManifestPath(id);
     if (!fs.existsSync(manifestPath)) throw new Error(`Attachment not found: ${id}`);
     assertNotSymlink(manifestPath);
-    const payload = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as DocumentPayload;
-    const info = JSON.parse(decryptDocument(payload, this.session.key, attachmentManifestAad(id))) as AttachmentInfo;
+    const payload = JSON.parse(
+      readTextFileLimited(manifestPath, 1024 * 1024, "Attachment manifest")
+    ) as DocumentPayload;
+    const info = JSON.parse(
+      decryptDocument(payload, this.session.readKeys, attachmentManifestAad(id))
+    ) as AttachmentInfo;
     if (info.id !== id || !Number.isSafeInteger(info.chunks) || info.chunks < 1) {
       throw new Error("Invalid attachment manifest.");
     }
@@ -602,9 +580,12 @@ export class DocumentVault {
     const indexPath = this.indexPath();
     if (!fs.existsSync(indexPath)) return this.rebuildIndex();
     assertNotSymlink(indexPath);
-    const payload = JSON.parse(fs.readFileSync(indexPath, "utf8")) as DocumentPayload;
-    const parsed = JSON.parse(decryptDocument(payload, this.session.key, INDEX_AAD)) as
-      DocumentIndex | LegacyDocumentIndex;
+    const payload = JSON.parse(
+      readTextFileLimited(indexPath, 512 * 1024 * 1024, "Document index")
+    ) as DocumentPayload;
+    const parsed = JSON.parse(
+      decryptDocument(payload, this.session.readKeys, AAD.documentIndex)
+    ) as DocumentIndex | LegacyDocumentIndex;
     if (!Number.isInteger(parsed.version) || parsed.version < 1 || parsed.version > 2) {
       throw new Error("Unsupported or invalid document index.");
     }
@@ -629,7 +610,9 @@ export class DocumentVault {
     const journalPath = this.journalPath();
     if (!fs.existsSync(journalPath)) return undefined;
     try {
-      const journal = JSON.parse(fs.readFileSync(journalPath, "utf8")) as WriteJournal;
+      const journal = JSON.parse(
+        readTextFileLimited(journalPath, 1024 * 1024, "Write journal")
+      ) as WriteJournal;
       if (journal?.version !== 1) return undefined;
       // A scope this build does not know still means "the index may be stale",
       // so it degrades to the strongest recovery rather than to none. Nothing
@@ -772,7 +755,7 @@ export class DocumentVault {
     this.assertUnlocked();
     this.notesCache = undefined;
     index.generatedAt = new Date().toISOString();
-    const payload = encryptDocument(JSON.stringify(index), this.session.key, INDEX_AAD);
+    const payload = encryptDocument(JSON.stringify(index), this.session.key, AAD.documentIndex);
     writeFileAtomic(this.indexPath(), JSON.stringify(payload), { mode: 0o600 });
     this.indexCache = index;
   }
@@ -782,8 +765,10 @@ export class DocumentVault {
     const filePath = encryptedDocumentPath(this.session.rootDir, id);
     if (!fs.existsSync(filePath)) throw new Error(`Note object is missing: ${id}`);
     assertNotSymlink(filePath);
-    const payload = JSON.parse(fs.readFileSync(filePath, "utf8")) as DocumentPayload;
-    const note = JSON.parse(decryptDocument(payload, this.session.key, noteAad(id))) as NoteDocument;
+    const payload = JSON.parse(
+      readTextFileLimited(filePath, 40 * 1024 * 1024, "Note object")
+    ) as DocumentPayload;
+    const note = JSON.parse(decryptDocument(payload, this.session.readKeys, noteAad(id))) as NoteDocument;
     if (note.version !== 1 || note.id !== id) throw new Error(`Invalid note object: ${id}`);
     return note;
   }
@@ -793,8 +778,12 @@ export class DocumentVault {
     const filePath = this.canvasObjectPath(id);
     if (!fs.existsSync(filePath)) throw new Error(`Canvas object is missing: ${id}`);
     assertNotSymlink(filePath);
-    const payload = JSON.parse(fs.readFileSync(filePath, "utf8")) as DocumentPayload;
-    const canvas = JSON.parse(decryptDocument(payload, this.session.key, canvasAad(id))) as CanvasDocument;
+    const payload = JSON.parse(
+      readTextFileLimited(filePath, 12 * 1024 * 1024, "Canvas object")
+    ) as DocumentPayload;
+    const canvas = JSON.parse(
+      decryptDocument(payload, this.session.readKeys, canvasAad(id))
+    ) as CanvasDocument;
     if (canvas.version !== 1 || canvas.id !== id) throw new Error(`Invalid canvas object: ${id}`);
     return canvas;
   }
@@ -820,7 +809,11 @@ export class DocumentVault {
     const historyPath = this.historyPath(note.id, note.revision);
     if (fs.existsSync(historyPath)) return;
     fs.mkdirSync(this.historyDir(note.id), { recursive: true, mode: 0o700 });
-    const payload = encryptDocument(JSON.stringify(note), this.session.key, historyAad(note.id, note.revision));
+    const payload = encryptDocument(
+      JSON.stringify(note),
+      this.session.key,
+      noteHistoryAad(note.id, note.revision)
+    );
     writeFileAtomic(historyPath, JSON.stringify(payload), { mode: 0o600 });
   }
 
@@ -842,8 +835,12 @@ export class DocumentVault {
     const historyPath = this.historyPath(id, revision);
     if (!fs.existsSync(historyPath)) throw new Error(`Revision not found: ${id}@${revision}`);
     assertNotSymlink(historyPath);
-    const payload = JSON.parse(fs.readFileSync(historyPath, "utf8")) as DocumentPayload;
-    const note = JSON.parse(decryptDocument(payload, this.session.key, historyAad(id, revision))) as NoteDocument;
+    const payload = JSON.parse(
+      readTextFileLimited(historyPath, 40 * 1024 * 1024, "Note revision")
+    ) as DocumentPayload;
+    const note = JSON.parse(
+      decryptDocument(payload, this.session.readKeys, noteHistoryAad(id, revision))
+    ) as NoteDocument;
     if (note.id !== id || note.revision !== revision) throw new Error("Invalid revision object.");
     return note;
   }
@@ -854,9 +851,11 @@ export class DocumentVault {
     const historyPath = this.canvasHistoryPath(id, revision);
     if (!fs.existsSync(historyPath)) throw new Error(`Canvas revision not found: ${id}@${revision}`);
     assertNotSymlink(historyPath);
-    const payload = JSON.parse(fs.readFileSync(historyPath, "utf8")) as DocumentPayload;
+    const payload = JSON.parse(
+      readTextFileLimited(historyPath, 12 * 1024 * 1024, "Canvas revision")
+    ) as DocumentPayload;
     const canvas = JSON.parse(
-      decryptDocument(payload, this.session.key, canvasHistoryAad(id, revision)),
+      decryptDocument(payload, this.session.readKeys, canvasHistoryAad(id, revision)),
     ) as CanvasDocument;
     if (canvas.version !== 1 || canvas.id !== id || canvas.revision !== revision) {
       throw new Error("Invalid canvas revision object.");
@@ -1423,8 +1422,12 @@ export class DocumentVault {
     const filePath = this.pluginObjectPath(id);
     if (!fs.existsSync(filePath)) throw new Error(`Plugin not found: ${id}`);
     assertNotSymlink(filePath);
-    const payload = JSON.parse(fs.readFileSync(filePath, "utf8")) as DocumentPayload;
-    const plugin = JSON.parse(decryptDocument(payload, this.session.key, pluginAad(id))) as PluginPackage;
+    const payload = JSON.parse(
+      readTextFileLimited(filePath, 4 * 1024 * 1024, "Plugin package")
+    ) as DocumentPayload;
+    const plugin = JSON.parse(
+      decryptDocument(payload, this.session.readKeys, pluginAad(id))
+    ) as PluginPackage;
     if (plugin.id !== id || plugin.version !== 1) throw new Error("Plugin identity check failed.");
     // Re-validated on the way out, not only on the way in: a manifest this
     // build cannot fully describe must not reach the runtime that enforces it.
@@ -1440,14 +1443,16 @@ export class DocumentVault {
     return { ...rest, manifest, ...(signature ? { signature } : {}) };
   }
 
-  private loadPluginPolicy(): PluginSecurityPolicy {
+  protected loadPluginPolicy(): PluginSecurityPolicy {
     this.assertUnlocked();
     const filePath = this.pluginPolicyPath();
     if (!fs.existsSync(filePath)) return { version: 1, restrictedMode: false, revokedSigners: [] };
     assertNotSymlink(filePath);
-    const payload = JSON.parse(fs.readFileSync(filePath, "utf8")) as DocumentPayload;
+    const payload = JSON.parse(
+      readTextFileLimited(filePath, 4 * 1024 * 1024, "Plugin policy")
+    ) as DocumentPayload;
     const raw = JSON.parse(
-      decryptDocument(payload, this.session.key, PLUGIN_POLICY_AAD),
+      decryptDocument(payload, this.session.readKeys, AAD.pluginPolicy)
     ) as Partial<PluginSecurityPolicy>;
     if (raw.version !== 1 || typeof raw.restrictedMode !== "boolean" || !Array.isArray(raw.revokedSigners)) {
       throw new Error("Invalid plugin security policy.");
@@ -1459,13 +1464,13 @@ export class DocumentVault {
     return { version: 1, restrictedMode: raw.restrictedMode, revokedSigners };
   }
 
-  private savePluginPolicy(policy: PluginSecurityPolicy): void {
+  protected savePluginPolicy(policy: PluginSecurityPolicy): void {
     const normalized: PluginSecurityPolicy = {
       version: 1,
       restrictedMode: policy.restrictedMode,
       revokedSigners: [...new Set(policy.revokedSigners)].sort(),
     };
-    const payload = encryptDocument(JSON.stringify(normalized), this.session.key, PLUGIN_POLICY_AAD);
+    const payload = encryptDocument(JSON.stringify(normalized), this.session.key, AAD.pluginPolicy);
     writeFileAtomic(this.pluginPolicyPath(), JSON.stringify(payload), { mode: 0o600 });
   }
 
@@ -1491,59 +1496,70 @@ export class DocumentVault {
    * source: a plugin whose declared reach and whose code arrived separately
    * could be approved as one thing and run as another.
    */
+  protected preparePluginInstall(input: {
+    manifest: unknown;
+    source: string;
+    enabled?: boolean;
+    baseRevision?: number;
+  }): PluginPackage {
+    const manifest = parsePluginManifest(input.manifest);
+    const source = validatePluginSource(input.source);
+    const signature = verifyPluginSignature(manifest, source);
+    const policy = this.loadPluginPolicy();
+    if (signature && policy.revokedSigners.includes(signature.keyId)) {
+      throw new Error(`Plugin signer is revoked: ${signature.keyId}`);
+    }
+    if (policy.restrictedMode && !signature) {
+      throw new Error("Restricted mode accepts cryptographically signed plugins only.");
+    }
+    const index = this.loadIndex();
+    const plugins = index.plugins ?? {};
+    const existing = Object.values(plugins).find((plugin) => plugin.manifestId === manifest.id);
+    if (!existing && Object.keys(plugins).length >= MAX_PLUGINS) {
+      throw new Error(`A vault may hold at most ${MAX_PLUGINS} plugins.`);
+    }
+    if (existing && input.baseRevision !== undefined && input.baseRevision !== existing.revision) {
+      throw new Error(
+        `Plugin revision conflict: expected revision ${input.baseRevision}, current revision ${existing.revision}.`,
+      );
+    }
+    const id = existing?.id ?? crypto.randomUUID();
+    if (!existing && (index.notes[id] || index.canvases[id])) {
+      throw new Error(`Document ID already exists: ${id}`);
+    }
+    const previous = existing ? this.loadPluginById(id) : undefined;
+    if (previous?.signature && !signature) {
+      throw new Error("A signed plugin cannot be updated with an unsigned package.");
+    }
+    if (previous?.signature && signature && previous.signature.keyId !== signature.keyId) {
+      throw new Error("Plugin signer changed. Remove the plugin and approve it as a new install.");
+    }
+    const now = new Date().toISOString();
+    return {
+      version: 1,
+      id,
+      manifest,
+      source,
+      ...(signature ? { signature } : {}),
+      // An update never silently re-enables a plugin the person turned off,
+      // and never enables a new one without being asked to.
+      enabled: input.enabled ?? previous?.enabled ?? false,
+      installedAt: previous?.installedAt ?? now,
+      updatedAt: now,
+      revision: (existing?.revision ?? 0) + 1,
+    };
+  }
+
   installPlugin(input: { manifest: unknown; source: string; enabled?: boolean; baseRevision?: number }): PluginPackage {
     return withVaultLock(this.vaultDir, () => {
-      const manifest = parsePluginManifest(input.manifest);
-      const source = validatePluginSource(input.source);
-      const signature = verifyPluginSignature(manifest, source);
-      const policy = this.loadPluginPolicy();
-      if (signature && policy.revokedSigners.includes(signature.keyId)) {
-        throw new Error(`Plugin signer is revoked: ${signature.keyId}`);
-      }
-      if (policy.restrictedMode && !signature) {
-        throw new Error("Restricted mode accepts cryptographically signed plugins only.");
-      }
+      const plugin = this.preparePluginInstall(input);
       const index = this.loadIndex();
       const plugins = index.plugins ?? {};
-      const existing = Object.values(plugins).find((plugin) => plugin.manifestId === manifest.id);
-      if (!existing && Object.keys(plugins).length >= MAX_PLUGINS) {
-        throw new Error(`A vault may hold at most ${MAX_PLUGINS} plugins.`);
-      }
-      if (existing && input.baseRevision !== undefined && input.baseRevision !== existing.revision) {
-        throw new Error(
-          `Plugin revision conflict: expected revision ${input.baseRevision}, current revision ${existing.revision}.`,
-        );
-      }
-      const id = existing?.id ?? crypto.randomUUID();
-      if (!existing && (index.notes[id] || index.canvases[id])) {
-        throw new Error(`Document ID already exists: ${id}`);
-      }
-      const previous = existing ? this.loadPluginById(id) : undefined;
-      if (previous?.signature && !signature) {
-        throw new Error("A signed plugin cannot be updated with an unsigned package.");
-      }
-      if (previous?.signature && signature && previous.signature.keyId !== signature.keyId) {
-        throw new Error("Plugin signer changed. Remove the plugin and approve it as a new install.");
-      }
-      const now = new Date().toISOString();
-      const plugin: PluginPackage = {
-        version: 1,
-        id,
-        manifest,
-        source,
-        ...(signature ? { signature } : {}),
-        // An update never silently re-enables a plugin the person turned off,
-        // and never enables a new one without being asked to.
-        enabled: input.enabled ?? previous?.enabled ?? false,
-        installedAt: previous?.installedAt ?? now,
-        updatedAt: now,
-        revision: (existing?.revision ?? 0) + 1,
-      };
-      this.beginJournal("plugins", [id]);
+      this.beginJournal("plugins", [plugin.id]);
       fs.mkdirSync(this.objectsDir(), { recursive: true, mode: 0o700 });
-      const payload = encryptDocument(JSON.stringify(plugin), this.session.key, pluginAad(id));
-      writeFileAtomic(this.pluginObjectPath(id), JSON.stringify(payload), { mode: 0o600 });
-      index.plugins = { ...plugins, [id]: summarizePlugin(plugin, policy) };
+      const payload = encryptDocument(JSON.stringify(plugin), this.session.key, pluginAad(plugin.id));
+      writeFileAtomic(this.pluginObjectPath(plugin.id), JSON.stringify(payload), { mode: 0o600 });
+      index.plugins = { ...plugins, [plugin.id]: summarizePlugin(plugin, this.loadPluginPolicy()) };
       this.saveIndex(index);
       this.endJournal();
       return plugin;
@@ -1663,8 +1679,10 @@ export class DocumentVault {
     const filePath = this.pluginStorePath(id);
     if (!fs.existsSync(filePath)) return {};
     assertNotSymlink(filePath);
-    const payload = JSON.parse(fs.readFileSync(filePath, "utf8")) as DocumentPayload;
-    const parsed = JSON.parse(decryptDocument(payload, this.session.key, pluginStoreAad(id))) as unknown;
+    const payload = JSON.parse(
+      readTextFileLimited(filePath, 1024 * 1024, "Plugin storage")
+    ) as DocumentPayload;
+    const parsed = JSON.parse(decryptDocument(payload, this.session.readKeys, pluginStoreAad(id))) as unknown;
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, string>) : {};
   }
 
@@ -2173,7 +2191,7 @@ export class DocumentVault {
     }
     const id = crypto
       .createHmac("sha256", this.session.attachmentIdKey)
-      .update("secondbrain-vault:attachment-id:v1\0", "utf8")
+      .update(AAD.attachmentId, "utf8")
       .update(data)
       .digest("hex");
     if (fs.existsSync(this.attachmentManifestPath(id))) return this.readAttachmentManifest(id);
@@ -2208,13 +2226,15 @@ export class DocumentVault {
       const chunkPath = resolveInside(this.attachmentDir(id), `${index}.chunk.enc`);
       if (!fs.existsSync(chunkPath)) throw new Error(`Missing attachment chunk ${index}.`);
       assertNotSymlink(chunkPath);
-      const payload = JSON.parse(fs.readFileSync(chunkPath, "utf8")) as DocumentPayload;
-      parts.push(decryptDocumentBytes(payload, this.session.key, attachmentChunkAad(id, index)));
+      const payload = JSON.parse(
+        readTextFileLimited(chunkPath, 2 * 1024 * 1024, "Attachment chunk")
+      ) as DocumentPayload;
+      parts.push(decryptDocumentBytes(payload, this.session.readKeys, attachmentChunkAad(id, index)));
     }
     const data = Buffer.concat(parts);
     const actualId = crypto
       .createHmac("sha256", this.session.attachmentIdKey)
-      .update("secondbrain-vault:attachment-id:v1\0", "utf8")
+      .update(AAD.attachmentId, "utf8")
       .update(data)
       .digest("hex");
     if (data.length !== info.size || actualId !== id) throw new Error("Attachment integrity check failed.");

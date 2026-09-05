@@ -26,6 +26,7 @@ import {
   PanelRightOpen,
   Paperclip,
   Puzzle,
+  RefreshCw,
   Search,
   ShieldCheck,
   Sparkles,
@@ -51,17 +52,18 @@ import type { PluginPanel, PluginRuntimeState, RegisteredCommand } from "./plugi
 import { PropertyTable } from "./PropertyTable";
 import { QuickSwitcher } from "./QuickSwitcher";
 import { clearOwnedClipboard, copyWithExpiry } from "./secure-clipboard";
+import { SyncStatus } from "./SyncStatus";
 import { ThemeEditor } from "./ThemeEditor";
 import { WorkspacesDialog } from "./Workspaces";
 import { applyTheme, clearTheme, DEFAULT_THEME, loadTheme, saveTheme, type ThemeSettings } from "./theme";
 import { useVirtualWindow } from "./virtual";
-import type { AttachmentInfo, Backlink, Bookmark, CanvasSummary, DeletedNote, KnowledgeGraph as GraphData, NoteDocument, NoteSummary, PluginSecurityPolicy, PluginSummary, PropertyRow, SavedView, SaveState, SearchHit, UnlinkedMention, NoticeTone, Notify, VaultInfo, WorkspaceLayout, WorkspaceState } from "./types";
+import type { AttachmentInfo, Backlink, Bookmark, CanvasSummary, DeletedNote, KnowledgeGraph as GraphData, NoteDocument, NoteSummary, PluginSecurityPolicy, PluginSummary, PropertyRow, SavedView, SaveState, SearchHit, SyncStatusData, UnlinkedMention, NoticeTone, Notify, VaultInfo, WorkspaceLayout, WorkspaceState } from "./types";
 
 const MarkdownEditor = lazy(() => import("./Editor").then((module) => ({ default: module.MarkdownEditor })));
 const MarkdownPreview = lazy(() => import("./Preview"));
 
 type ViewMode = "write" | "read";
-type WorkspaceView = "notes" | "graph" | "properties" | "canvas" | "files" | "plugins";
+type WorkspaceView = "notes" | "graph" | "properties" | "canvas" | "files" | "plugins" | "sync";
 type LockReason = "manual" | "inactivity";
 /**
  * A message and how it should read. Success and failure shared one green tick
@@ -304,6 +306,8 @@ export function App() {
   const [reveal, setReveal] = useState<{ line: number; token: number }>();
   const revealToken = useRef(0);
   const documentBody = useRef<HTMLDivElement>(null);
+  const [syncStatus, setSyncStatus] = useState<SyncStatusData | null>(null);
+  const [syncRegistryVerified, setSyncRegistryVerified] = useState<boolean | null>(null);
   const [vaultMenuOpen, setVaultMenuOpen] = useState(false);
   const [notice, setNotice] = useState<Notice>();
   const report = useCallback<Notify>((text, tone = "info") => setNotice({ text, tone }), []);
@@ -341,61 +345,17 @@ export function App() {
    * capability table decides what may be asked for, and this decides what
    * exists to answer.
    */
-  const pluginBridge = useCallback(async (method: string, params: Record<string, unknown>) => {
-    const reference = String(params.reference ?? "");
-    switch (method) {
-      case "notes.list":
-        return vaultBridge.listNotes();
-      case "notes.metadata": {
-        const note = await vaultBridge.getNote(reference);
-        const { body: _body, ...metadata } = note;
-        return metadata;
-      }
-      case "notes.read":
-        return vaultBridge.getNote(reference);
-      case "notes.create":
-        return vaultBridge.createNote(String(params.path ?? ""), String(params.title ?? ""));
-      case "notes.update": {
-        const current = await vaultBridge.getNote(reference);
-        return vaultBridge.saveNote({ ...current, body: String(params.body ?? "") });
-      }
-      case "search.query":
-        return vaultBridge.search(String(params.query ?? ""));
-      case "canvas.list":
-        return vaultBridge.canvases();
-      case "canvas.read":
-        return vaultBridge.getCanvas(reference);
-      case "canvas.save":
-        return vaultBridge.saveCanvas(params.input as Parameters<typeof vaultBridge.saveCanvas>[0]);
-      case "attachments.list":
-        return vaultBridge.attachments();
-      case "attachments.read":
-        return vaultBridge.readAttachment(String(params.id ?? ""));
-      case "storage.get": {
-        const stored = await vaultBridge.pluginStorage(String(params.pluginId ?? ""));
-        return stored[String(params.key ?? "")] ?? null;
-      }
-      case "storage.set": {
-        const id = String(params.pluginId ?? "");
-        const stored = await vaultBridge.pluginStorage(id);
-        await vaultBridge.savePluginStorage(id, { ...stored, [String(params.key ?? "")]: String(params.value ?? "") });
-        return null;
-      }
-      default:
-        throw new Error(`Unknown plugin method: ${method}`);
-    }
-  }, []);
-
   const host = useCallback(() => {
     pluginHost.current ??= new PluginHost({
-      call: pluginBridge,
+      authorize: (pluginId, revision) => vaultBridge.authorizePluginInstance(pluginId, revision),
+      call: (context, method, params) => vaultBridge.pluginCall(context, method, params),
       onNotice: (name, message, tone) => setNotice({ text: `${name}: ${message}`, tone: tone ?? "info" }),
       onCommandsChanged: setPluginCommands,
       onPanelsChanged: setPluginPanels,
       onStateChanged: setPluginStates,
     });
     return pluginHost.current;
-  }, [pluginBridge]);
+  }, []);
 
   /**
    * Source is fetched only for the plugins that are actually enabled, so a
@@ -544,7 +504,7 @@ export function App() {
     pluginHost.current?.stopAll();
     setPlugins([]); setPluginStates([]); setPluginCommands([]); setPluginPanels([]);
     setWorkspaceView("notes"); setGraph({ nodes: [], edges: [] }); setPropertyRows([]); setSavedViews([]);
-    setCanvases([]); setAttachments([]);
+    setCanvases([]); setAttachments([]); setSyncStatus(null); setSyncRegistryVerified(null);
     setLockNotice(reason === "inactivity"
       ? `Locked automatically after ${idleMinutes} minute${idleMinutes === 1 ? "" : "s"} without activity. The clipboard was cleared too.`
       : "");
@@ -740,6 +700,13 @@ export function App() {
     }
     if (next === "canvas" || next === "files") await refreshAssets();
     if (next === "plugins") await refreshPlugins();
+    if (next === "sync") {
+      const status = await vaultBridge.syncStatus();
+      setSyncStatus(status);
+      // The signature check is a second read, not part of the status payload:
+      // a registry that parses is not the same as a registry the owner signed.
+      setSyncRegistryVerified(status.enrolled ? await vaultBridge.syncVerifyRegistry() : null);
+    }
   }
 
   async function installPlugin(manifest: unknown, source: string) {
@@ -901,6 +868,7 @@ export function App() {
     { icon: TableProperties, label: "Open property view", action: () => void showWorkspace("properties") },
     { icon: FolderKanban, label: "Open canvas workspace", action: () => void showWorkspace("canvas") },
     { icon: Paperclip, label: "Open attachment library", action: () => void showWorkspace("files") },
+    { icon: RefreshCw, label: "View sync status", action: () => void showWorkspace("sync") },
     { icon: BookOpen, label: mode === "write" ? "Switch to reading view" : "Switch to writing view", keys: "⌘ E", action: () => setMode(mode === "write" ? "read" : "write") },
     { icon: rightOpen ? PanelRightClose : PanelRightOpen, label: rightOpen ? "Hide the context panel" : "Show the context panel", action: () => setRightOpen((value) => !value) },
     { icon: LayoutGrid, label: "Workspaces and saved layouts", action: () => setWorkspacesOpen(true) },
@@ -962,6 +930,7 @@ export function App() {
           <button className={workspaceView === "canvas" ? "active" : ""} onClick={() => void showWorkspace("canvas")}><FolderKanban size={14} /><span>Canvas</span></button>
           <button className={workspaceView === "files" ? "active" : ""} onClick={() => void showWorkspace("files")}><Paperclip size={14} /><span>Files</span></button>
           <button className={workspaceView === "plugins" ? "active" : ""} onClick={() => void showWorkspace("plugins")}><Puzzle size={14} /><span>Plugins</span></button>
+          <button className={workspaceView === "sync" ? "active" : ""} onClick={() => void showWorkspace("sync")}><RefreshCw size={14} /><span>Sync</span></button>
         </div>
         <button className="quick-find" onClick={() => setSearchOpen(true)}><Search size={15} /><span>Find anything…</span><kbd>⇧⌘F</kbd></button>
         {bookmarks.length > 0 && <div className="bookmark-block">
@@ -1102,6 +1071,13 @@ export function App() {
         onRestore={restorePluginSigner}
         onNotice={report}
       />
+      : workspaceView === "sync" ? (syncStatus?.enrolled
+        ? <SyncStatus status={syncStatus} registryVerified={syncRegistryVerified} />
+        : <div className="sync-empty">
+            <RefreshCw size={30} />
+            <h3>This vault isn't enrolled in sync</h3>
+            <p>Enroll a device from the CLI to see the registry, checkpoint and change counts here. The desktop app never enrolls, revokes, or mutates sync state itself.</p>
+          </div>)
       : <PropertyTable
         rows={propertyRows}
         views={savedViews}

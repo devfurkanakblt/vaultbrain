@@ -87,6 +87,15 @@ test("document vault provides encrypted notes, stable revisions, search and back
   assert.equal(diskText.includes("Ada Lovelace"), false);
 });
 
+test("oversized encrypted note objects are rejected before being read", () => {
+  const dir = tempVault();
+  const vault = new DocumentVault(dir, PASSPHRASE);
+  const note = vault.put({ path: "bounded.md", title: "Bounded", body: "small" });
+  const objectPath = path.join(dir, "documents", "objects", `${note.id}.note.enc`);
+  fs.truncateSync(objectPath, 40 * 1024 * 1024 + 1);
+  assert.throws(() => vault.get(note.id), /41943040-byte safety limit/i);
+});
+
 test("document key is derived once per unlocked vault session and wrong passwords fail", () => {
   const dir = tempVault();
   const vault = new DocumentVault(dir, PASSPHRASE);

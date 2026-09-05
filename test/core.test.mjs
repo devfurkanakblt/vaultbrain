@@ -48,6 +48,11 @@ test("AES-GCM rejects a wrong passphrase and modified ciphertext", () => {
   assert.throws(() => decrypt(tampered, PASSPHRASE));
 });
 
+test("new encrypted payloads reject weak passphrases", () => {
+  assert.throws(() => encrypt("private", "short"), /at least 12 characters/);
+  assert.throws(() => encrypt("private", "passwordpassword"), /less predictable/);
+});
+
 test("vault category cannot escape the selected vault directory", () => {
   const vault = tempVault();
   assert.throws(() => vaultFilePath(vault, "../outside"), /Invalid vault category/);
@@ -58,14 +63,17 @@ test("vault category cannot escape the selected vault directory", () => {
 
 test("encrypted storage writes atomically and schema never contains values", () => {
   const vault = tempVault();
+  fs.writeFileSync(path.join(vault, "schema.json"), '{"legacy":"plaintext"}');
   upsertEntry(vault, "health", "BLOOD_TYPE", "0 Rh+", "Kan grubu", PASSPHRASE);
   upsertEntry(vault, "health", "NOTE", "line 1\nline 2", "safe note", PASSPHRASE);
 
   assert.equal(loadVaultFile(vault, "health", PASSPHRASE)[1].value, "line 1\nline 2");
   const schema = buildSchema(vault, PASSPHRASE);
-  const onDisk = fs.readFileSync(path.join(vault, "schema.json"), "utf8");
+  const onDisk = fs.readFileSync(path.join(vault, "schema.enc"), "utf8");
   assert.equal(onDisk.includes("0 Rh+"), false);
   assert.equal(onDisk.includes("line 1"), false);
+  assert.equal(onDisk.includes("BLOOD_TYPE"), false, "key names are encrypted at rest too");
+  assert.equal(fs.existsSync(path.join(vault, "schema.json")), false);
   assert.equal(schema.files.health.length, 2);
   assert.deepEqual(
     fs.readdirSync(vault).filter((name) => name.endsWith(".tmp")),

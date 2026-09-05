@@ -2,17 +2,16 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
-  INDEX_AAD,
-  PLUGIN_POLICY_AAD,
+  AAD,
   attachmentChunkAad,
   attachmentManifestAad,
   canvasAad,
   canvasHistoryAad,
-  historyAad,
+  noteHistoryAad,
   noteAad,
   pluginAad,
   pluginStoreAad,
-} from "./documents.js";
+} from "./format-version.js";
 import { decryptWithKey, encryptWithKey, type KeyedEncryptedPayload } from "./crypto.js";
 import {
   decryptDocument,
@@ -25,6 +24,7 @@ import { writeFileAtomic } from "./fs-safe.js";
 import {
   DEFAULT_SCRYPT_N,
   KEYRING_VERSION,
+  ROTATABLE_KEY_NAMES,
   detectVaultFormat,
   forgetVaultKeys,
   randomKeySet,
@@ -34,10 +34,12 @@ import {
   wrapKeySet,
   writeKeyring,
   zeroKeySet,
+  zeroRetiringKeys,
   type KeyName,
   type KeyringFile,
   type KeyringSlot,
   type KeySet,
+  type RetiringKeys,
 } from "./keyring.js";
 import { MIN_PASSPHRASE_LENGTH } from "./keyring-passphrase.js";
 import { resolveInside } from "./safety.js";
@@ -129,8 +131,8 @@ function classifyDocument(relative: string): RekeyItem | null {
 
   if (segments.length === 1) {
     if (DOCUMENT_PLAINTEXT.has(segments[0])) return null;
-    if (segments[0] === "index.enc") return item("document", INDEX_AAD);
-    if (segments[0] === "plugin-policy.enc") return item("document", PLUGIN_POLICY_AAD);
+    if (segments[0] === "index.enc") return item("document", AAD.documentIndex);
+    if (segments[0] === "plugin-policy.enc") return item("document", AAD.pluginPolicy);
   }
 
   if (segments.length === 2 && segments[0] === "objects") {
@@ -150,7 +152,7 @@ function classifyDocument(relative: string): RekeyItem | null {
       const revision = Number(match[1]);
       return item(
         "document",
-        match[2] === "note" ? historyAad(segments[1], revision) : canvasHistoryAad(segments[1], revision),
+        match[2] === "note" ? noteHistoryAad(segments[1], revision) : canvasHistoryAad(segments[1], revision),
       );
     }
   }
@@ -562,8 +564,13 @@ export function recoverRekey(vaultDir: string): "none" | "rolled-back" | "finish
  */
 const REKEY_STALE_MS = 15 * 60 * 1_000;
 
-/** The three keys that protect content, and therefore rotate. */
-export const ROTATED_KEYS: KeyName[] = ["documents", "kv", "syncEnvelope"];
+/**
+ * The three keys that protect content, and therefore rotate. The list itself
+ * lives in `keyring.ts` beside the keyset format it describes: the split is
+ * load-bearing for readers too, which fall back to the retiring copy of
+ * exactly these keys while a re-key is in flight.
+ */
+export const ROTATED_KEYS: KeyName[] = [...ROTATABLE_KEY_NAMES];
 
 /**
  * The three keys carried across unchanged, with the reason each one is not a
@@ -690,12 +697,40 @@ export function rekeyVault(
         stageRekey(vaultDir, oldKeys, newKeys, items);
         assertPlanUnchanged(vaultDir, items);
 
-        const slot: KeyringSlot = wrapKeySet(newKeys, wrapPassphrase, DEFAULT_SCRYPT_N);
+        // The keyring published at the commit point carries the outgoing
+        // rotatable keys. `keyring.json` is replaced before the staged files
+        // are renamed into place, so for the length of that install a reader
+        // meets objects still sealed under the old keys; every read path tries
+        // the key in force and falls back to the retiring one, which is what
+        // keeps the vault readable through the window instead of opaque.
+        const retiring: RetiringKeys = {
+          documents: Buffer.from(oldKeys.documents),
+          kv: Buffer.from(oldKeys.kv),
+          syncEnvelope: Buffer.from(oldKeys.syncEnvelope),
+        };
+        let slot: KeyringSlot;
+        try {
+          slot = wrapKeySet(newKeys, wrapPassphrase, DEFAULT_SCRYPT_N, retiring, oldKeys.documents);
+        } finally {
+          zeroRetiringKeys(retiring);
+        }
         commitRekey(
           vaultDir,
           { version: 1, slotId: slot.id, files: items.map((item) => item.path) },
           { version: KEYRING_VERSION, slots: [slot] },
         );
+
+        // Every staged file is installed, so nothing on disk is sealed under
+        // the outgoing keys any more: settle the keyring so no reader carries
+        // them further. `legacyChangeIdentity` stays — it is what recomputes
+        // the ids of sync changes an older build derived from the documents
+        // key, and it outlives the re-key by design. A crash between the two
+        // writes leaves the retiring copy in place, which is readable and is
+        // cleared by the next run.
+        writeKeyring(vaultDir, {
+          version: KEYRING_VERSION,
+          slots: [wrapKeySet(newKeys, wrapPassphrase, DEFAULT_SCRYPT_N, null, oldKeys.documents)],
+        });
         forgetVaultKeys(vaultDir);
 
         // Prove the vault on disk opens under the passphrase the user was just

@@ -111,7 +111,11 @@ export function readSecret(prompt = "Vault passphrase: "): Promise<string> {
  * asked for that with `vbrain keychain store`.
  */
 export async function getPassphrase(options: PassphraseOptions = {}): Promise<string> {
-  if (process.env.VBRAIN_PASSPHRASE) return process.env.VBRAIN_PASSPHRASE;
+  // SBRAIN_PASSPHRASE was the public name before the vbrain rename. Keep it
+  // as a read-only compatibility alias so existing scripts and older sync
+  // tooling do not unexpectedly fall back to an interactive prompt.
+  const environmentPassphrase = process.env.VBRAIN_PASSPHRASE ?? process.env.SBRAIN_PASSPHRASE;
+  if (environmentPassphrase) return environmentPassphrase;
   if (options.vaultDir && options.useKeychain !== false) {
     const remembered = recallPassphrase(options.vaultDir);
     if (remembered) return remembered;

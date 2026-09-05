@@ -25,6 +25,8 @@ import type {
 /** Beyond this, a plugin is stopped rather than allowed to spin. */
 const CALL_BUDGET_PER_MINUTE = 600;
 const READY_TIMEOUT_MS = 5_000;
+const HEARTBEAT_INTERVAL_MS = 2_000;
+const HEARTBEAT_TIMEOUT_MS = 6_000;
 const MAX_PANEL_BYTES = 16 * 1024;
 const MAX_COMMANDS = 25;
 
@@ -50,8 +52,13 @@ function manifestOf(summary: PluginSummary): PluginManifest {
 }
 
 export interface PluginHostBindings {
+  authorize: (pluginId: string, revision: number) => Promise<{ instanceToken: string }>;
   /** Every host method a plugin may reach, keyed exactly as the table names it. */
-  call: (method: string, params: Record<string, unknown>) => Promise<unknown>;
+  call: (
+    context: { pluginId: string; instanceToken: string; revision: number },
+    method: string,
+    params: Record<string, unknown>
+  ) => Promise<unknown>;
   onNotice: (pluginName: string, message: string, tone?: NoticeTone) => void;
   onCommandsChanged: (commands: RegisteredCommand[]) => void;
   onPanelsChanged: (panels: PluginPanel[]) => void;
@@ -78,6 +85,10 @@ interface RunningPlugin {
   callsThisMinute: number;
   windowStartedAt: number;
   readyTimer: number;
+  heartbeatTimer: number;
+  lastHeartbeatAt: number;
+  instanceToken: string;
+  inFlight: number;
 }
 
 export class PluginHost {
@@ -105,7 +116,7 @@ export class PluginHost {
       if (!next || (current && next.summary.revision !== current.summary.revision)) this.stop(id);
     }
     for (const [id, entry] of wanted) {
-      if (!this.running.has(id)) this.start(entry.summary, entry.source);
+      if (!this.running.has(id)) await this.start(entry.summary, entry.source);
     }
     this.publishState();
   }
@@ -125,9 +136,10 @@ export class PluginHost {
     this.post(plugin, { kind: "invoke", command: command.id });
   }
 
-  private start(summary: PluginSummary, source: string): void {
+  private async start(summary: PluginSummary, source: string): Promise<void> {
     const manifest = manifestOf(summary);
     try {
+      const authorization = await this.bindings.authorize(summary.id, summary.revision);
       const spawn = this.bindings.createWorker ?? blobWorker;
       const { worker, objectUrl } = spawn(sandboxSource(source));
       const plugin: RunningPlugin = {
@@ -146,6 +158,10 @@ export class PluginHost {
         readyTimer: window.setTimeout(() => {
           this.fail(summary.id, "The plugin did not finish loading in time.");
         }, READY_TIMEOUT_MS),
+        heartbeatTimer: 0,
+        lastHeartbeatAt: Date.now(),
+        instanceToken: authorization.instanceToken,
+        inFlight: 0,
       };
       worker.addEventListener("message", (event: MessageEvent<PluginToHost>) => {
         void this.handle(plugin, event.data);
@@ -154,6 +170,13 @@ export class PluginHost {
         this.fail(summary.id, event.message || "The plugin crashed while loading.");
       });
       this.running.set(summary.id, plugin);
+      plugin.heartbeatTimer = window.setInterval(() => {
+        if (Date.now() - plugin.lastHeartbeatAt > HEARTBEAT_TIMEOUT_MS) {
+          this.fail(summary.id, "The plugin stopped responding to runtime heartbeats.");
+          return;
+        }
+        this.post(plugin, { kind: "ping", nonce: Date.now() });
+      }, HEARTBEAT_INTERVAL_MS);
     } catch (error) {
       this.running.set(summary.id, {
         summary,
@@ -170,6 +193,10 @@ export class PluginHost {
         callsThisMinute: 0,
         windowStartedAt: Date.now(),
         readyTimer: 0,
+        heartbeatTimer: 0,
+        lastHeartbeatAt: Date.now(),
+        instanceToken: "",
+        inFlight: 0,
       });
     }
   }
@@ -178,6 +205,7 @@ export class PluginHost {
     const plugin = this.running.get(id);
     if (!plugin) return;
     window.clearTimeout(plugin.readyTimer);
+    window.clearInterval(plugin.heartbeatTimer);
     plugin.worker?.terminate();
     if (plugin.objectUrl.startsWith("blob:")) URL.revokeObjectURL(plugin.objectUrl);
     this.running.delete(id);
@@ -188,6 +216,7 @@ export class PluginHost {
     const plugin = this.running.get(id);
     if (!plugin) return;
     window.clearTimeout(plugin.readyTimer);
+    window.clearInterval(plugin.heartbeatTimer);
     plugin.worker?.terminate();
     if (plugin.objectUrl.startsWith("blob:")) URL.revokeObjectURL(plugin.objectUrl);
     plugin.state = { ...plugin.state, status: "failed", error: message };
@@ -231,8 +260,13 @@ export class PluginHost {
     if (!message || typeof message !== "object") return;
 
     if (message.kind === "emit") {
+      if (message.event === "heartbeat") {
+        plugin.lastHeartbeatAt = Date.now();
+        return;
+      }
       if (message.event === "ready") {
         window.clearTimeout(plugin.readyTimer);
+        plugin.lastHeartbeatAt = Date.now();
         const payload = message.payload as { sandboxIncomplete?: boolean } | null;
         if (payload?.sandboxIncomplete) {
           this.fail(plugin.summary.id, "This device could not fully isolate the plugin sandbox.");
@@ -250,12 +284,29 @@ export class PluginHost {
 
     if (message.kind !== "request") return;
 
+    let requestBytes: number;
+    try {
+      requestBytes = new TextEncoder().encode(JSON.stringify(message)).length;
+    } catch {
+      this.fail(plugin.summary.id, "The plugin sent an unserializable request.");
+      return;
+    }
+    if (requestBytes > 64 * 1024) {
+      this.fail(plugin.summary.id, "The plugin exceeded the 64 KiB request limit.");
+      return;
+    }
+    if (plugin.inFlight >= 4) {
+      this.fail(plugin.summary.id, "The plugin exceeded the 4-call concurrency limit.");
+      return;
+    }
+
     if (!this.withinBudget(plugin)) {
       this.fail(plugin.summary.id, "The plugin was stopped for making too many calls.");
       return;
     }
 
     const params = (message.params ?? {}) as Record<string, unknown>;
+    plugin.inFlight += 1;
     try {
       // One gate, consulted before anything else looks at the method: an
       // unknown method has no capability and is therefore refused.
@@ -268,6 +319,9 @@ export class PluginHost {
         );
       }
       const value = await this.dispatch(plugin, message.method, params);
+      if (new TextEncoder().encode(JSON.stringify(value ?? null)).length > 4 * 1024 * 1024) {
+        throw new Error("The plugin response exceeded the 4 MiB limit.");
+      }
       this.post(plugin, { kind: "reply", id: message.id, ok: true, value });
     } catch (error) {
       this.post(plugin, {
@@ -276,6 +330,8 @@ export class PluginHost {
         ok: false,
         error: error instanceof Error ? error.message : String(error),
       });
+    } finally {
+      plugin.inFlight -= 1;
     }
   }
 
@@ -325,8 +381,38 @@ export class PluginHost {
       return null;
     }
     if (method === "storage.get" || method === "storage.set") {
-      return this.bindings.call(method, { ...params, pluginId: plugin.summary.id });
+      return this.callPrivileged(plugin, method, params);
     }
-    return this.bindings.call(method, params);
+    return this.callPrivileged(plugin, method, params);
+  }
+
+  private async callPrivileged(
+    plugin: RunningPlugin,
+    method: string,
+    params: Record<string, unknown>
+  ): Promise<unknown> {
+    const call = this.bindings.call(
+      {
+        pluginId: plugin.summary.id,
+        instanceToken: plugin.instanceToken,
+        revision: plugin.summary.revision,
+      },
+      method,
+      params
+    );
+    let timeout = 0;
+    try {
+      return await Promise.race([
+        call,
+        new Promise<never>((_resolve, reject) => {
+          timeout = window.setTimeout(
+            () => reject(new Error("The plugin call exceeded its 10 second deadline.")),
+            10_000
+          );
+        }),
+      ]);
+    } finally {
+      window.clearTimeout(timeout);
+    }
   }
 }

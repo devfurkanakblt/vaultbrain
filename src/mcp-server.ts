@@ -3,11 +3,12 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { buildSchema, readSchema, searchSchema, filterNotesByDate } from "./schema.js";
 import { loadVaultFile, storeNote } from "./store.js";
-import { appendAudit } from "./audit.js";
+import { appendAudit, clearAuditKeyCache } from "./audit.js";
 import {
   consumeApproval,
   decide,
   filterDiscoverable,
+  grantsExist,
   loadGrants,
   normalizeAgent,
   requestConfirmation,
@@ -107,22 +108,36 @@ export function resolveForAgent(
  * true zero-exposure path, use `vbrain get` (Mode 1) instead — that command
  * never invokes an LLM at all.
  */
-export async function startMcpServer(vaultDir: string): Promise<void> {
-  const passphrase = process.env.VBRAIN_PASSPHRASE;
+export async function startMcpServer(vaultDir: string, configuredAgent: string): Promise<void> {
+  // Resolved the same way `getPassphrase` does: the vbrain name first, the
+  // pre-rename SBRAIN_PASSPHRASE as a read-only alias. Reading only the legacy
+  // name here contradicted the error message below, so setting the name the
+  // message asks for left the server refusing to start.
+  const passphrase = process.env.VBRAIN_PASSPHRASE ?? process.env.SBRAIN_PASSPHRASE;
   if (!passphrase) {
     console.error("VBRAIN_PASSPHRASE must be set to run the MCP server (no interactive prompt in agent contexts).");
     process.exit(1);
   }
 
-  // The agent names itself, so this is an identity for scoping and audit, not
-  // an authentication claim: anything that can start this process can choose
-  // any name. The security boundary stays the passphrase and the vault files.
-  let agent = "mcp-agent";
+  if (!grantsExist(vaultDir)) {
+    throw new Error(
+      "MCP access is disabled until the vault owner creates a grant with 'vbrain grant add'."
+    );
+  }
+
+  // The owner pins this label in the MCP process command line. It is not read
+  // from client-controlled request data or a freely inherited environment tag.
+  let agent: string;
   try {
-    agent = normalizeAgent(process.env.VBRAIN_AGENT ?? "mcp-agent");
+    agent = normalizeAgent(configuredAgent);
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);
+  }
+
+  const initialPolicy = loadGrants(vaultDir, passphrase);
+  if (!initialPolicy?.grants.some((grant) => grant.agent === agent)) {
+    throw new Error(`No grant is configured for MCP agent "${agent}".`);
   }
 
   // Reloaded per call rather than cached, so `vbrain grant revoke` takes effect
@@ -144,7 +159,7 @@ export async function startMcpServer(vaultDir: string): Promise<void> {
     "List every available key name and its non-sensitive description across the vault. Contains NO values. Always call this before resolve_key.",
     {},
     async () => {
-      const schema = readSchema(vaultDir);
+      const schema = readSchema(vaultDir, passphrase);
       if (!schema) {
         return text("No schema found. Ask the user to run 'vbrain index'.");
       }
@@ -169,7 +184,7 @@ export async function startMcpServer(vaultDir: string): Promise<void> {
     "Fuzzy-search key names and descriptions for a query. Contains NO values. Use this to locate the right key before resolve_key.",
     { query: z.string().describe("what you're looking for, e.g. 'next doctor appointment'") },
     async ({ query }) => {
-      const schema = readSchema(vaultDir);
+      const schema = readSchema(vaultDir, passphrase);
       if (!schema) {
         return text("No schema found. Ask the user to run 'vbrain index'.");
       }
@@ -209,14 +224,17 @@ export async function startMcpServer(vaultDir: string): Promise<void> {
       "    instead of overwriting each other.",
       "",
       "`desc` must stay short and NON-sensitive (a category tag like 'doktor ziyareti'),",
-      "because it is the one thing that ends up in the unencrypted, browsable index.",
+      "because agents may discover it after the encrypted catalog is unlocked.",
       "Never put the sensitive content itself in `desc`.",
     ].join("\n"),
     {
       category: z.string().describe("vault file/category, e.g. 'health', 'finance', 'work'"),
       value: z.string().describe("the actual content to store, encrypted at rest"),
-      desc: z.string().describe("short, non-sensitive tag/description for the safe index"),
-      key: z.string().optional().describe("explicit key for a fact (e.g. 'IBAN'); omit for a freeform journal note"),
+      desc: z.string().describe("short, non-sensitive tag/description for the encrypted catalog"),
+      key: z
+        .string()
+        .optional()
+        .describe("explicit key for a fact (e.g. 'IBAN'); omit for a freeform journal note"),
     },
     async ({ category, value, desc, key }) => {
       const decision = permit("store", category, key);
@@ -229,7 +247,7 @@ export async function startMcpServer(vaultDir: string): Promise<void> {
         return text(decision.reason, true);
       }
       const usedKey = storeNote(vaultDir, category, value, desc, passphrase, key);
-      buildSchema(vaultDir, passphrase); // keep the safe index current
+      buildSchema(vaultDir, passphrase); // keep the encrypted catalog current
       appendAudit(
         vaultDir,
         {
@@ -248,14 +266,14 @@ export async function startMcpServer(vaultDir: string): Promise<void> {
 
   server.tool(
     "find_notes_in_range",
-    "Browse freeform journal notes by date range using only the safe, value-free index — no decryption. Returns keys + tags + timestamps, not content. Follow up with resolve_key for any entry you actually need to read.",
+    "Browse freeform journal notes by date range after unlocking the encrypted, value-free catalog. Returns keys + tags + timestamps, not content. Follow up with resolve_key for any entry you actually need to read.",
     {
       category: z.string().optional().describe("limit to one category/file, e.g. 'health'"),
       from: z.string().optional().describe("ISO date, inclusive lower bound"),
       to: z.string().optional().describe("ISO date, inclusive upper bound"),
     },
     async ({ category, from, to }) => {
-      const schema = readSchema(vaultDir);
+      const schema = readSchema(vaultDir, passphrase);
       if (!schema) {
         return text("No schema found. Call store_note first, or run 'vbrain index'.");
       }
@@ -268,5 +286,9 @@ export async function startMcpServer(vaultDir: string): Promise<void> {
   );
 
   const transport = new StdioServerTransport();
-  await server.connect(transport);
+  try {
+    await server.connect(transport);
+  } finally {
+    clearAuditKeyCache(vaultDir);
+  }
 }

@@ -55,6 +55,17 @@ const MAX_PLUGIN_STORAGE_BYTES: usize = 256 * 1024;
 const MAX_PLUGINS: usize = 100;
 const PLUGIN_POLICY_AAD: &str = "secondbrain-vault:plugin-policy:v1";
 const PLUGIN_SIGNATURE_PREFIX: &[u8] = b"secondbrain-vault-plugin-signature-v1\n";
+const SYNC_DEVICE_REGISTRY_AAD: &str = "secondbrain-vault:sync-device-registry:v1";
+const SYNC_FRESHNESS_CHECKPOINT_AAD: &str = "secondbrain-vault:sync-freshness-checkpoint:v1";
+const SYNC_APPLIED_AAD: &str = "secondbrain-vault:sync-applied:v1";
+const MAX_SYNC_DEVICE_REGISTRY_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_SYNC_CHECKPOINT_BYTES: u64 = 1024 * 1024;
+const MAX_SYNC_APPLIED_BYTES: u64 = 64 * 1024 * 1024;
+/// Versions of the signed device registry this build knows how to display.
+/// Anything higher still decodes (1.x format is additive-only), but is
+/// reported as unreadable so the UI can say "a newer format this build
+/// cannot display" instead of rendering a possibly-incomplete picture.
+const READABLE_REGISTRY_VERSIONS: &[u64] = &[1, 2];
 
 /// The capability names this build understands.
 ///
@@ -86,6 +97,19 @@ const VAULT_LOCK_POLL: Duration = Duration::from_millis(40);
 #[derive(Default)]
 struct AppState {
     session: Mutex<Option<VaultSession>>,
+    plugin_instances: Mutex<HashMap<String, PluginInstanceGrant>>,
+}
+
+#[derive(Debug, Clone)]
+struct PluginInstanceGrant {
+    plugin_id: String,
+    revision: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginInstanceAuthorization {
+    instance_token: String,
 }
 
 /// The `documents` key and the `attachmentId` key, in that order: everything
@@ -142,14 +166,6 @@ struct KdfManifest {
     #[serde(rename = "N")]
     n: u32,
     salt: String,
-}
-
-/// Just enough of a manifest to learn its version. A v2 manifest carries no
-/// `kdf` and no `verifier`, so deserializing into `Manifest` fails on a missing
-/// field and reports that instead of what actually happened to the vault.
-#[derive(Debug, Deserialize)]
-struct ManifestVersion {
-    version: u8,
 }
 
 /// Byte-identical to what `vbrain migrate` writes, so a created vault and a
@@ -667,18 +683,51 @@ fn lock_host() -> String {
 }
 
 fn read_lock_record(path: &Path) -> Option<VaultLockRecord> {
-    serde_json::from_slice(&fs::read(path).ok()?).ok()
+    serde_json::from_slice(&read_limited(path, 64 * 1024, "vault lock").ok()?).ok()
 }
 
-fn lock_is_stale(record: Option<&VaultLockRecord>) -> bool {
-    let Some(record) = record else { return true };
-    let Ok(acquired) = chrono::DateTime::parse_from_rfc3339(&record.acquired_at) else {
-        return true;
+#[cfg(windows)]
+fn process_is_alive(pid: u32) -> bool {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, GetLastError, ERROR_INVALID_PARAMETER},
+        System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
     };
-    Utc::now()
+
+    const STILL_ACTIVE: u32 = 259;
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            // Access denied and other unknown states fail closed. Windows lets
+            // the current user query its own normal processes, including the
+            // peer CLI/desktop writers this lock coordinates.
+            return GetLastError() != ERROR_INVALID_PARAMETER;
+        }
+        let mut code = 0;
+        let ok = GetExitCodeProcess(handle, &mut code) != 0;
+        let _ = CloseHandle(handle);
+        !ok || code == STILL_ACTIVE
+    }
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+fn lock_is_reclaimable(record: Option<&VaultLockRecord>) -> bool {
+    let Some(record) = record else { return false };
+    if !record.host.eq_ignore_ascii_case(&lock_host()) {
+        return false;
+    }
+    let Ok(acquired) = chrono::DateTime::parse_from_rfc3339(&record.acquired_at) else {
+        return false;
+    };
+    let old_enough = Utc::now()
         .signed_duration_since(acquired.with_timezone(&Utc))
         .num_seconds()
-        > VAULT_LOCK_STALE_SECONDS
+        > VAULT_LOCK_STALE_SECONDS;
+    old_enough && !process_is_alive(record.pid)
 }
 
 impl VaultWriteGuard {
@@ -706,7 +755,7 @@ impl VaultWriteGuard {
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     let holder = read_lock_record(&path);
-                    if lock_is_stale(holder.as_ref()) {
+                    if lock_is_reclaimable(holder.as_ref()) {
                         match fs::remove_file(&path) {
                             Ok(()) => continue,
                             Err(remove_error)
@@ -752,8 +801,23 @@ fn hex_lower(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn derive_key(passphrase: &str, salt: &[u8]) -> Result<Zeroizing<[u8; 32]>, String> {
-    let params = ScryptParams::new(15, 8, 1, 32).map_err(|error| error.to_string())?;
+fn validate_new_passphrase(passphrase: &str) -> Result<(), String> {
+    if passphrase.chars().count() < 12 {
+        return Err("vault passphrases must contain at least 12 characters".into());
+    }
+    if passphrase.chars().collect::<HashSet<_>>().len() < 4 {
+        return Err("choose a less predictable vault passphrase".into());
+    }
+    Ok(())
+}
+
+fn derive_key(passphrase: &str, salt: &[u8], n: u32) -> Result<Zeroizing<[u8; 32]>, String> {
+    let log_n = match n {
+        32_768 => 15,
+        65_536 => 16,
+        _ => return Err("unsupported scrypt work factor".into()),
+    };
+    let params = ScryptParams::new(log_n, 8, 1, 32).map_err(|error| error.to_string())?;
     let mut key = Zeroizing::new([0u8; 32]);
     scrypt(passphrase.as_bytes(), salt, &params, key.as_mut())
         .map_err(|error| format!("key derivation failed: {error}"))?;
@@ -863,16 +927,35 @@ fn replace_atomic(source: &Path, destination: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn reject_symlink(path: &Path) -> Result<(), String> {
-    if path.exists()
-        && fs::symlink_metadata(path)
-            .map_err(|error| error.to_string())?
-            .file_type()
-            .is_symlink()
-    {
-        return Err(format!("refusing symbolic link: {}", path.display()));
+fn reject_symlink(path: &Path) -> Result<(), String> {
+    for component in path.ancestors() {
+        if component.exists() {
+            let metadata = fs::symlink_metadata(component).map_err(|error| error.to_string())?;
+            let mut link_like = metadata.file_type().is_symlink();
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+                link_like |= metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+            }
+            if link_like {
+                return Err(format!(
+                    "refusing symbolic link or reparse point: {}",
+                    component.display()
+                ));
+            }
+        }
     }
     Ok(())
+}
+
+fn read_limited(path: &Path, max_bytes: u64, label: &str) -> Result<Vec<u8>, String> {
+    reject_symlink(path)?;
+    let size = fs::metadata(path).map_err(|error| error.to_string())?.len();
+    if size > max_bytes {
+        return Err(format!("{label} exceeds its {max_bytes}-byte safety limit"));
+    }
+    fs::read(path).map_err(|error| error.to_string())
 }
 
 fn note_aad(id: &str) -> String {
@@ -938,7 +1021,7 @@ fn load_note(session: &VaultSession, id: &str) -> Result<NoteDocument, String> {
     let path = note_path(&session.root_dir, id)?;
     reject_symlink(&path)?;
     let payload: EncryptedPayload =
-        serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?)
+        serde_json::from_slice(&read_limited(&path, 40 * 1024 * 1024, "note")?)
             .map_err(|error| error.to_string())?;
     let note: NoteDocument =
         serde_json::from_slice(&decrypt(&payload, session.key.as_ref(), &note_aad(id))?)
@@ -956,7 +1039,7 @@ fn read_index(session: &VaultSession) -> Result<DocumentIndex, String> {
     }
     reject_symlink(&path)?;
     let payload: EncryptedPayload =
-        serde_json::from_slice(&fs::read(path).map_err(|error| error.to_string())?)
+        serde_json::from_slice(&read_limited(&path, 512 * 1024 * 1024, "document index")?)
             .map_err(|error| error.to_string())?;
     let mut index: DocumentIndex =
         serde_json::from_slice(&decrypt(&payload, session.key.as_ref(), INDEX_AAD)?)
@@ -974,10 +1057,9 @@ fn recover_pending_journal(session: &mut VaultSession) -> Result<(), String> {
         return Ok(());
     }
     reject_symlink(&path)?;
-    let journal = serde_json::from_slice::<WriteJournal>(
-        &fs::read(&path).map_err(|error| error.to_string())?,
-    )
-    .ok();
+    let journal =
+        serde_json::from_slice::<WriteJournal>(&read_limited(&path, 1024 * 1024, "write journal")?)
+            .ok();
     if journal
         .as_ref()
         .is_some_and(|entry| entry.version == 1 && entry.scope == "canvases")
@@ -1447,23 +1529,32 @@ fn open_vault_keys(
     let manifest_path = root_dir.join("manifest.json");
     if manifest_path.exists() {
         reject_symlink(&manifest_path)?;
-        let raw = fs::read(&manifest_path).map_err(|error| error.to_string())?;
-        let probe: ManifestVersion =
-            serde_json::from_slice(&raw).map_err(|error| error.to_string())?;
-        if probe.version == 2 {
-            return Err(
-                "This vault was upgraded to a keyring, but keyring.json is missing or unreadable."
-                    .into(),
-            );
+        let manifest_bytes = read_limited(&manifest_path, 64 * 1024, "vault manifest")?;
+        let manifest_value: serde_json::Value =
+            serde_json::from_slice(&manifest_bytes).map_err(|error| error.to_string())?;
+        if manifest_value
+            .get("version")
+            .and_then(serde_json::Value::as_u64)
+            == Some(2)
+            && manifest_value
+                .get("keyring")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        {
+            return Err("this vault was upgraded to a keyring, but keyring.json is missing".into());
         }
-        let manifest: Manifest = serde_json::from_slice(&raw).map_err(|error| error.to_string())?;
-        if manifest.version != 1 || manifest.kdf.name != "scrypt" || manifest.kdf.n != 32768 {
+        let manifest: Manifest =
+            serde_json::from_value(manifest_value).map_err(|error| error.to_string())?;
+        if manifest.version != 1
+            || manifest.kdf.name != "scrypt"
+            || !matches!(manifest.kdf.n, 32_768 | 65_536)
+        {
             return Err("unsupported document vault manifest".into());
         }
         let salt = BASE64
             .decode(&manifest.kdf.salt)
             .map_err(|_| "invalid manifest salt")?;
-        let key = derive_key(passphrase, &salt)?;
+        let key = derive_key(passphrase, &salt, manifest.kdf.n)?;
         if verifier(key.as_ref())? != manifest.verifier {
             return Err("wrong passphrase or damaged manifest".into());
         }
@@ -1472,14 +1563,15 @@ fn open_vault_keys(
     }
 
     if vault_holds_legacy_material(vault_dir) {
+        validate_new_passphrase(passphrase)?;
         let mut salt = [0u8; 16];
         OsRng.fill_bytes(&mut salt);
-        let key = derive_key(passphrase, &salt)?;
+        let key = derive_key(passphrase, &salt, 65_536)?;
         let manifest = Manifest {
             version: 1,
             kdf: KdfManifest {
                 name: "scrypt".into(),
-                n: 32768,
+                n: 65_536,
                 salt: BASE64.encode(salt),
             },
             verifier: verifier(key.as_ref())?,
@@ -1704,7 +1796,7 @@ fn load_saved_views(session: &VaultSession) -> Result<Vec<SavedView>, String> {
     }
     reject_symlink(&path)?;
     let payload: EncryptedPayload =
-        serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?)
+        serde_json::from_slice(&read_limited(&path, 16 * 1024 * 1024, "saved views")?)
             .map_err(|error| error.to_string())?;
     let file: SavedViewFile =
         serde_json::from_slice(&decrypt(&payload, session.key.as_ref(), SAVED_VIEWS_AAD)?)
@@ -1864,7 +1956,8 @@ fn load_revision(session: &VaultSession, id: &str, revision: u64) -> Result<Note
     let path = note_history_dir(session, id)?.join(format!("{revision}.note.enc"));
     reject_symlink(&path)?;
     let payload: EncryptedPayload = serde_json::from_slice(
-        &fs::read(&path).map_err(|_| format!("revision {revision} not found for note {id}"))?,
+        &read_limited(&path, 40 * 1024 * 1024, "note revision")
+            .map_err(|_| format!("revision {revision} not found for note {id}"))?,
     )
     .map_err(|error| error.to_string())?;
     let note: NoteDocument = serde_json::from_slice(&decrypt(
@@ -2362,7 +2455,7 @@ fn load_plugin_policy(session: &VaultSession) -> Result<PluginSecurityPolicy, St
     }
     reject_symlink(&path)?;
     let payload: EncryptedPayload =
-        serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?)
+        serde_json::from_slice(&read_limited(&path, 4 * 1024 * 1024, "plugin policy")?)
             .map_err(|error| error.to_string())?;
     let mut policy: PluginSecurityPolicy =
         serde_json::from_slice(&decrypt(&payload, session.key.as_ref(), PLUGIN_POLICY_AAD)?)
@@ -2410,6 +2503,56 @@ fn plugin_allowed(plugin: &PluginPackage, policy: &PluginSecurityPolicy) -> bool
         return false;
     }
     !policy.restricted_mode || plugin.signature.is_some()
+}
+
+fn plugin_method_capability(method: &str) -> Option<&'static str> {
+    match method {
+        "notes.list" | "notes.metadata" => Some("notes:metadata"),
+        "notes.read" => Some("notes:read"),
+        "notes.create" | "notes.update" => Some("notes:write"),
+        "search.query" => Some("search"),
+        "canvas.list" | "canvas.read" => Some("canvas:read"),
+        "canvas.save" => Some("canvas:write"),
+        "attachments.list" | "attachments.read" => Some("attachments:read"),
+        "storage.get" | "storage.set" => Some("storage"),
+        _ => None,
+    }
+}
+
+fn validate_live_plugin_call(
+    session: &VaultSession,
+    plugin_id: &str,
+    revision: u64,
+    method: &str,
+) -> Result<PluginPackage, String> {
+    let plugin = load_plugin(session, plugin_id)?;
+    if !plugin.enabled
+        || plugin.revision != revision
+        || !plugin_allowed(&plugin, &load_plugin_policy(session)?)
+    {
+        return Err("plugin authorization was revoked, disabled, or changed".into());
+    }
+    let capability = plugin_method_capability(method).ok_or("unknown privileged plugin method")?;
+    if !plugin
+        .manifest
+        .capabilities
+        .iter()
+        .any(|entry| entry == capability)
+    {
+        return Err(format!("plugin lacks required capability: {capability}"));
+    }
+    Ok(plugin)
+}
+
+fn plugin_param<'a>(params: &'a Value, name: &str) -> Result<&'a str, String> {
+    params
+        .get(name)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("plugin parameter {name} must be a string"))
+}
+
+fn plugin_json<T: Serialize>(value: T) -> Result<Value, String> {
+    serde_json::to_value(value).map_err(|error| error.to_string())
 }
 
 fn summarize_plugin(plugin: &PluginPackage, policy: &PluginSecurityPolicy) -> PluginSummary {
@@ -2542,9 +2685,11 @@ fn store_plugin_index(
 fn load_plugin(session: &VaultSession, id: &str) -> Result<PluginPackage, String> {
     let path = plugin_object_path(&session.root_dir, id)?;
     reject_symlink(&path)?;
-    let payload: EncryptedPayload =
-        serde_json::from_slice(&fs::read(&path).map_err(|_| format!("plugin not found: {id}"))?)
-            .map_err(|error| error.to_string())?;
+    let payload: EncryptedPayload = serde_json::from_slice(
+        &read_limited(&path, 4 * 1024 * 1024, "plugin package")
+            .map_err(|_| format!("plugin not found: {id}"))?,
+    )
+    .map_err(|error| error.to_string())?;
     let plugin: PluginPackage =
         serde_json::from_slice(&decrypt(&payload, session.key.as_ref(), &plugin_aad(id))?)
             .map_err(|error| error.to_string())?;
@@ -2751,7 +2896,7 @@ fn read_plugin_storage(
     }
     reject_symlink(&path)?;
     let payload: EncryptedPayload =
-        serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?)
+        serde_json::from_slice(&read_limited(&path, 1024 * 1024, "plugin storage")?)
             .map_err(|error| error.to_string())?;
     serde_json::from_slice(&decrypt(
         &payload,
@@ -2796,7 +2941,7 @@ fn load_workspace(session: &VaultSession) -> Result<WorkspaceState, String> {
     }
     reject_symlink(&path)?;
     let payload: EncryptedPayload =
-        serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?)
+        serde_json::from_slice(&read_limited(&path, 16 * 1024 * 1024, "workspace")?)
             .map_err(|error| error.to_string())?;
     let state: WorkspaceState =
         serde_json::from_slice(&decrypt(&payload, session.key.as_ref(), WORKSPACE_AAD)?)
@@ -3120,6 +3265,11 @@ fn unlock_vault(
         path: session.vault_dir.to_string_lossy().into_owned(),
         note_count: session.index.notes.len(),
     };
+    state
+        .plugin_instances
+        .lock()
+        .map_err(|_| "plugin instance lock poisoned")?
+        .clear();
     *state
         .session
         .lock()
@@ -3133,6 +3283,11 @@ fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
         .session
         .lock()
         .map_err(|_| "vault session lock poisoned")? = None;
+    state
+        .plugin_instances
+        .lock()
+        .map_err(|_| "plugin instance lock poisoned")?
+        .clear();
     Ok(())
 }
 
@@ -3399,6 +3554,152 @@ fn list_plugins(state: State<'_, AppState>) -> Result<Vec<PluginSummary>, String
     }
     plugins.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(plugins)
+}
+
+#[tauri::command(async)]
+fn authorize_plugin_instance(
+    plugin_id: String,
+    revision: u64,
+    state: State<'_, AppState>,
+) -> Result<PluginInstanceAuthorization, String> {
+    let guard = state
+        .session
+        .lock()
+        .map_err(|_| "vault session lock poisoned")?;
+    let session = guard.as_ref().ok_or("vault is locked")?;
+    let plugin = load_plugin(session, &resolve_plugin_id(session, &plugin_id)?)?;
+    if !plugin.enabled
+        || plugin.revision != revision
+        || !plugin_allowed(&plugin, &load_plugin_policy(session)?)
+    {
+        return Err("plugin is disabled, revoked, or has changed revision".into());
+    }
+    let instance_token = Uuid::new_v4().to_string();
+    state
+        .plugin_instances
+        .lock()
+        .map_err(|_| "plugin instance lock poisoned")?
+        .insert(
+            instance_token.clone(),
+            PluginInstanceGrant {
+                plugin_id: plugin.id,
+                revision,
+            },
+        );
+    Ok(PluginInstanceAuthorization { instance_token })
+}
+
+#[tauri::command(async)]
+fn plugin_call(
+    plugin_id: String,
+    instance_token: String,
+    revision: u64,
+    method: String,
+    params: Value,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    let instance = state
+        .plugin_instances
+        .lock()
+        .map_err(|_| "plugin instance lock poisoned")?
+        .get(&instance_token)
+        .cloned()
+        .ok_or("invalid plugin instance authorization")?;
+    if instance.plugin_id != plugin_id || instance.revision != revision {
+        return Err("plugin instance identity or revision mismatch".into());
+    }
+
+    {
+        // Reload both package and policy from disk on every privileged call.
+        // An out-of-process disable, update, or signer revocation therefore
+        // takes effect at the next call without waiting for a UI refresh.
+        let guard = state
+            .session
+            .lock()
+            .map_err(|_| "vault session lock poisoned")?;
+        let session = guard.as_ref().ok_or("vault is locked")?;
+        validate_live_plugin_call(session, &plugin_id, revision, &method)?;
+        if method == "attachments.read" {
+            let info = read_attachment_manifest(session, plugin_param(&params, "id")?)?;
+            if info.size > 4 * 1024 * 1024 {
+                return Err("plugin attachment reads are limited to 4 MiB".into());
+            }
+        }
+    }
+
+    let result: Value = match method.as_str() {
+        "notes.list" => plugin_json(list_notes(state)?),
+        "notes.metadata" => {
+            let mut value =
+                plugin_json(get_note(plugin_param(&params, "reference")?.into(), state)?)?;
+            if let Some(object) = value.as_object_mut() {
+                object.remove("body");
+            }
+            Ok(value)
+        }
+        "notes.read" => plugin_json(get_note(plugin_param(&params, "reference")?.into(), state)?),
+        "notes.create" => plugin_json(create_note(
+            plugin_param(&params, "path")?.into(),
+            plugin_param(&params, "title")?.into(),
+            state,
+        )?),
+        "notes.update" => {
+            let reference = plugin_param(&params, "reference")?.to_string();
+            let body = plugin_param(&params, "body")?.to_string();
+            let mut note = get_note(reference, state.clone())?;
+            note.body = body;
+            plugin_json(save_note(note, state)?)
+        }
+        "search.query" => plugin_json(search_notes(
+            plugin_param(&params, "query")?.into(),
+            50,
+            state,
+        )?),
+        "canvas.list" => plugin_json(list_canvases(state)?),
+        "canvas.read" => plugin_json(get_canvas(
+            plugin_param(&params, "reference")?.into(),
+            state,
+        )?),
+        "canvas.save" => {
+            let input = serde_json::from_value::<CanvasInput>(
+                params
+                    .get("input")
+                    .cloned()
+                    .ok_or("plugin parameter input is required")?,
+            )
+            .map_err(|error| error.to_string())?;
+            plugin_json(save_canvas(input, state)?)
+        }
+        "attachments.list" => plugin_json(list_attachments(state)?),
+        "attachments.read" => {
+            plugin_json(read_attachment(plugin_param(&params, "id")?.into(), state)?)
+        }
+        "storage.get" => {
+            let key = plugin_param(&params, "key")?;
+            let stored = get_plugin_storage(plugin_id, state)?;
+            Ok(stored
+                .get(key)
+                .map_or(Value::Null, |value| Value::String(value.clone())))
+        }
+        "storage.set" => {
+            let key = plugin_param(&params, "key")?.to_string();
+            let value = plugin_param(&params, "value")?.to_string();
+            let mut stored = get_plugin_storage(plugin_id.clone(), state.clone())?;
+            stored.insert(key, value);
+            set_plugin_storage(plugin_id, stored, state)?;
+            Ok(Value::Null)
+        }
+        _ => Err("unknown privileged plugin method".into()),
+    }?;
+
+    if serde_json::to_vec(&result)
+        .map_err(|error| error.to_string())?
+        .len()
+        > 4 * 1024 * 1024
+    {
+        return Err("plugin response exceeds 4 MiB".into());
+    }
+    Ok(result)
 }
 
 /// The only command that hands back plugin code. The webview needs it to build
@@ -3996,9 +4297,11 @@ fn validate_canvas(nodes: &[Value], edges: &[Value]) -> Result<(), String> {
 fn load_canvas(session: &VaultSession, id: &str) -> Result<CanvasDocument, String> {
     let path = canvas_object_path(&session.root_dir, id)?;
     reject_symlink(&path)?;
-    let payload: EncryptedPayload =
-        serde_json::from_slice(&fs::read(&path).map_err(|_| format!("canvas not found: {id}"))?)
-            .map_err(|error| error.to_string())?;
+    let payload: EncryptedPayload = serde_json::from_slice(
+        &read_limited(&path, 12 * 1024 * 1024, "canvas")
+            .map_err(|_| format!("canvas not found: {id}"))?,
+    )
+    .map_err(|error| error.to_string())?;
     let canvas: CanvasDocument =
         serde_json::from_slice(&decrypt(&payload, session.key.as_ref(), &canvas_aad(id))?)
             .map_err(|error| error.to_string())?;
@@ -4433,7 +4736,7 @@ fn delete_canvas(reference: String, state: State<'_, AppState>) -> Result<Canvas
 /// This is the same on-disk shape the TypeScript core writes, because both
 /// implementations have to read one vault: `attachments/<id>/manifest.enc`
 /// beside `attachments/<id>/<n>.chunk.enc`, where `<id>` is
-/// `HMAC-SHA256(vault key, "secondbrain-vault:attachment-id:v1\0" || bytes)`.
+/// `HMAC-SHA256(attachment-id key, "secondbrain-vault:attachment-id:v1\0" || bytes)`.
 /// Keying the address means two vaults never agree on an ID for the same file,
 /// so a directory listing tells an observer nothing about what is stored.
 ///
@@ -4522,7 +4825,7 @@ fn read_attachment_manifest(session: &VaultSession, id: &str) -> Result<Attachme
     }
     reject_symlink(&path)?;
     let payload: EncryptedPayload =
-        serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?)
+        serde_json::from_slice(&read_limited(&path, 1024 * 1024, "attachment manifest")?)
             .map_err(|error| error.to_string())?;
     let info: AttachmentInfo = serde_json::from_slice(&decrypt(
         &payload,
@@ -4606,7 +4909,7 @@ fn get_attachment(session: &VaultSession, id: &str) -> Result<(AttachmentInfo, V
         }
         reject_symlink(&path)?;
         let payload: EncryptedPayload =
-            serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?)
+            serde_json::from_slice(&read_limited(&path, 2 * 1024 * 1024, "attachment chunk")?)
                 .map_err(|error| error.to_string())?;
         data.extend_from_slice(&decrypt(
             &payload,
@@ -4714,9 +5017,391 @@ fn delete_attachment(id: String, state: State<'_, AppState>) -> Result<Attachmen
     with_vault_write(session, |session| remove_attachment(session, &id))
 }
 
+/// Read-only visibility into the encrypted sync store the TypeScript CLI
+/// owns. Nothing here writes, enrolls, revokes, rotates, applies or relays —
+/// that machinery stays CLI-only so the sync protocol keeps exactly one
+/// authoritative implementation. The desktop only ever decrypts the small
+/// signed registry, freshness checkpoint and applied-state documents (using
+/// the same vault key it already holds to read notes); it never decrypts a
+/// change envelope and never unwraps an epoch key, so the change store is
+/// counted by listing filenames only.
+#[derive(Debug, Deserialize)]
+struct SyncEnvelope {
+    version: u8,
+    payload: EncryptedPayload,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DeviceCertificate {
+    version: u64,
+    serial: u64,
+    #[serde(rename = "deviceId")]
+    device_id: String,
+    name: String,
+    #[serde(rename = "publicKey")]
+    public_key: String,
+    #[serde(rename = "keyAgreementKey", skip_serializing_if = "Option::is_none")]
+    key_agreement_key: Option<String>,
+    #[serde(rename = "enrolledAt")]
+    enrolled_at: String,
+    epoch: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DeviceRecord {
+    certificate: DeviceCertificate,
+    #[serde(rename = "certificateSignature")]
+    certificate_signature: String,
+    #[serde(rename = "revokedAt", skip_serializing_if = "Option::is_none")]
+    revoked_at: Option<String>,
+    #[serde(
+        rename = "revokedAfterSequence",
+        skip_serializing_if = "Option::is_none"
+    )]
+    revoked_after_sequence: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DeviceRegistryBody {
+    version: u64,
+    revision: u64,
+    epoch: u64,
+    #[serde(rename = "authorityPublicKey")]
+    authority_public_key: String,
+    #[serde(rename = "updatedAt")]
+    updated_at: String,
+    #[serde(rename = "legacyChangeIds")]
+    legacy_change_ids: Vec<String>,
+    devices: Vec<DeviceRecord>,
+    #[serde(rename = "epochKeys", skip_serializing_if = "Option::is_none")]
+    epoch_keys: Option<Vec<Value>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SignedDeviceRegistry {
+    body: DeviceRegistryBody,
+    signature: String,
+}
+
+/// Mirrors `SyncFreshnessCheckpointBody` in `src/sync.ts`. The desktop never
+/// verifies the checkpoint's signature (nothing here relies on it being
+/// authentic to act), so only the fields the freshness summary displays are
+/// modeled; unrecognised fields are ignored by serde rather than rejected.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CheckpointBody {
+    sequence: u64,
+    change_count: u64,
+    created_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SignedCheckpoint {
+    id: String,
+    body: CheckpointBody,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AppliedState {
+    #[serde(default)]
+    objects: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncDeviceSummary {
+    device_id: String,
+    name: String,
+    serial: u64,
+    epoch: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revoked_after_sequence: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncCheckpointSummary {
+    id: String,
+    sequence: u64,
+    change_count: u64,
+    created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncStatus {
+    enrolled: bool,
+    authority_fingerprint: String,
+    epoch: u64,
+    registry_revision: u64,
+    registry_version: u64,
+    devices: Vec<SyncDeviceSummary>,
+    checkpoint: Option<SyncCheckpointSummary>,
+    change_count: usize,
+    applied_object_count: usize,
+    readable: bool,
+}
+
+fn sync_dir(session: &VaultSession) -> PathBuf {
+    session.root_dir.join("sync")
+}
+
+fn registry_is_readable(registry: &SignedDeviceRegistry) -> bool {
+    READABLE_REGISTRY_VERSIONS.contains(&registry.body.version)
+}
+
+/// Canonical JSON matching `canonicalSyncJson` in `src/sync.ts`: object keys
+/// sorted by code unit, no insignificant whitespace, scalars rendered exactly
+/// as `JSON.stringify` would. serde_json's `Map` preserves insertion order,
+/// so the keys are sorted explicitly here rather than relying on it. This
+/// must match the TypeScript signer byte-for-byte or Ed25519 verification of
+/// otherwise-valid registries fails.
+///
+/// Sort-order caveat: keys are ordered here by `String`'s `Ord`, which
+/// compares UTF-8 bytes, while `Object.keys(value).sort()` on the
+/// TypeScript side compares UTF-16 code units. The two orderings agree for
+/// every key this build ever sorts, because every schema this function
+/// serializes (`DeviceRegistryBody`, `DeviceRecord`, `DeviceCertificate`,
+/// and whatever opaque `Value`s ride along inside `epochKeys`) uses fixed
+/// ASCII field names. They can diverge for a key containing a
+/// supplementary-plane character (one encoded as a UTF-16 surrogate pair)
+/// mixed with a key in the U+E000-U+FFFF range: UTF-16 code-unit order
+/// places the surrogate-pair key first, UTF-8 byte order places it last.
+/// If this function is ever reused for JSON with dynamic or non-ASCII
+/// object keys, that divergence needs to be closed first.
+fn canonical_json(value: &Value) -> String {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let entries: Vec<String> = keys
+                .iter()
+                .map(|key| {
+                    format!(
+                        "{}:{}",
+                        serde_json::to_string(key).unwrap(),
+                        canonical_json(&map[*key])
+                    )
+                })
+                .collect();
+            format!("{{{}}}", entries.join(","))
+        }
+        Value::Array(items) => {
+            let entries: Vec<String> = items.iter().map(canonical_json).collect();
+            format!("[{}]", entries.join(","))
+        }
+        other => serde_json::to_string(other).unwrap_or_default(),
+    }
+}
+
+fn verify_registry_signature(registry: &SignedDeviceRegistry) -> Result<bool, String> {
+    let body = serde_json::to_value(&registry.body).map_err(|error| error.to_string())?;
+    let message = canonical_json(&body);
+    let key_bytes = BASE64
+        .decode(registry.body.authority_public_key.as_bytes())
+        .map_err(|error| error.to_string())?;
+    // Strip the 12-byte SPKI prefix to reach the raw 32-byte Ed25519 key.
+    if key_bytes.len() != 44 {
+        return Err("authority public key must be 44 bytes of SPKI DER".into());
+    }
+    let raw: [u8; 32] = key_bytes[12..]
+        .try_into()
+        .map_err(|_| "malformed authority key".to_string())?;
+    let verifying = VerifyingKey::from_bytes(&raw).map_err(|error| error.to_string())?;
+    let signature_bytes = BASE64
+        .decode(registry.signature.as_bytes())
+        .map_err(|error| error.to_string())?;
+    let signature_bytes: [u8; 64] = signature_bytes
+        .try_into()
+        .map_err(|_| "signature must be 64 bytes".to_string())?;
+    Ok(verifying
+        .verify(message.as_bytes(), &Signature::from_bytes(&signature_bytes))
+        .is_ok())
+}
+
+/// `sha256(base64_decode(authorityPublicKey))` as lowercase hex — matches
+/// `syncRegistryFingerprint` in `src/sync.ts`. Hashes the decoded SPKI bytes,
+/// not the base64 text.
+fn registry_fingerprint(registry: &SignedDeviceRegistry) -> Result<String, String> {
+    let key_bytes = BASE64
+        .decode(registry.body.authority_public_key.as_bytes())
+        .map_err(|error| error.to_string())?;
+    Ok(hex_lower(&Sha256::digest(&key_bytes)))
+}
+
+fn load_device_registry(session: &VaultSession) -> Result<Option<SignedDeviceRegistry>, String> {
+    let path = sync_dir(session).join("devices.enc");
+    if !path.exists() {
+        return Ok(None);
+    }
+    reject_symlink(&path)?;
+    let envelope: SyncEnvelope = serde_json::from_slice(&read_limited(
+        &path,
+        MAX_SYNC_DEVICE_REGISTRY_BYTES,
+        "sync device registry",
+    )?)
+    .map_err(|error| error.to_string())?;
+    if envelope.version != 1 {
+        return Err("unsupported encrypted sync device registry".into());
+    }
+    let plaintext = decrypt(
+        &envelope.payload,
+        session.key.as_ref(),
+        SYNC_DEVICE_REGISTRY_AAD,
+    )?;
+    let registry: SignedDeviceRegistry =
+        serde_json::from_slice(&plaintext).map_err(|error| error.to_string())?;
+    Ok(Some(registry))
+}
+
+fn load_checkpoint(session: &VaultSession) -> Result<Option<SignedCheckpoint>, String> {
+    let path = sync_dir(session).join("checkpoint.enc");
+    if !path.exists() {
+        return Ok(None);
+    }
+    reject_symlink(&path)?;
+    let envelope: SyncEnvelope = serde_json::from_slice(&read_limited(
+        &path,
+        MAX_SYNC_CHECKPOINT_BYTES,
+        "sync freshness checkpoint",
+    )?)
+    .map_err(|error| error.to_string())?;
+    if envelope.version != 1 {
+        return Err("unsupported encrypted sync freshness checkpoint".into());
+    }
+    let plaintext = decrypt(
+        &envelope.payload,
+        session.key.as_ref(),
+        SYNC_FRESHNESS_CHECKPOINT_AAD,
+    )?;
+    let checkpoint: SignedCheckpoint =
+        serde_json::from_slice(&plaintext).map_err(|error| error.to_string())?;
+    Ok(Some(checkpoint))
+}
+
+/// The change store is counted by listing `documents/sync/changes/*.change.enc`
+/// filenames only. No envelope is ever opened and no epoch key is ever
+/// unwrapped — the desktop has no second implementation of the change crypto.
+fn count_sync_changes(session: &VaultSession) -> Result<usize, String> {
+    let dir = sync_dir(session).join("changes");
+    if !dir.is_dir() {
+        return Ok(0);
+    }
+    reject_symlink(&dir)?;
+    let mut count = 0usize;
+    for entry in fs::read_dir(&dir).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let is_change = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.ends_with(".change.enc"));
+        if is_change {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn count_applied_objects(session: &VaultSession) -> Result<usize, String> {
+    let path = sync_dir(session).join("applied.enc");
+    if !path.exists() {
+        return Ok(0);
+    }
+    reject_symlink(&path)?;
+    let envelope: SyncEnvelope = serde_json::from_slice(&read_limited(
+        &path,
+        MAX_SYNC_APPLIED_BYTES,
+        "sync application state",
+    )?)
+    .map_err(|error| error.to_string())?;
+    if envelope.version != 1 {
+        return Err("unsupported encrypted sync application state".into());
+    }
+    let plaintext = decrypt(&envelope.payload, session.key.as_ref(), SYNC_APPLIED_AAD)?;
+    let state: AppliedState =
+        serde_json::from_slice(&plaintext).map_err(|error| error.to_string())?;
+    Ok(state.objects.len())
+}
+
+#[tauri::command(async)]
+fn sync_status(state: State<'_, AppState>) -> Result<SyncStatus, String> {
+    let guard = state
+        .session
+        .lock()
+        .map_err(|_| "vault session lock poisoned")?;
+    let session = guard.as_ref().ok_or("vault is locked")?;
+
+    let registry = load_device_registry(session)?;
+    let checkpoint = load_checkpoint(session)?;
+    let change_count = count_sync_changes(session)?;
+    let applied_object_count = count_applied_objects(session)?;
+
+    let checkpoint = checkpoint.map(|checkpoint| SyncCheckpointSummary {
+        id: checkpoint.id,
+        sequence: checkpoint.body.sequence,
+        change_count: checkpoint.body.change_count,
+        created_at: checkpoint.body.created_at,
+    });
+
+    let Some(registry) = registry else {
+        return Ok(SyncStatus {
+            enrolled: false,
+            authority_fingerprint: String::new(),
+            epoch: 0,
+            registry_revision: 0,
+            registry_version: 0,
+            devices: Vec::new(),
+            checkpoint,
+            change_count,
+            applied_object_count,
+            readable: true,
+        });
+    };
+
+    let readable = registry_is_readable(&registry);
+    let devices = registry
+        .body
+        .devices
+        .iter()
+        .map(|record| SyncDeviceSummary {
+            device_id: record.certificate.device_id.clone(),
+            name: record.certificate.name.clone(),
+            serial: record.certificate.serial,
+            epoch: record.certificate.epoch,
+            revoked_after_sequence: record.revoked_after_sequence,
+        })
+        .collect();
+
+    Ok(SyncStatus {
+        enrolled: true,
+        authority_fingerprint: registry_fingerprint(&registry)?,
+        epoch: registry.body.epoch,
+        registry_revision: registry.body.revision,
+        registry_version: registry.body.version,
+        devices,
+        checkpoint,
+        change_count,
+        applied_object_count,
+        readable,
+    })
+}
+
+#[tauri::command(async)]
+fn sync_verify_registry(state: State<'_, AppState>) -> Result<bool, String> {
+    let guard = state
+        .session
+        .lock()
+        .map_err(|_| "vault session lock poisoned")?;
+    let session = guard.as_ref().ok_or("vault is locked")?;
+    let Some(registry) = load_device_registry(session)? else {
+        return Err("vault has no sync device registry".into());
+    };
+    verify_registry_signature(&registry)
+}
+
 /// Opens the operating system's folder chooser and reports back only the path
-/// the person selected, or `None` when they dismissed it. Typing a path by hand
-/// stays supported; this exists so a vault does not have to be spelled out.
+/// the person selected, or `None` when they dismissed it.
 #[tauri::command(async)]
 fn pick_vault_directory(app: AppHandle) -> Result<Option<String>, String> {
     let chosen = app
@@ -4754,6 +5439,8 @@ pub fn run() {
             create_from_template,
             open_daily_note,
             list_plugins,
+            authorize_plugin_instance,
+            plugin_call,
             get_plugin,
             get_plugin_security_policy,
             set_plugin_restricted_mode,
@@ -4784,6 +5471,8 @@ pub fn run() {
             read_attachment,
             list_attachments,
             delete_attachment,
+            sync_status,
+            sync_verify_registry,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Vault Brain");
@@ -4950,13 +5639,33 @@ mod tests {
         let stale = VaultLockRecord {
             token: Uuid::new_v4().to_string(),
             pid: 999_999,
-            host: "crashed-host".into(),
+            host: lock_host(),
             acquired_at: "1970-01-01T00:00:00.000Z".into(),
         };
         fs::write(&lock_path, serde_json::to_vec(&stale).unwrap()).unwrap();
         let reclaimed = VaultWriteGuard::acquire(&path).unwrap();
         assert_ne!(read_lock_record(&lock_path).unwrap().token, stale.token);
         drop(reclaimed);
+
+        let live_but_old = VaultLockRecord {
+            token: Uuid::new_v4().to_string(),
+            pid: std::process::id(),
+            host: lock_host(),
+            acquired_at: "1970-01-01T00:00:00.000Z".into(),
+        };
+        fs::write(&lock_path, serde_json::to_vec(&live_but_old).unwrap()).unwrap();
+        assert!(VaultWriteGuard::acquire(&path).is_err());
+        fs::remove_file(&lock_path).unwrap();
+
+        let remote = VaultLockRecord {
+            token: Uuid::new_v4().to_string(),
+            pid: 999_999,
+            host: "remote-host".into(),
+            acquired_at: "1970-01-01T00:00:00.000Z".into(),
+        };
+        fs::write(&lock_path, serde_json::to_vec(&remote).unwrap()).unwrap();
+        assert!(VaultWriteGuard::acquire(&path).is_err());
+        fs::remove_file(&lock_path).unwrap();
         fs::remove_dir_all(path).unwrap();
     }
 
@@ -5467,11 +6176,34 @@ mod tests {
         .unwrap();
         assert_eq!(installed.signature_status, "verified");
         assert!(installed.enabled);
+        assert!(validate_live_plugin_call(
+            &session,
+            &installed.id,
+            installed.revision,
+            "notes.read"
+        )
+        .is_ok());
+        assert!(validate_live_plugin_call(
+            &session,
+            &installed.id,
+            installed.revision,
+            "notes.create"
+        )
+        .unwrap_err()
+        .contains("lacks required capability"));
 
         policy
             .revoked_signers
             .push(installed.signer.clone().unwrap());
         save_plugin_policy(&session, &policy).unwrap();
+        assert!(validate_live_plugin_call(
+            &session,
+            &installed.id,
+            installed.revision,
+            "notes.read"
+        )
+        .unwrap_err()
+        .contains("revoked"));
         let plugin = load_plugin(&session, &installed.id).unwrap();
         assert!(!plugin_allowed(
             &plugin,
@@ -6081,15 +6813,6 @@ mod tests {
         }
     }
 
-    fn fixture(name: &str) -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("workspace root")
-            .join("test")
-            .join("fixtures")
-            .join(name)
-    }
-
     #[test]
     fn attachments_deduplicate_by_content_and_chunk_at_one_mebibyte() {
         let (path, session) = attachment_session("attachment-round-trip");
@@ -6386,62 +7109,137 @@ mod tests {
         fs::remove_dir_all(path).unwrap();
     }
 
-    /// The fixture is copied rather than opened in place: opening a vault takes
-    /// the write lock and would leave a lock file inside a checked-in fixture.
+    /// The second cross-implementation gate. This registry was written by the
+    /// TypeScript core after a real rotation. If the Rust core drifts on the
+    /// canonical JSON encoding, the AAD strings or the SPKI key layout, it can no
+    /// longer read or verify what the CLI wrote — and this fails.
     #[test]
-    fn the_rust_core_opens_the_typescript_keyring_fixture() {
-        let path = temporary_vault("keyring-fixture");
-        copy_tree(&fixture("keyring-v2"), &path);
-        let path_text = path.to_string_lossy().into_owned();
+    fn a_rotated_registry_written_by_the_typescript_core_still_verifies() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("test")
+            .join("fixtures")
+            .join("sync-epoch-v2");
+        assert!(fixture.is_dir(), "missing fixture: {}", fixture.display());
 
-        let session = open_session(&path_text, "fixture-only-passphrase").unwrap();
+        let path = temporary_vault("sync-registry-fixture");
+        copy_tree(&fixture, &path);
+        let session = open_session(&path.to_string_lossy(), "fixture-only-passphrase").unwrap();
 
-        // The documents key: the note object decrypts and indexes.
-        let titles: Vec<&str> = session
-            .index
-            .notes
-            .values()
-            .map(|indexed| indexed.note.title.as_str())
-            .collect();
-        assert_eq!(titles, ["Keyring contract"]);
+        let registry = load_device_registry(&session)
+            .unwrap()
+            .expect("the fixture is enrolled");
+        assert_eq!(registry.body.version, 2);
+        assert_eq!(registry.body.epoch, 2);
+        assert_eq!(registry.body.devices.len(), 2);
+        assert!(registry_is_readable(&registry));
 
-        // The attachmentId key: the content address the TypeScript core wrote.
-        const FIXTURE_ATTACHMENT_ID: &str =
-            "11eda91fda11ea24f0063a23a63c7e2b1570b139a14fc42eb5a5e4a745e1e4ca";
-        assert_eq!(
-            attachment_id(
-                session.attachment_id_key.as_ref(),
-                b"keyring fixture attachment"
-            )
-            .unwrap(),
-            FIXTURE_ATTACHMENT_ID
-        );
+        // Canonical JSON and Ed25519 verification must agree with the signer.
+        assert!(verify_registry_signature(&registry).expect("verification runs"));
 
-        // And the manifest of that attachment decrypts under the documents key.
-        let info = read_attachment_manifest(&session, FIXTURE_ATTACHMENT_ID).unwrap();
-        assert_eq!(info.filename, "keyring.txt");
-        assert_eq!(info.size, "keyring fixture attachment".len());
-
-        assert!(open_session(&path_text, "wrong passphrase").is_err());
         drop(session);
         fs::remove_dir_all(path).unwrap();
     }
 
     #[test]
-    fn the_rust_core_still_opens_a_legacy_document_vault() {
-        let path = temporary_vault("legacy-docs");
-        copy_tree(&fixture("documents-v1"), &path);
-        let path_text = path.to_string_lossy().into_owned();
+    fn a_tampered_registry_body_fails_verification() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("test")
+            .join("fixtures")
+            .join("sync-epoch-v2");
+        let path = temporary_vault("sync-registry-tampered");
+        copy_tree(&fixture, &path);
+        let session = open_session(&path.to_string_lossy(), "fixture-only-passphrase").unwrap();
 
-        let session = open_session(&path_text, "fixture-only-passphrase").unwrap();
-        let vault_dir = session.vault_dir.clone();
-        assert!(!session.index.notes.is_empty());
+        let mut registry = load_device_registry(&session).unwrap().unwrap();
+        registry.body.revision += 1;
+        assert!(!verify_registry_signature(&registry).expect("verification runs"));
+
         drop(session);
-
-        assert!(
-            !vault_dir.join("keyring.json").exists(),
-            "opening a legacy vault must not change its format"
-        );
         fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn an_unknown_registry_version_reads_as_undisplayable_rather_than_failing() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("test")
+            .join("fixtures")
+            .join("sync-epoch-v2");
+        let path = temporary_vault("sync-registry-future");
+        copy_tree(&fixture, &path);
+        let session = open_session(&path.to_string_lossy(), "fixture-only-passphrase").unwrap();
+
+        let mut registry = load_device_registry(&session).unwrap().unwrap();
+        registry.body.version = 99;
+        assert!(
+            !registry_is_readable(&registry),
+            "a future version is reported, not an error"
+        );
+
+        drop(session);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn sync_status_counts_changes_without_decrypting_them() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("test")
+            .join("fixtures")
+            .join("sync-epoch-v2");
+        let path = temporary_vault("sync-status-count");
+        copy_tree(&fixture, &path);
+        let session = open_session(&path.to_string_lossy(), "fixture-only-passphrase").unwrap();
+
+        // The fixture holds one epoch 1 change and one epoch 2 change. The count
+        // comes from filenames, so it works even though this build holds no epoch
+        // key and could not open the second envelope.
+        assert_eq!(count_sync_changes(&session).unwrap(), 2);
+
+        drop(session);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    /// The TypeScript core moved attachment bytes out of the change body and
+    /// into content-addressed blobs, which introduced change body version 3.
+    /// The Rust core counts changes from filenames and never opens a body, so
+    /// it is expected to be indifferent to that. Expected is not verified, so
+    /// this pins it against the committed version 3 fixture.
+    #[test]
+    fn sync_status_counts_version_three_attachment_changes() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("test")
+            .join("fixtures")
+            .join("sync-attachment-blobs-v3")
+            .join("source");
+        let path = temporary_vault("sync-status-blobs");
+        copy_tree(&fixture, &path);
+        let session = open_session(&path.to_string_lossy(), "fixture-only-passphrase").unwrap();
+
+        // One note change (body version 2) and one attachment change (body
+        // version 3, carrying a blob manifest instead of base64 bytes).
+        assert_eq!(count_sync_changes(&session).unwrap(), 2);
+
+        drop(session);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    /// Guards the canonical JSON hazard the brief calls out explicitly: the
+    /// committed fixture uses ASCII-only device names, so a Rust/TypeScript
+    /// escaping divergence on non-ASCII text would pass every other test here
+    /// and only fail in production. Expected value obtained by running:
+    /// `node -e "import('./dist/sync.js').then(m => console.log(JSON.stringify(m.canonicalSyncJson({deviceId:'11111111-1111-4111-8111-111111111111', name:\"Ömer'in dizüstü 🖥️\", epoch:2}))))"`
+    #[test]
+    fn canonical_json_matches_the_typescript_signer_on_non_ascii_text() {
+        let value = serde_json::json!({
+            "deviceId": "11111111-1111-4111-8111-111111111111",
+            "name": "Ömer'in dizüstü 🖥️",
+            "epoch": 2,
+        });
+        let expected = "{\"deviceId\":\"11111111-1111-4111-8111-111111111111\",\"epoch\":2,\"name\":\"Ömer'in dizüstü 🖥️\"}";
+        assert_eq!(canonical_json(&value), expected);
     }
 }

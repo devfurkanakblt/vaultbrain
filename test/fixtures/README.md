@@ -14,8 +14,8 @@ They contain dummy data only. Never point a fixture at a real vault.
 | `documents-v1/` | document vault manifest v1, index v2 | An encrypted note vault written by the current format still opens, searches and resolves links |
 | `documents-attachments-v1/` | document vault with chunk-encrypted attachments | Content-addressed attachments written by the TypeScript core still open in the Rust desktop core |
 | `documents-canvas-v1/` | document vault with encrypted canvas objects | Canvas objects, identities, references and AAD written by the TypeScript core stay readable |
-| `keyring-v2/` | vault keyring v2, keyset v1, key-value envelope v2 | A migrated vault opens through its wrapped keyset, its key-value files use the keyed envelope, and its adopted audit chain still verifies |
-| `keyring-vector.json` | keyring slot v2, keyset v1, deterministic | Both cores unwrap one fixed slot to the same six keys and serialize that keyset to the same plaintext bytes, so the Rust and TypeScript implementations of the format cannot drift |
+| `sync-epoch-v2/` | sync registry v2, change envelopes v1 and v2 | A rotated vault still opens: epoch 1 changes stay vault-key sealed, epoch 2 changes need the wrapped content key, and the revoked device holds no wrap |
+| `sync-attachment-blobs-v3/` | sync change body v3, attachment blob manifest | An attachment change that carries `size`/`chunks`/`blobs[]` instead of base64 bytes still opens; `source/` stages the two sealed chunks, `target/` is the same vault before the attachment and reassembles it from them. `manifest.json` records the blob ids and the plaintext SHA-256 |
 
 Regenerate deliberately (see `scripts/make-fixtures.mjs`) — overwriting a
 fixture throws away the evidence it was there to provide. To cover a new

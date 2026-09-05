@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -17,6 +18,14 @@ function tempVault(label) {
 function closeAndRemove(vault, vaultDir) {
   vault?.lock();
   fs.rmSync(vaultDir, { recursive: true, force: true });
+}
+
+// A device receives sealed attachment chunks out of band, the way `sync relay
+// pull` will deliver them; without them an attachment change cannot be applied.
+function stageBlobs(fromDir, toDir) {
+  const from = path.join(fromDir, "documents", "sync", "blobs");
+  if (!fs.existsSync(from)) return;
+  fs.cpSync(from, path.join(toDir, "documents", "sync", "blobs"), { recursive: true });
 }
 
 function copyVault(from, label) {
@@ -283,6 +292,7 @@ for (const scenarioName of [
       applyFaultInjector: applyFaultAtStorage(),
     });
     target.changeLog.import(scenario.source.changeLog.envelopes());
+    stageBlobs(scenario.sourceDir, scenario.targetDir);
     assert.throws(
       () => target.applyResolved(scenario.objectType, scenario.objectId),
       /remote storage-written after-effect/iu,
@@ -296,3 +306,41 @@ for (const scenarioName of [
     closeAndRemove(target, scenario.targetDir);
   });
 }
+
+test("applying an attachment change fails closed while its blobs are missing", async () => {
+  const { parseAttachmentSnapshot } = await import("../dist/sync.js");
+  const { SyncBlobStore } = await import("../dist/sync-blobs.js");
+
+  const sourceDir = tempVault("blob-apply-source");
+  let source = new SyncedDocumentVault(sourceDir, PASSPHRASE, DEVICE_A);
+  source.lock();
+  const targetDir = copyVault(sourceDir, "blob-apply-target");
+
+  source = new SyncedDocumentVault(sourceDir, PASSPHRASE, DEVICE_A);
+  const data = crypto.randomBytes(3 * 1024 * 1024 + 11);
+  const info = source.putAttachment(data, "clip.bin", "application/octet-stream");
+
+  // The target device receives the envelopes but not yet the blobs.
+  let target = new SyncedDocumentVault(targetDir, PASSPHRASE);
+  target.changeLog.import(source.changeLog.envelopes());
+  assert.throws(() => target.applyResolved("attachment", info.id), /of 4 attachment chunks are missing/iu);
+  assert.equal(target.listAttachments().length, 0);
+  const snapshot = parseAttachmentSnapshot(target.changeLog.resolve("attachment", info.id).winner.mutation.value);
+  assert.equal(snapshot.blobs.length, 4);
+  // The refusal left no receipt behind: the vault reopens cleanly and still
+  // holds nothing partial.
+  target.lock();
+  target = new SyncedDocumentVault(targetDir, PASSPHRASE);
+  assert.equal(target.listAttachments().length, 0);
+
+  // Once every blob is staged, the same apply succeeds and the bytes verify.
+  const from = new SyncBlobStore(sourceDir);
+  const to = new SyncBlobStore(targetDir);
+  for (const id of snapshot.blobs) to.put(id, from.read(id));
+
+  target.applyResolved("attachment", info.id);
+  assert.deepEqual(target.getAttachment(info.id).data, data);
+
+  closeAndRemove(source, sourceDir);
+  closeAndRemove(target, targetDir);
+});

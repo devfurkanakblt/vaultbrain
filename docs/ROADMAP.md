@@ -68,52 +68,95 @@ Each phase must ship a usable vertical slice and keep older vaults readable.
 - [x] Local-model adapter
 - [x] Importer for Obsidian vaults with integrity report
 
-## Phase 6 — Encrypted sync and mobile
+## Phase 6 — Encrypted sync (desktop multi-device)
 
-- [ ] Immutable encrypted change protocol and conflict resolution
+Sync is desktop-to-desktop. Vault Brain stays local-first: the passphrase — the
+vault's only real security boundary — never leaves a machine the owner controls,
+and no hosted service is ever required.
+
+- [x] Immutable encrypted change protocol and conflict resolution
   - [x] Content-addressed encrypted envelopes, device chains, causal DAG validation and deterministic conflict inspection
   - [x] Emit changes automatically from note/canvas/attachment transactions and apply resolved remote changes to live storage
-  - [ ] Capture plugin package and plugin-policy transactions
-- [ ] Device enrollment, removal and key rotation
-- [ ] Untrusted relay server and self-hosted option
-- [ ] Desktop multi-device release, then iOS/Android clients
-- [ ] External security audit, recovery drill and stable 1.0 format
+  - [x] Capture plugin package and plugin-policy transactions
+- [x] Owner-signed device enrollment and sequence-bounded removal
+  - [x] Ed25519 proof-of-possession requests, signed certificates and encrypted registry exchange
+  - [x] Per-change device signatures, authority pinning, rollback rejection and revocation cutoffs
+- [x] Epoch-based content-key rotation
+  - [x] Random per-epoch content keys wrapped to each active device's X25519 key
+  - [x] Automatic rotation on owner-signed device revocation
+  - [x] Forward-only: a revoked device retains pre-rotation read access
+- [x] Owner-signed freshness checkpoints with explicit first-pin verification
+- [x] Authenticated opaque relay server and self-hosted option
+- [ ] Desktop multi-device release
+  - [x] Read-only desktop sync status; mutation remains CLI-only
+  - [ ] Desktop-driven enrollment, revocation and relay exchange
+- [x] Resumable chunked transport for large attachment blobs
+  - [x] Version 3 change bodies carry an attachment manifest; the bytes
+    travel as content-addressed, AEAD-sealed 1 MiB blobs
+  - [x] Per-chunk idempotent push and pull, and an apply that fails closed
+    while a chunk is missing
+  - [x] `sync blobs status/fetch/prune` and relay-free bundle transport via
+    `sync export --bundle` / `sync import`
+- [x] Automated encrypted-backup plus relay catch-up recovery drill
+- [ ] External security audit and stable 1.0 format
+  - [x] Stable 1.0 on-disk format with committed conformance fixtures
+  - [x] Frozen format inventory covers the keyring: `keyring.json` is in
+    `FORMAT_COMPATIBILITY` and the artifact catalogue, and the version 2
+    manifest tombstone is a stated 1.x carve-out rather than an undeclared
+    version bump
+  - [ ] External security audit (readiness package in `docs/AUDIT-SCOPE.md`)
 
 ## Phase 7 — Key wrapping, passphrase change and re-key
 
-- [x] Encrypted keyring: passphrase-wrapped keyset, adopting migration, keyed key-value envelope
-  - [x] Keyring format, vault format detection and cached keyset resolution
-  - [x] Key-value and grant files encrypted by the keyset and bound to their file identity
-  - [x] Document, attachment-identity and sync-change keys separated
-  - [x] `vbrain migrate` upgrades an existing vault without re-encrypting an object
-  - [x] Rust core opens a keyring vault, and both cores create new vaults keyring-native
-- [x] Passphrase change, including the KDF cost upgrade path
-- [x] Full re-key after a compromised passphrase
-- [ ] Survivable keyrings: a second way in, a way to look inside, and a record of every change
-  - [ ] Attachment identity migration, closing the confirmation oracle a
-        re-key leaves behind. Rotating `attachmentId` renames every attachment
-        directory and rewrites every canvas object, canvas history revision
-        and index reference that names one, and every peer must run it at the
-        same time or their attachment IDs diverge. `syncChange` has to move
-        with it — a change ID is referenced as a `parent` by every descendant,
-        so rotating one rewrites the rest of the DAG — and the oracle stays
-        open until both do.
-  - [ ] A deliberate lock-break path. Nothing in the CLI can reclaim a vault
-        lock on purpose; a crashed `vbrain rekey` holds it for up to 15
-        minutes (`REKEY_STALE_MS`), and until it expires or a person deletes
-        `.sbrain.lock` by hand, every command that touches the vault refuses to
-        run. `lock` and `keychain-status` are unaffected; neither takes the lock.
-  - [ ] Recovery slot, so one forgotten passphrase or one damaged `keyring.json` is not
+The passphrase unwraps a keyring instead of deriving the content key directly,
+so it can change without re-encrypting the vault and the key-derivation cost
+can be raised per vault. Design contract:
+[`docs/superpowers/specs/2026-09-03-vault-keyring-design.md`](superpowers/specs/2026-09-03-vault-keyring-design.md).
+
+- [x] 7.1 Keyring format and migration (TypeScript)
+  - [x] `keyring.json` with a scrypt-wrapped keyset, kv envelope v2 and `vbrain migrate`
+  - [x] Committed v1 fixtures migrate with byte-identical attachment and sync change IDs
+- [x] 7.2 Rust read parity
+  - [x] The desktop core opens keyring vaults; new vaults are keyring-native in both cores
+  - [x] A manifest version tombstone makes an older build fail closed, not misread
+  - [x] A deterministic cross-core test vector pins the wire format
+- [x] 7.3 `vbrain passphrase change`
+  - [x] Re-wrap the keyset under a new passphrase at the current key-derivation cost
+  - [x] Verify before writing, refresh a remembered OS credential, zeroize on every path
+- [x] 7.4 `vbrain rekey`
+  - [x] Fresh data keys and a re-encrypted vault, so a leaked passphrase has an answer
+  - [x] Resumable: interrupt a re-key at a random object, resume, and assert the
+    vault is complete and consistent
+- [x] 7.5 Survivable keyrings: a second way in, a way to look inside, and a record of every change
+  - [x] Recovery slot, so one forgotten passphrase or one damaged `keyring.json` is not
         the permanent loss of every note. The format already carries a slot list and
         reserves this slot; nothing writes one yet, and the keyring concentrated into
         one small file what used to be derived from the passphrase directly.
-  - [ ] `vbrain keyring status`, listing every slot with its id, label, creation time
+  - [x] `vbrain keyring status`, listing every slot with its id, label, creation time
         and KDF cost. Without it a slot someone else added is invisible — a passphrase
         change deliberately preserves the slots it cannot open — and a user has no way
         to learn their vault still sits at the old cost, which makes the upgrade path
         undiscoverable.
-  - [ ] Audit entries for `migrate`, `passphrase change` and `rekey`. Every content
-        command already appends to the passphrase-authenticated chain; the three
-        commands that touch key material append nothing, so "when did this vault's
-        passphrase last change" and "when were its keys last replaced" have no answer. The `audit` key is permanent, so entries written before
+  - [x] Audit entries for `migrate` and `passphrase change`. Every content command
+        already appends to the passphrase-authenticated chain; the two commands that
+        touch key material append nothing, so "when did this vault's passphrase last
+        change" has no answer. The `audit` key is permanent, so entries written before
         and after a change verify in the same chain.
+- [ ] 7.6 What the re-key leaves behind
+  - [ ] Attachment identity migration, closing the confirmation oracle a re-key
+        leaves. Rotating `attachmentId` renames every attachment directory and
+        rewrites every canvas object, canvas history revision and index
+        reference that names one, and every peer must run it at the same time
+        or their attachment IDs diverge. `syncChange` has to move with it — a
+        change ID is referenced as a `parent` by every descendant, so rotating
+        one rewrites the rest of the DAG — and the oracle stays open until both
+        do.
+  - [ ] A deliberate lock-break path. Nothing in the CLI can reclaim a vault
+        lock on purpose; a crashed `vbrain rekey` holds it for up to 15 minutes
+        (`REKEY_STALE_MS`), and until it expires or a person deletes
+        `.sbrain.lock` by hand, every command that touches the vault refuses to
+        run. `lock` and `keychain-status` are unaffected; neither takes the lock.
+  - [ ] An audit entry for `rekey`. `migrate` and `passphrase change` now append
+        to the chain; the command that replaces every key still appends nothing,
+        so "when were this vault's keys last replaced" has no answer.
+- [ ] Desktop passphrase-change and re-key interface
