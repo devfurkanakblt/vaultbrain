@@ -387,6 +387,14 @@ export function journalPath(vaultDir: string): string {
   return resolveInside(stagingRoot(vaultDir), "journal.json");
 }
 
+/**
+ * Thrown by `readJournal` (via `recoverRekey`) and by `stageRekey` when the
+ * on-disk journal cannot be trusted. Exported so the CLI's `catch` can match
+ * on this constant instead of re-typing the literal — the two would
+ * otherwise drift silently if this wording ever changed.
+ */
+export const MALFORMED_JOURNAL_MESSAGE = "The re-key journal is malformed; refusing to touch the vault.";
+
 function readJournal(vaultDir: string): RekeyJournal | null {
   const filePath = journalPath(vaultDir);
   if (!fs.existsSync(filePath)) return null;
@@ -397,7 +405,7 @@ function readJournal(vaultDir: string): RekeyJournal | null {
     // A truncated journal is an ordinary crash artifact. It must take the same
     // path as a structurally invalid one, so the operator sees the refusal
     // rather than a raw SyntaxError from the parser.
-    throw new Error("The re-key journal is malformed; refusing to touch the vault.");
+    throw new Error(MALFORMED_JOURNAL_MESSAGE);
   }
   if (
     parsed?.version !== 1 ||
@@ -406,7 +414,7 @@ function readJournal(vaultDir: string): RekeyJournal | null {
     !Array.isArray(parsed.files) ||
     parsed.files.some((entry) => typeof entry !== "string")
   ) {
-    throw new Error("The re-key journal is malformed; refusing to touch the vault.");
+    throw new Error(MALFORMED_JOURNAL_MESSAGE);
   }
   return { version: 1, slotId: parsed.slotId, files: parsed.files };
 }

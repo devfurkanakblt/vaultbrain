@@ -24,7 +24,7 @@ import {
 import { startMcpServer } from "./mcp-server.js";
 import { migrateToKeyring } from "./keyring-migrate.js";
 import { changeVaultPassphrase, MIN_PASSPHRASE_LENGTH } from "./keyring-passphrase.js";
-import { journalPath, rekeyVault, stagingRoot } from "./keyring-rekey.js";
+import { MALFORMED_JOURNAL_MESSAGE, journalPath, rekeyVault, stagingRoot } from "./keyring-rekey.js";
 import { detectVaultFormat } from "./keyring.js";
 import {
   addGrant,
@@ -81,11 +81,16 @@ program
  * so any other command must refuse outright rather than decrypt (or write)
  * against a vault that might be mid-transition. `rekey` itself is exempt: it
  * is the command that finishes or rolls the interruption back, and `init`
- * needs no vault to exist yet.
+ * needs no vault to exist yet. `lock` is exempt too: it only forgets a
+ * remembered passphrase in the OS credential store and never touches the
+ * vault directory, so an operator racing a leaked passphrase can still purge
+ * it immediately instead of being forced through journal recovery first.
+ * `keychain-status` is exempt as well: it only reads `detectVaultFormat` and
+ * envelope versions and never decrypts anything.
  */
 program.hook("preAction", (_thisCommand, actionCommand) => {
   const name = actionCommand.name();
-  if (name === "rekey" || name === "init") return;
+  if (name === "rekey" || name === "init" || name === "lock" || name === "keychain-status") return;
   const dir = program.opts().vault as string;
   if (fs.existsSync(journalPath(dir))) {
     throw new Error(
@@ -1317,8 +1322,6 @@ async function readNewPassphrase(): Promise<string> {
   if (first !== second) throw new Error("The two entries did not match; nothing was changed.");
   return first;
 }
-
-const MALFORMED_JOURNAL_MESSAGE = "The re-key journal is malformed; refusing to touch the vault.";
 
 program
   .command("rekey")

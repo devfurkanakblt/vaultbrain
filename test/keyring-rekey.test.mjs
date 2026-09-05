@@ -1445,6 +1445,40 @@ test("a vault-opening command refuses while a re-key journal is present", () => 
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+// `lock` only forgets a remembered passphrase in the OS credential store —
+// it never decrypts or writes anything in the vault directory — so it must
+// stay exempt from the guard: an operator racing a leaked passphrase needs
+// to be able to purge the remembered credential immediately, not be forced
+// through journal recovery first.
+test("`lock` is exempt from the journal guard", () => {
+  const { dir } = seedVault();
+  const { journal } = preparedRekey(dir);
+  fs.writeFileSync(journalPath(dir), `${JSON.stringify(journal)}\n`);
+
+  const result = runCli(["--vault", dir, "lock"], {});
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.doesNotMatch(result.stderr, /interrupted re-key/iu);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// `keychain-status` only reads `detectVaultFormat` and envelope versions —
+// it never decrypts anything — so it must stay exempt from the guard too.
+test("`keychain-status` is exempt from the journal guard", () => {
+  const { dir } = seedVault();
+  const { journal } = preparedRekey(dir);
+  fs.writeFileSync(journalPath(dir), `${JSON.stringify(journal)}\n`);
+
+  const result = runCli(["--vault", dir, "keychain-status"], {});
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.doesNotMatch(result.stderr, /interrupted re-key/iu);
+  assert.match(result.stdout, /Credential store:/u);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 // The `rekey` command itself must stay exempt from that same guard: it is
 // the one command that resolves the interruption, so it has to be able to
 // open the vault while the journal it will finish or roll back is present.
