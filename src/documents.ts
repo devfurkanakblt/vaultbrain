@@ -349,6 +349,23 @@ export interface RevisionInfo {
   current: boolean;
 }
 
+export interface PurgeReport {
+  version: 1;
+  kind: "note" | "canvas" | "attachment";
+  id: string;
+  /** The object's path, when the vault still had a live copy to name. */
+  path?: string;
+  /** False when the object had already been removed and only history was left. */
+  liveRemoved: boolean;
+  revisionsRemoved: number;
+  /**
+   * Encrypted changes in this vault's local sync log. A purge does not rewrite
+   * them, and any of them may carry an earlier version of what was purged.
+   * Zero for a vault that has never synchronized.
+   */
+  syncChangesPresent: number;
+}
+
 export interface AttachmentInfo {
   id: string;
   filename: string;
@@ -1900,7 +1917,7 @@ export class DocumentVault {
     return withVaultLock(this.vaultDir, () => this.removeLocked(reference));
   }
 
-  private removeLocked(reference: string): NoteSummary {
+  private removeLocked(reference: string, archive = true): NoteSummary {
     const id = this.resolveId(reference);
     const index = this.loadIndex();
     this.beginJournal("notes", [id]);
@@ -1909,7 +1926,9 @@ export class DocumentVault {
     for (const label of this.identityLabels(existing)) {
       for (const sourceId of index.linkSources[label] ?? []) affected.add(sourceId);
     }
-    this.archiveRevision(this.loadById(id));
+    // A purge is the one caller that must not leave the outgoing revision
+    // behind: archiving here is exactly what it is trying to undo.
+    if (archive) this.archiveRevision(this.loadById(id));
     const filePath = encryptedDocumentPath(this.session.rootDir, id);
     assertNotSymlink(filePath);
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
@@ -2273,6 +2292,114 @@ export class DocumentVault {
       const info = this.readAttachmentManifest(id);
       fs.rmSync(this.attachmentDir(id), { recursive: true, force: false });
       return info;
+    });
+  }
+
+  /**
+   * Changes in the local sync log, which a purge does not touch.
+   *
+   * A synchronized vault keeps every mutation it has made or admitted as an
+   * encrypted change, and a `put` change carries the note body. Rewriting that
+   * log would break the causal chain other devices have already pinned, so a
+   * purge counts what it is leaving behind instead of pretending.
+   */
+  private syncChangesPresent(): number {
+    const changesDir = path.join(this.session.rootDir, "sync", "changes");
+    if (!fs.existsSync(changesDir)) return 0;
+    return fs.readdirSync(changesDir).filter((name) => name.endsWith(".change.enc")).length;
+  }
+
+  private removeHistory(id: string, suffix: "note" | "canvas"): number {
+    const historyDir = this.historyDir(id);
+    if (!fs.existsSync(historyDir)) return 0;
+    const pattern = new RegExp(`^\\d+\\.${suffix}\\.enc$`, "u");
+    let removed = 0;
+    for (const name of fs.readdirSync(historyDir)) {
+      if (!pattern.test(name)) continue;
+      const filePath = resolveInside(historyDir, name);
+      assertNotSymlink(filePath);
+      fs.unlinkSync(filePath);
+      removed += 1;
+    }
+    // Only when nothing else lives here: a note and a canvas never share an id,
+    // but a partially written directory should not be removed blindly.
+    if (fs.readdirSync(historyDir).length === 0) fs.rmdirSync(historyDir);
+    return removed;
+  }
+
+  /**
+   * Removes a note and every revision of it, permanently.
+   *
+   * `remove` archives the outgoing revision before it unlinks the object, so a
+   * removed note's content stays under `documents/history/` for the life of the
+   * vault. That is the right default for an editing mistake and the wrong one
+   * for "this should never have been written down". This is the second answer.
+   *
+   * It accepts a note that has already been removed, because that is the state
+   * someone is usually in when they decide they want it gone.
+   */
+  purgeNote(reference: string): PurgeReport {
+    return withVaultLock(this.vaultDir, () => {
+      const id = this.resolveHistoryId(reference);
+      const live = this.loadIndex().notes[id];
+      const summary = live ? this.removeLocked(id, false) : undefined;
+      return {
+        version: 1,
+        kind: "note",
+        id,
+        ...(summary ? { path: summary.path } : {}),
+        liveRemoved: Boolean(summary),
+        revisionsRemoved: this.removeHistory(id, "note"),
+        syncChangesPresent: this.syncChangesPresent(),
+      };
+    });
+  }
+
+  /** `purgeNote` for a canvas: the live board and every archived revision. */
+  purgeCanvas(reference: string): PurgeReport {
+    return withVaultLock(this.vaultDir, () => {
+      const id = this.resolveCanvasHistoryId(reference);
+      const index = this.loadIndex();
+      const live = index.canvases[id];
+      if (live) {
+        this.beginJournal("canvases", [id]);
+        const filePath = this.canvasObjectPath(id);
+        assertNotSymlink(filePath);
+        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+        this.detachCanvas(index, live);
+        this.saveIndex(index);
+        this.endJournal();
+      }
+      return {
+        version: 1,
+        kind: "canvas",
+        id,
+        ...(live ? { path: live.path } : {}),
+        liveRemoved: Boolean(live),
+        revisionsRemoved: this.removeHistory(id, "canvas"),
+        syncChangesPresent: this.syncChangesPresent(),
+      };
+    });
+  }
+
+  /**
+   * An attachment has no history to archive, so `removeAttachment` already
+   * removes its manifest and every chunk. This exists so that one command
+   * covers all three object kinds and reports them the same way.
+   */
+  purgeAttachment(id: string): PurgeReport {
+    return withVaultLock(this.vaultDir, () => {
+      const info = this.readAttachmentManifest(id);
+      fs.rmSync(this.attachmentDir(id), { recursive: true, force: false });
+      return {
+        version: 1,
+        kind: "attachment",
+        id: info.id,
+        path: info.filename,
+        liveRemoved: true,
+        revisionsRemoved: 0,
+        syncChangesPresent: this.syncChangesPresent(),
+      };
     });
   }
 
