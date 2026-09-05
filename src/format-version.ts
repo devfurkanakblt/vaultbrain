@@ -38,6 +38,7 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
   syncEnrollmentRequest: { path: "(transferred)", reads: [1, 2], writes: [1, 2] },
   syncFreshnessCheckpoint: { path: "documents/sync/checkpoint.enc", reads: [1], writes: [1] },
   syncAppliedState: { path: "documents/sync/applied.enc", reads: [1], writes: [1] },
+  vaultBackup: { path: "(backup archive)", reads: [1], writes: [1] },
 } as const;
 
 /**
@@ -71,6 +72,9 @@ export const AAD = {
   pluginStorePrefix: "secondbrain-vault:plugin-store:v1:",
   attachmentManifestPrefix: "secondbrain-vault:attachment-manifest:v1:",
   attachmentChunkPrefix: "secondbrain-vault:attachment-chunk:v1:",
+  backupKey: "secondbrain-vault:backup-key:v1",
+  backupManifestPrefix: "secondbrain-vault:backup-manifest:v1:",
+  backupEntryPrefix: "secondbrain-vault:backup-entry:v1:",
 } as const;
 
 export const noteAad = (id: string): string => `${AAD.notePrefix}${id}`;
@@ -89,6 +93,19 @@ export const syncDeviceKeyAad = (deviceId: string): string => `${AAD.syncDeviceK
 export const syncAgreementKeyAad = (deviceId: string): string =>
   `${AAD.syncAgreementKeyPrefix}${deviceId}`;
 export const syncEpochKeyAad = (epoch: number): string => `${AAD.syncEpochKeyPrefix}${epoch}`;
+/**
+ * Binds a backup entry to its position and its path, so entries cannot be
+ * reordered, swapped between paths, or moved between backups without the seal
+ * failing.
+ */
+export const backupEntryAad = (index: number, entryPath: string): string =>
+  `${AAD.backupEntryPrefix}${index}:${entryPath}`;
+/**
+ * Binds a backup's sealed file list to the preamble it was written under, so
+ * the two halves of an archive header cannot be taken from different backups.
+ */
+export const backupManifestAad = (preambleDigest: string): string =>
+  `${AAD.backupManifestPrefix}${preambleDigest}`;
 
 /**
  * Strict base64: rejects malformed alphabets, non-canonical padding, and

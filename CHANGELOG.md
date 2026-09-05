@@ -5,6 +5,32 @@ Versioning once the encrypted storage format reaches 1.0.
 
 ## Unreleased
 
+- `vbrain backup <archive>` and `vbrain restore <archive> <destination>` give
+  the vault a real backup procedure, and the documentation now states it.
+  "Copy the directory" was the whole story until now, and nothing said so. The
+  archive is one self-contained file: a readable preamble carrying the vault's
+  keyring, a sealed file list, and every file sealed under a key derived from
+  the vault's permanent audit key and bound to its index and path. It opens
+  with the vault passphrase and nothing else. `backup` reads its own output
+  back through the restore path before reporting success; `restore
+  --verify-only` checks a stored archive and writes nothing; a restore stages
+  the whole verified vault and moves it into place only once every entry has
+  checked out, and refuses a destination that already holds files. A host
+  storing the archive sees its size and the keyring header — not how many notes
+  the vault holds, their paths, or how many revisions each one has. The
+  recovery drill now restores from this artifact instead of `fs.cpSync`.
+
+- `vbrain export <destination>` writes the whole vault out as plain Markdown
+  with frontmatter, JSON Canvas boards and an assets folder of attachments —
+  the same shape `docs import-obsidian` reads, so export and import describe
+  one format and a round trip keeps note identity. Export previously worked one
+  note or one canvas at a time, which made "hand me back my data" a manual
+  exercise. Note paths a filesystem cannot take (`Q3: results.md`, `aux.md`)
+  and attachments that share a filename are renamed rather than dropped, and
+  the report names every rename. The copy is plaintext, so the command refuses
+  a destination inside the vault or one that already holds files, and the audit
+  chain records that an export happened without recording where it went.
+
 - The desktop application can now manage the keys that decide whether a vault
   survives. It shows what the keyring holds — every slot with its label,
   creation time and key-derivation cost — changes the passphrase, and writes a
