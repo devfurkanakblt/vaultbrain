@@ -274,3 +274,40 @@ test("vbrain purge previews first, then removes the object and its history", () 
   fs.rmSync(vaultDir, { recursive: true, force: true });
   fs.rmSync(outside, { recursive: true, force: true });
 });
+
+test("vbrain retention bounds history and reports what it removed", () => {
+  const vaultDir = tempVault("retention");
+  const outside = tempVault("retention-out");
+  const env = { VBRAIN_PASSPHRASE: "cli-retention-test-passphrase" };
+  const flags = ["--vault", vaultDir];
+  const source = path.join(outside, "Journal.md");
+
+  for (let revision = 1; revision <= 5; revision += 1) {
+    fs.writeFileSync(source, `---\ntitle: Journal\n---\n# Journal\n\nrevision ${revision}\n`);
+    runCli([...flags, "docs", "import", "Journal.md", source], env);
+  }
+  assert.match(runCli([...flags, "retention", "show"], env), /every revision, forever/u);
+  assert.match(runCli([...flags, "docs", "history", "Journal.md"], env), /5/u);
+
+  const set = runCli([...flags, "retention", "set", "--keep-revisions", "2"], env);
+  assert.match(set, /newest 2 archived revision/u);
+  assert.match(set, /2 revision\(s\) removed from 1 of 1 object/u);
+  assert.match(set, /not recoverable/u);
+  assert.match(runCli([...flags, "retention", "show"], env), /newest 2 archived revision/u);
+  assert.match(fs.readFileSync(path.join(vaultDir, "audit.log"), "utf8"), /retention:2:all/u);
+
+  // A further edit is bounded as it is written, not only when a sweep runs.
+  fs.writeFileSync(source, "---\ntitle: Journal\n---\n# Journal\n\nrevision 6\n");
+  runCli([...flags, "docs", "import", "Journal.md", source], env);
+  const history = runCli([...flags, "docs", "history", "Journal.md"], env);
+  assert.equal(history.trim().split("\n").length, 3, history);
+
+  // A no-op sweep says so rather than claiming work.
+  assert.match(runCli([...flags, "retention", "apply"], env), /0 revision\(s\) removed/u);
+
+  // Asking for a bound without naming one is refused rather than guessed at.
+  assert.throws(() => runCli([...flags, "retention", "set"], env), /Use --unlimited/u);
+
+  fs.rmSync(vaultDir, { recursive: true, force: true });
+  fs.rmSync(outside, { recursive: true, force: true });
+});

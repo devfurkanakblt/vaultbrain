@@ -48,7 +48,12 @@ import {
 import { isRedactionLevel, REDACTION_LEVELS, type RedactionLevel } from "./redaction.js";
 import { describeCapabilities, parsePluginManifest, type PluginCapability } from "./plugins.js";
 import { generatePluginSigningKey, signPluginPackage } from "./plugin-signatures.js";
-import { DocumentVault, type PropertyValue, type PurgeReport } from "./documents.js";
+import {
+  DocumentVault,
+  type PropertyValue,
+  type PurgeReport,
+  type RetentionPolicy,
+} from "./documents.js";
 import { OllamaLocalModelAdapter } from "./semantic.js";
 import { importObsidianVault } from "./obsidian-import.js";
 import { readTextFileLimited, writeFileAtomic } from "./fs-safe.js";
@@ -1882,6 +1887,95 @@ program
       );
     }
     await startMcpServer(dir, opts.agent);
+  });
+
+const retention = program
+  .command("retention")
+  .description("how much revision history this vault keeps");
+
+function describeRetention(policy: RetentionPolicy): string {
+  const parts: string[] = [];
+  if (policy.keepRevisions !== null) parts.push(`the newest ${policy.keepRevisions} archived revision(s) per object`);
+  if (policy.keepDays !== null) parts.push(`archived revisions from the last ${policy.keepDays} day(s)`);
+  return parts.length > 0 ? parts.join(", and ") : "every revision, forever";
+}
+
+retention
+  .command("show")
+  .description("print the retention policy this vault carries")
+  .action(async () => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const policy = openDocumentVault(dir, passphrase).getRetentionPolicy();
+    console.log(`This vault keeps ${describeRetention(policy)}.`);
+    console.log(JSON.stringify(policy, null, 2));
+  });
+
+retention
+  .command("set")
+  .description("set the retention policy and apply it to the history that already exists")
+  .option("--keep-revisions <count>", "archived revisions to keep per object")
+  .option("--keep-days <days>", "drop archived revisions older than this")
+  .option("--unlimited", "keep every revision forever, the default for a new vault")
+  .action(async (opts) => {
+    const dir = program.opts().vault;
+    const number = (value: string | undefined, label: string): number | null => {
+      if (value === undefined) return null;
+      const parsed = Number(value);
+      if (!Number.isSafeInteger(parsed)) throw new Error(`${label} must be a whole number.`);
+      return parsed;
+    };
+    const policy = opts.unlimited
+      ? { version: 1 as const, keepRevisions: null, keepDays: null }
+      : {
+          version: 1 as const,
+          keepRevisions: number(opts.keepRevisions, "--keep-revisions"),
+          keepDays: number(opts.keepDays, "--keep-days"),
+        };
+    if (!opts.unlimited && policy.keepRevisions === null && policy.keepDays === null) {
+      throw new Error(
+        "Give --keep-revisions, --keep-days, or both. Use --unlimited to say you want no bound at all."
+      );
+    }
+
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const report = openDocumentVault(dir, passphrase).setRetentionPolicy(policy);
+    appendAudit(
+      dir,
+      {
+        actor: "cli-direct-write",
+        file: "documents",
+        key: `retention:${report.policy.keepRevisions ?? "all"}:${report.policy.keepDays ?? "all"}`,
+      },
+      passphrase,
+    );
+    console.log(`This vault now keeps ${describeRetention(report.policy)}.`);
+    console.log(
+      `Applied to existing history: ${report.revisionsRemoved} revision(s) removed from ` +
+        `${report.objectsPruned} of ${report.objectsExamined} object(s) with history.`,
+    );
+    if (report.revisionsRemoved > 0) console.log("Those revisions are not recoverable from this vault.");
+  });
+
+retention
+  .command("apply")
+  .description("apply the stored policy to existing history without changing it")
+  .action(async () => {
+    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
+    const report = openDocumentVault(dir, passphrase).sweepRetention();
+    console.log(`Policy: ${describeRetention(report.policy)}.`);
+    console.log(
+      `${report.revisionsRemoved} revision(s) removed from ${report.objectsPruned} of ` +
+        `${report.objectsExamined} object(s) with history.`,
+    );
+    if (report.revisionsRemoved > 0) {
+      appendAudit(
+        dir,
+        { actor: "cli-direct-write", file: "documents", key: `retention-sweep:${report.revisionsRemoved}` },
+        passphrase,
+      );
+    }
   });
 
 const purge = program
