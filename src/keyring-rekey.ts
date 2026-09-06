@@ -800,7 +800,6 @@ export function rekeyVault(
       let commitAttempted = false;
       let auditOperation: string | undefined;
       let auditPendingWritten = false;
-      let auditCompleted = false;
 
       try {
         for (const slot of file.slots) {
@@ -966,7 +965,6 @@ export function rekeyVault(
         // append itself fails, propagate that error rather than returning a
         // success report without the terminal audit outcome.
         appendKeyringAuditWithKey(vaultDir, oldKeys.audit, auditOperation, "allowed");
-        auditCompleted = true;
 
         return {
           rotated: [...ROTATED_KEYS],
@@ -1002,12 +1000,10 @@ export function rekeyVault(
           auditOperation &&
           auditPendingWritten &&
           oldKeys &&
-          !auditCompleted &&
           safePrecommitFailure &&
           !recoveryKitRewritten
         ) {
           appendKeyringAuditWithKey(vaultDir, oldKeys.audit, auditOperation, "denied");
-          auditCompleted = true;
         }
         // A failed commit attempt can occur before it publishes keyring.json.
         // Preserve the recovery-kit warning in that provable case, but do not
