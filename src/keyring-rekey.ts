@@ -149,6 +149,7 @@ function classifyDocument(relative: string): RekeyItem | null {
     if (DOCUMENT_PLAINTEXT.has(segments[0])) return null;
     if (segments[0] === "index.enc") return item("document", AAD.documentIndex);
     if (segments[0] === "plugin-policy.enc") return item("document", AAD.pluginPolicy);
+    if (segments[0] === "retention.enc") return item("document", AAD.retentionPolicy);
   }
 
   if (segments.length === 2 && segments[0] === "objects") {

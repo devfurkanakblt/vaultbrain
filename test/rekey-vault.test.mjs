@@ -65,12 +65,44 @@ function seedVault(passphrase = PASSPHRASE) {
   vault.put({ id: note.id, path: "Atlas/First.md", title: "First", body: "# First\n\nsecond revision" });
   const canvas = vault.putCanvas({ path: "Atlas/Board.canvas", title: "Board", nodes: [], edges: [] });
   const attachment = vault.putAttachment(Buffer.from("phase 7.4 attachment"), "note.bin");
+  // Keep the fixture's history while exercising the retention artifact in every re-key.
+  vault.setRetentionPolicy({ version: 1, keepRevisions: 5, keepDays: null });
   vault.lock();
   upsertEntry(dir, "health", "BLOOD_TYPE", "0 Rh+", "blood group", passphrase);
   saveGrants(dir, emptyGrantFile(), passphrase);
   appendAudit(dir, { actor: "cli-direct-write", file: "health", key: "BLOOD_TYPE" }, passphrase);
   return { dir, noteId: note.id, canvasId: canvas.id, attachmentId: attachment.id };
 }
+
+test("the walk classifies the retention policy, and a re-key preserves it", (t) => {
+  const { dir } = seedVault();
+  t.after(() => {
+    forgetVaultKeys();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const policyPath = path.join(dir, "documents", "retention.enc");
+  const before = fs.readFileSync(policyPath);
+  const entry = planRekey(dir).find((item) => item.path === "documents/retention.enc");
+  assert.deepEqual(entry, {
+    path: "documents/retention.enc",
+    kind: "document",
+    identity: "secondbrain-vault:retention-policy:v1",
+  });
+  const next = "phase-77-retention-passphrase";
+  rekeyVault(dir, PASSPHRASE, next);
+  forgetVaultKeys();
+  assert.notDeepEqual(fs.readFileSync(policyPath), before);
+  const vault = new DocumentVault(dir, next);
+  try {
+    assert.deepEqual(vault.getRetentionPolicy(), {
+      version: 1,
+      keepRevisions: 5,
+      keepDays: null,
+    });
+  } finally {
+    vault.lock();
+  }
+});
 
 test("the walk classifies every encrypted artifact with the AAD that wrote it", () => {
   const { dir, noteId, canvasId, attachmentId } = seedVault();
