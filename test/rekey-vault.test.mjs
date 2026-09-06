@@ -1736,22 +1736,25 @@ test("legacyChangeIdentity set by a re-key survives a later passphrase change", 
 });
 
 // --- Merge finding: Important 6 — a failed settle write must not misreport a
-// successful re-key. The settle write is call number `items.length + 4`:
-// `withVaultLock`'s own record (1), one write per staged item, the journal,
-// and the commit-point keyring write, all before the settle write this test
-// fails.
+// successful re-key. Target the settled keyring payload itself so this test
+// does not depend on unrelated lock or audit bookkeeping write counts.
 test("a failed settle write reports the truth instead of a failure that did not happen", () => {
   const { dir } = seedVault();
-  const items = planRekey(dir);
-  const settleWriteNumber = items.length + 5;
-
   const realWriteFileSync = fs.writeFileSync;
-  let writes = 0;
+  let settleWriteSeen = false;
   let report;
   try {
     fs.writeFileSync = (destination, data, options) => {
-      writes += 1;
-      if (writes === settleWriteNumber) {
+      let parsed;
+      try {
+        parsed = typeof data === "string" ? JSON.parse(data) : undefined;
+      } catch {
+        parsed = undefined;
+      }
+      const isSettledKeyring = parsed?.version === 2 && Array.isArray(parsed.slots) &&
+        JSON.stringify(parsed).includes('"wrapped"') && !JSON.stringify(parsed).includes('"retiring"');
+      if (isSettledKeyring) {
+        settleWriteSeen = true;
         const full = new Error("ENOSPC: no space left on device, write");
         full.code = "ENOSPC";
         throw full;
@@ -1763,7 +1766,7 @@ test("a failed settle write reports the truth instead of a failure that did not 
     fs.writeFileSync = realWriteFileSync;
   }
 
-  assert.equal(writes, settleWriteNumber, "the injected failure must land on the settle write, not before it");
+  assert.equal(settleWriteSeen, true, "the injected failure must land on the settle write, not before it");
   assert.equal(report.settled, false, "a failed settle write must be visible in the report");
   assert.equal(report.passphraseChanged, true, "the re-key itself succeeded past the commit point");
   assert.equal(report.resumed, false);
@@ -1805,17 +1808,22 @@ test("a file that appears while the re-key stages refuses the commit instead of 
 
   const before = hashVault(dir);
   const realWriteFileSync = fs.writeFileSync;
-  let writes = 0;
+  let stagedWrites = 0;
   try {
-    // `withVaultLock` writes its own record first, then writeFileAtomic
-    // (src/fs-safe.ts) issues exactly one writeFileSync per staged artifact.
-    // The pending audit head is another write before staging, so the last
-    // staged write is call number `items.length + 2` — after the
-    // walk that planned the run, and before the commit that would bless it.
+    // Count encrypted staged payloads rather than all writes: lock and audit
+    // bookkeeping are intentionally independent of this race test.
     fs.writeFileSync = (destination, data, options) => {
       const result = realWriteFileSync(destination, data, options);
-      writes += 1;
-      if (writes === items.length + 2) realWriteFileSync(racerPath, racerBytes);
+      let parsed;
+      try {
+        parsed = typeof data === "string" ? JSON.parse(data) : undefined;
+      } catch {
+        parsed = undefined;
+      }
+      if (parsed?.iv && parsed?.authTag && parsed?.ciphertext) {
+        stagedWrites += 1;
+        if (stagedWrites === items.length) realWriteFileSync(racerPath, racerBytes);
+      }
       return result;
     };
 
@@ -1824,7 +1832,7 @@ test("a file that appears while the re-key stages refuses the commit instead of 
     fs.writeFileSync = realWriteFileSync;
   }
 
-  assert.equal(writes, items.length + 2, "the racing file must land only after the whole tree is staged");
+  assert.equal(stagedWrites, items.length, "the racing file must land only after the whole tree is staged");
 
   // Nothing live moved, nothing was committed, and the old passphrase still
   // opens the vault — the racer is the only new file, and it is still sealed
