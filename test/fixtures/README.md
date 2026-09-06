@@ -25,3 +25,11 @@ format version, add a new directory instead of editing an old one.
 refuses to overwrite itself without `--force`. Its passphrase is
 `vector-only-passphrase`, not the shared fixture passphrase, because it is a
 format vector rather than a vault.
+
+`keyring-legacy-vector.json` is written by
+`scripts/make-keyring-legacy-vector.mjs` and pins the other shape a version 1
+keyset can take: one carrying `legacyChangeIdentity`, the `documents` key a
+completed re-key replaced. Both cores must unwrap it to the same keys and
+re-serialize it to the same bytes. The Rust core used to parse this shape
+successfully and then drop the field on the next re-wrap, which is what the
+vector exists to prevent recurring.

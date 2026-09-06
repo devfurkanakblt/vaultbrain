@@ -44,6 +44,7 @@ import {
   type RetiringKeys,
 } from "./keyring.js";
 import { MIN_PASSPHRASE_LENGTH } from "./keyring-passphrase.js";
+import { appendKeyringAuditWithKey, newKeyringAuditKey } from "./keyring-audit.js";
 import {
   prepareRecoveryForRekey,
   rewriteRecoveryKitForRekey,
@@ -149,6 +150,7 @@ function classifyDocument(relative: string): RekeyItem | null {
     if (DOCUMENT_PLAINTEXT.has(segments[0])) return null;
     if (segments[0] === "index.enc") return item("document", AAD.documentIndex);
     if (segments[0] === "plugin-policy.enc") return item("document", AAD.pluginPolicy);
+    if (segments[0] === "retention.enc") return item("document", AAD.retentionPolicy);
   }
 
   if (segments.length === 2 && segments[0] === "objects") {
@@ -764,7 +766,9 @@ export function rekeyVault(
     () => {
       // An interrupted earlier run is finished or discarded before anything
       // else looks at the vault, so the rest of this function only ever sees a
-      // consistent one.
+      // consistent one. Recovery appends nothing to the audit chain: it runs
+      // without a passphrase by design, so no audit key is available to sign
+      // an entry. The interrupted run's journal remains its recovery record.
       if (recoverRekey(vaultDir) === "finished") {
         // The install just replaced live objects under a keyset this process
         // may still be caching from before the interruption.
@@ -777,6 +781,11 @@ export function rekeyVault(
       }
       const file = readKeyring(vaultDir);
       if (!file) throw new Error("This vault has no keyring to re-key.");
+      // This is retained solely to distinguish a proven-original keyring from
+      // the uncertain interval after commitRekey starts. Its byte identity is
+      // stronger evidence than a journal path, which commitRekey removes on a
+      // completed install before later read-back and audit work can fail.
+      const originalKeyringBytes = fs.readFileSync(path.join(vaultDir, "keyring.json"));
 
       let oldKeys: KeySet | undefined;
       let newKeys: KeySet | undefined;
@@ -785,6 +794,12 @@ export function rekeyVault(
       // that point until `commitRekey` finishes, the kit and this vault's
       // (still unrekeyed) keyring disagree — see the catch block below.
       let recoveryKitRewritten = false;
+      // Audit terminal outcomes are only knowable before commit is attempted.
+      // `commitRekey` may have replaced keyring.json even if its journal is no
+      // longer present when a later read-back or audit append fails.
+      let commitAttempted = false;
+      let auditOperation: string | undefined;
+      let auditPendingWritten = false;
 
       try {
         for (const slot of file.slots) {
@@ -824,6 +839,15 @@ export function rekeyVault(
           const droppedIndex = droppedSlots.findIndex((entry) => entry.id === preparedRecovery.slot.id);
           if (droppedIndex !== -1) droppedSlots.splice(droppedIndex, 1);
         }
+
+        // Credentials and any recovery kit are now validated, but no vault
+        // mutation has started. The audit key is pinned across a re-key, so
+        // this pending entry and its eventual allowed entry verify in one
+        // chain under either keyset. audit.log is ROOT_PLAINTEXT and therefore
+        // intentionally outside assertPlanUnchanged's re-key plan.
+        auditOperation = newKeyringAuditKey("rekey");
+        appendKeyringAuditWithKey(vaultDir, oldKeys.audit, auditOperation, "pending");
+        auditPendingWritten = true;
 
         newKeys = randomKeySet();
         for (const { name } of PINNED_KEYS) {
@@ -882,6 +906,10 @@ export function rekeyVault(
         }
 
         const committedSlots = recoverySlot ? [slot, recoverySlot] : [slot];
+        // From this point on, even a missing journal is not proof that this is
+        // safe to clean up or deny: commitRekey may already have crossed its
+        // keyring replacement point and then removed the journal on success.
+        commitAttempted = true;
         commitRekey(
           vaultDir,
           { version: 1, slotId: slot.id, files: items.map((item) => item.path) },
@@ -933,6 +961,11 @@ export function rekeyVault(
         if (!written) throw new Error("The re-keyed vault could not be reopened.");
         zeroKeySet(unwrapKeyring(written, wrapPassphrase));
 
+        // This is deliberately after the read-back verification. If the
+        // append itself fails, propagate that error rather than returning a
+        // success report without the terminal audit outcome.
+        appendKeyringAuditWithKey(vaultDir, oldKeys.audit, auditOperation, "allowed");
+
         return {
           rotated: [...ROTATED_KEYS],
           pinned: PINNED_KEYS.map((entry) => ({ ...entry })),
@@ -951,26 +984,42 @@ export function rekeyVault(
             : null,
         };
       } catch (error) {
-        // Fail closed, but only on this side of the commit point. A journal
-        // under the staging root means `commitRekey` already replaced
-        // `keyring.json`, and the staged remainder beside it is the only copy
-        // of files the vault now depends on: clearing it here would destroy
-        // exactly what `recoverRekey` needs to finish the job, and would defeat
-        // the refusal `stageRekey` raises for that same reason. Before the
-        // commit point there is no journal, nothing live has been touched, and
-        // the half-built shadow tree goes.
-        const precommit = !fs.existsSync(journalPath(vaultDir));
-        if (precommit) {
+        // `commitAttempted`, rather than journal existence, is the decisive
+        // boundary: a successful commit removes its journal before read-back
+        // and audit settlement. Only before it starts are staged files known
+        // to be disposable and a denied outcome known to be truthful.
+        const safePrecommitFailure = !commitAttempted;
+        if (safePrecommitFailure) {
           fs.rmSync(stagingRoot(vaultDir), { recursive: true, force: true });
         }
-        // The ordering hazard: this vault was never committed (no journal, so
-        // it still opens under the CURRENT passphrase and keys, unchanged),
-        // but the offline kit was already rewritten to the new keyset before
-        // this failure landed. The kit and this vault now disagree, and a kit
-        // that disagrees opens nothing — so the operator has to be told
-        // explicitly, because nothing about the failed command's own error
-        // says so.
-        if (precommit && recoveryKitRewritten) {
+        // A rewritten kit already disagrees with an uncommitted vault, so its
+        // failure is not a clean denial even though the vault staging tree can
+        // be removed. Post-commit and uncertain failures likewise leave the
+        // operation pending for recovery rather than inventing an outcome.
+        if (
+          auditOperation &&
+          auditPendingWritten &&
+          oldKeys &&
+          safePrecommitFailure &&
+          !recoveryKitRewritten
+        ) {
+          appendKeyringAuditWithKey(vaultDir, oldKeys.audit, auditOperation, "denied");
+        }
+        // A failed commit attempt can occur before it publishes keyring.json.
+        // Preserve the recovery-kit warning in that provable case, but do not
+        // infer it merely from a missing journal after commit was attempted.
+        let keyringStillOriginal = false;
+        try {
+          keyringStillOriginal = fs.readFileSync(path.join(vaultDir, "keyring.json")).equals(originalKeyringBytes);
+        } catch {
+          // A missing or unreadable keyring is not evidence that the original
+          // one survived, so leave recovery to the journal/state on disk.
+        }
+        // The ordering hazard: this vault still has the original keyring, but
+        // the offline kit was already rewritten to the new keyset before this
+        // failure landed. The kit and this vault now disagree, and a kit that
+        // disagrees opens nothing — so the operator has to be told explicitly.
+        if (keyringStillOriginal && recoveryKitRewritten) {
           const detail = error instanceof Error ? error.message : String(error);
           throw new Error(
             `${detail} The offline recovery kit was already rewritten under the new keyset before this failure, ` +
@@ -1000,6 +1049,10 @@ export function rekeyVault(
  * sealed under whatever the crashed run chose, and a roll-back leaves the
  * original in force. So the command reaches for this first, before it asks
  * for anything it would only discard.
+ *
+ * Appends nothing to the audit chain, for the same reason it asks for no
+ * passphrase: there is no audit key to sign an entry with. The run that left
+ * the journal behind is the one the chain records.
  *
  * Under the same lock and the same window a full re-key takes, because the
  * install half of a recovery moves live files exactly as a commit does.

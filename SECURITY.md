@@ -64,18 +64,44 @@ scope that leaks a value it should mask — through the flow above.
   attacker who held the passphrase and a copy of the vault has already read
   what that copy contained. `vbrain rekey` is forward-looking: afterwards no
   byte on disk opens under the old passphrase or the old keys.
-- A re-key keeps exactly one keyring slot: the one wrapping the passphrase it
-  was given. Every other slot is dropped, deliberately — a slot this passphrase
-  cannot open is wrapped around the keyset the re-key supersedes, so preserving
-  it would keep the leaked passphrase's keys reachable. A vault carrying a
-  recovery slot or a second person's slot loses it, and the run reports each
-  one it dropped. Re-add them after the re-key.
+- A re-key installs a fresh primary slot and, when supplied with its matching
+  kit and code, a rewritten recovery slot. Other slots are dropped and reported.
+  A recovery slot requires the matching kit and code before mutation begins.
+  If the kit rewrite succeeds but the vault commit fails, the rewritten kit no
+  longer matches the vault; the command reports how to replace it using the
+  still-working current passphrase.
 - A re-key pins the two keys that derive identities, `attachmentId` and
   `syncChange`. Someone who kept the old keyset can therefore still confirm
   that a guessed file or a guessed sync change is present, from directory
   names alone, without decrypting anything. They cannot read its contents.
 
-## Disclosure
+## Accepted re-key limitations
+
+- Re-key audit entries share an operation ID and the unchanged audit signing
+  key: `pending` precedes mutation and `allowed` follows successful completion.
+  Safely refused operations can end in `denied`. A crash or an uncertain
+  post-commit failure can leave `pending` without a terminal entry. Re-running
+  `vbrain rekey` to settle a journal is passphrase-free and cannot sign another
+  event. Audit-write failures are errors, not a successful audit guarantee.
+- Recovery verification tries a kit's current keys first and its retiring keys
+  only after authentication fails. Malformed payloads remain errors. This
+  supports kits that actually carry both generations, not an arbitrary stale
+  kit. Audit verification never falls back because its key is not rotated.
+
+- Recovery uses the staging journal's slot ID to distinguish commit from rollback.
+  An actor with vault write access can alter it and steer that decision. The
+  journal is not an authenticated instruction source against a hostile writer.
+- Staged-path containment is lexical; completeness checks do not establish that
+  every staged path is free of symlinks. Keep the vault and staging directory
+  inaccessible to other writers during re-key.
+- `allowSamePassphrase` and `--keep-passphrase` can leave the same passphrase in
+  force while reporting `passphraseChanged` differently. This flag is a report
+  of the selected mode, not proof that a compromised passphrase was revoked.
+- When multiple slots open under the supplied passphrase, re-key uses the first
+  keyset; it does not compare every opened keyset for equality. Corrupt or
+  inconsistent slots must not be treated as an independently verified backup.
+
+## Disclosure process
 
 Maintainers will acknowledge a complete report, reproduce it privately, prepare
 a fix and regression test, then coordinate disclosure with the reporter. Secrets,

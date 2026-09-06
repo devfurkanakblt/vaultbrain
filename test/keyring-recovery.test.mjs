@@ -9,12 +9,19 @@ import { fileURLToPath } from "node:url";
 import { DocumentVault } from "../dist/documents.js";
 import { readAudit, verifyAudit } from "../dist/audit.js";
 import {
+  DEFAULT_SCRYPT_N,
   KEY_NAMES,
+  KEYRING_VERSION,
   forgetVaultKeys,
   openOrCreateVaultKeys,
+  randomKeySet,
   readKeyring,
   unwrapSlot,
+  wrapKeySet,
+  wrapKeySetSlot,
+  writeKeyring,
   zeroKeySet,
+  zeroRetiringKeys,
 } from "../dist/keyring.js";
 import {
   createRecoveryKit,
@@ -27,6 +34,7 @@ import {
 } from "../dist/keyring-recovery.js";
 import { readKeyringStatus } from "../dist/keyring-status.js";
 import { changeVaultPassphrase } from "../dist/keyring-passphrase.js";
+import { loadVaultFile, upsertEntry } from "../dist/store.js";
 
 const PASSPHRASE = "correct horse battery staple";
 const NEW_PASSPHRASE = "new correct horse battery staple";
@@ -46,6 +54,43 @@ function runCli(args, env = {}) {
     encoding: "utf8",
     env: { ...process.env, ...env },
   });
+}
+
+function rotateRecoveryKit(vault, kit, recoveryCode, current) {
+  const keyring = readKeyring(vault);
+  assert.ok(keyring);
+  const prepared = prepareRecoveryForRekey(keyring, current, { kitPath: kit, code: recoveryCode });
+  assert.ok(prepared);
+
+  const rotated = randomKeySet();
+  for (const name of ["attachmentId", "syncChange", "audit"]) {
+    rotated[name].fill(0);
+    rotated[name] = Buffer.from(current[name]);
+  }
+  const retiring = {
+    documents: Buffer.from(current.documents),
+    kv: Buffer.from(current.kv),
+    syncEnvelope: Buffer.from(current.syncEnvelope),
+  };
+  const recoverySlot = wrapKeySetSlot(rotated, recoveryCode, {
+    label: "recovery",
+    id: prepared.slot.id,
+    createdAt: prepared.slot.createdAt,
+    N: prepared.slot.kdf.N,
+    retiring,
+  });
+  fs.writeFileSync(
+    kit,
+    `${JSON.stringify({ version: 1, kind: "vaultbrain-recovery-kit", createdAt: prepared.kitCreatedAt, slot: recoverySlot })}\n`,
+    "utf8",
+  );
+  writeKeyring(vault, {
+    version: KEYRING_VERSION,
+    slots: [wrapKeySet(rotated, PASSPHRASE, DEFAULT_SCRYPT_N, retiring), recoverySlot],
+  });
+  forgetVaultKeys(vault);
+  zeroKeySet(rotated);
+  zeroRetiringKeys(retiring);
 }
 
 test("recovery codes carry 256 random bits and reject transcription errors", () => {
@@ -108,6 +153,50 @@ test("a recovery kit restores a damaged keyring under a new primary passphrase",
   assert.ok(restored.backupPath);
   assert.equal(new DocumentVault(vault, NEW_PASSPHRASE).get(note.id).body, "survives");
   assert.throws(() => new DocumentVault(vault, PASSPHRASE).list());
+});
+
+test("a rotated recovery kit restores ciphertext under its current keys", () => {
+  const { vault, kit } = tempLayout();
+  const current = openOrCreateVaultKeys(vault, PASSPHRASE);
+  assert.ok(current);
+  const created = createRecoveryKit(vault, PASSPHRASE, kit);
+  rotateRecoveryKit(vault, kit, created.recoveryCode, current);
+  zeroKeySet(current);
+  upsertEntry(vault, "current", "state", "current ciphertext", "rotation test", PASSPHRASE);
+
+  const report = restoreVaultKeyring(vault, kit, created.recoveryCode, NEW_PASSPHRASE);
+  assert.ok(report.verifiedObjects > 0);
+  assert.equal(loadVaultFile(vault, "current", NEW_PASSPHRASE)[0].value, "current ciphertext");
+});
+
+test("a rotated recovery kit restores ciphertext under its retiring keys", () => {
+  const { vault, kit } = tempLayout();
+  const current = openOrCreateVaultKeys(vault, PASSPHRASE);
+  assert.ok(current);
+  upsertEntry(vault, "retiring", "state", "retiring ciphertext", "rotation test", PASSPHRASE);
+  const created = createRecoveryKit(vault, PASSPHRASE, kit);
+  rotateRecoveryKit(vault, kit, created.recoveryCode, current);
+  zeroKeySet(current);
+
+  const report = restoreVaultKeyring(vault, kit, created.recoveryCode, NEW_PASSPHRASE);
+  assert.ok(report.verifiedObjects > 0);
+  assert.equal(loadVaultFile(vault, "retiring", NEW_PASSPHRASE)[0].value, "retiring ciphertext");
+});
+
+test("a rotated recovery kit verifies mixed current and retiring ciphertext", () => {
+  const { vault, kit } = tempLayout();
+  const current = openOrCreateVaultKeys(vault, PASSPHRASE);
+  assert.ok(current);
+  upsertEntry(vault, "retiring", "state", "retiring ciphertext", "rotation test", PASSPHRASE);
+  const created = createRecoveryKit(vault, PASSPHRASE, kit);
+  rotateRecoveryKit(vault, kit, created.recoveryCode, current);
+  zeroKeySet(current);
+  upsertEntry(vault, "current", "state", "current ciphertext", "rotation test", PASSPHRASE);
+
+  const report = restoreVaultKeyring(vault, kit, created.recoveryCode, NEW_PASSPHRASE);
+  assert.ok(report.verifiedObjects >= 2);
+  assert.equal(loadVaultFile(vault, "retiring", NEW_PASSPHRASE)[0].value, "retiring ciphertext");
+  assert.equal(loadVaultFile(vault, "current", NEW_PASSPHRASE)[0].value, "current ciphertext");
 });
 
 test("wrong recovery input is non-mutating and a recovery slot can be removed explicitly", () => {

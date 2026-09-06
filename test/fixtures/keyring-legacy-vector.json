@@ -1,0 +1,33 @@
+{
+  "note": "Deterministic cross-core keyring vector for a version 1 keyset carrying legacyChangeIdentity. Both cores must unwrap this slot to these keys, recover this legacy key, and serialize the result to keysetPlaintext byte-for-byte. Dummy key material; never a real vault.",
+  "passphrase": "legacy-vector-only-passphrase",
+  "aad": "{\"context\":\"secondbrain-vault:keyring-slot:v1\",\"version\":2,\"id\":\"00000000-0000-4000-8000-000000000003\",\"type\":\"passphrase\",\"kdf\":{\"name\":\"scrypt\",\"N\":16384,\"r\":8,\"p\":1,\"salt\":\"MzMzMzMzMzMzMzMzMzMzMw==\"}}",
+  "keysetPlaintext": "{\"version\":1,\"keys\":{\"documents\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\",\"kv\":\"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=\",\"attachmentId\":\"AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=\",\"syncChange\":\"BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ=\",\"syncEnvelope\":\"BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU=\",\"audit\":\"BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY=\"},\"legacyChangeIdentity\":\"WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo=\"}",
+  "keys": {
+    "documents": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+    "kv": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+    "attachmentId": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=",
+    "syncChange": "BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ=",
+    "syncEnvelope": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU=",
+    "audit": "BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY="
+  },
+  "legacyChangeIdentity": "WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo=",
+  "slot": {
+    "id": "00000000-0000-4000-8000-000000000003",
+    "type": "passphrase",
+    "label": "primary",
+    "kdf": {
+      "name": "scrypt",
+      "N": 16384,
+      "r": 8,
+      "p": 1,
+      "salt": "MzMzMzMzMzMzMzMzMzMzMw=="
+    },
+    "createdAt": "2026-09-05T00:00:00.000Z",
+    "wrapped": {
+      "iv": "RERERERERERERERE",
+      "authTag": "wUrNK/NIybvp/nhyeCCYFg==",
+      "ciphertext": "Vz96qYkgdzgxWKZVtGyyOD8VA8Q8kGn4N6RjE+JL/f5yXreQ9Z6N2O4s4Mg/bSwJTbF+wYkuh+pNjrT5D9+edXGS2EEqujKIsvA8j0/PslaTMy7b8xaxXQtVu2yNLC/dsb6ag+QcqqX2mECBnouAOsgag+DDlSXSAouoAp4wDxGxh8mSUDn+McXoMcE4xO/zpscO9r0LMFF6Oh6mugiiDeC/VpouPk+oXQmnKxIvA4ff6agh9IUK4ortj/y36kiHNIEmJ6ToUe3/vnZMywYPfE6q6DpiXRu8E83SV0xrb4eHsiU6vuLVV9Ff5FGmhHo8UiX4tdPWqZ7aocFTJdUZkbmnsHm4jF7b+Nl9sC+D2/+KX7+lcJocabenRZgqCuROYPWBmcsySrm21Qe0xSwAx1qGkFYvtUgaXM6ebgrV7mU+xMLg5eDh9plc2UcI1SZQARX1xh3vlm4UELFeQo5gNO5XCfhIuFHjxfxPxxdYTs/XYn/zRnBVmH/6aHEgC76/ks3lYBb3dXMOeqo5aZkiZCr6FW33YDAQsL9A3h9lcdWU39lUDO8b98+6t1ARbQ2xLiIXqzUNPo6g1Q=="
+    }
+  }
+}

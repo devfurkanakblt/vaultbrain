@@ -21,7 +21,7 @@ use base64::{
 use chrono::{SecondsFormat, Utc};
 use rand::{rngs::OsRng, RngCore};
 use scrypt::{scrypt, Params as ScryptParams};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -111,9 +111,45 @@ impl Drop for KeySetKeys {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct KeySetFile {
     version: u8,
     keys: KeySetKeys,
+    /// A version 1 keyset must never carry this field. Presence is retained
+    /// even when its JSON value is null, without retaining untrusted key bytes.
+    #[serde(
+        rename = "retiring",
+        default,
+        deserialize_with = "retiring_field_present",
+        skip_serializing
+    )]
+    retiring_present: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_legacy_change_identity")]
+    legacy_change_identity: Option<String>,
+}
+
+fn retiring_field_present<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let _ = serde::de::IgnoredAny::deserialize(deserializer)?;
+    Ok(true)
+}
+
+fn deserialize_legacy_change_identity<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Some)
+}
+
+impl Drop for KeySetFile {
+    fn drop(&mut self) {
+        if let Some(value) = self.legacy_change_identity.as_mut() {
+            value.zeroize();
+        }
+    }
 }
 
 /// Associated data for the wrap: the slot's identity and its declared cost.
@@ -137,6 +173,10 @@ pub(crate) struct KeySet {
     pub(crate) sync_change: Zeroizing<[u8; KEY_LENGTH]>,
     pub(crate) sync_envelope: Zeroizing<[u8; KEY_LENGTH]>,
     pub(crate) audit: Zeroizing<[u8; KEY_LENGTH]>,
+    /// The `documents` key a completed re-key replaced. This core does not use
+    /// it, but must preserve it across re-wraps because keyring.json holds the
+    /// only copy on a re-keyed vault.
+    pub(crate) legacy_change_identity: Option<Zeroizing<[u8; KEY_LENGTH]>>,
 }
 
 pub(crate) fn keyring_path(vault_dir: &Path) -> PathBuf {
@@ -279,6 +319,13 @@ fn parse_key_set(plaintext: &[u8]) -> Result<KeySet, String> {
             parsed.version
         ));
     }
+    if parsed.retiring_present {
+        return Err("A version 1 vault keyset must not carry retiring keys.".into());
+    }
+    let legacy_change_identity = match parsed.legacy_change_identity.as_deref() {
+        Some(value) => Some(key_bytes(value, "legacy change identity key")?),
+        None => None,
+    };
     Ok(KeySet {
         documents: key_bytes(&parsed.keys.documents, "documents key")?,
         kv: key_bytes(&parsed.keys.kv, "kv key")?,
@@ -286,6 +333,7 @@ fn parse_key_set(plaintext: &[u8]) -> Result<KeySet, String> {
         sync_change: key_bytes(&parsed.keys.sync_change, "syncChange key")?,
         sync_envelope: key_bytes(&parsed.keys.sync_envelope, "syncEnvelope key")?,
         audit: key_bytes(&parsed.keys.audit, "audit key")?,
+        legacy_change_identity,
     })
 }
 
@@ -300,6 +348,11 @@ fn serialize_key_set(keys: &KeySet) -> Result<Zeroizing<String>, String> {
             sync_envelope: BASE64.encode(keys.sync_envelope.as_ref()),
             audit: BASE64.encode(keys.audit.as_ref()),
         },
+        retiring_present: false,
+        legacy_change_identity: keys
+            .legacy_change_identity
+            .as_ref()
+            .map(|key| BASE64.encode(key.as_ref())),
     };
     Ok(Zeroizing::new(
         serde_json::to_string(&file).map_err(|error| error.to_string())?,
@@ -338,10 +391,28 @@ pub(crate) fn unwrap_keyring(file: &KeyringFile, passphrase: &str) -> Result<Key
     if passphrase.is_empty() {
         return Err("passphrase cannot be empty".into());
     }
+    let mut unreadable: Option<String> = None;
     for slot in &file.slots {
-        if let Ok(keys) = unwrap_slot(slot, passphrase) {
-            return Ok(keys);
+        match unwrap_slot(slot, passphrase) {
+            Ok(keys) => return Ok(keys),
+            Err(error) if error.starts_with("Unsupported vault keyset version") => {
+                unreadable.get_or_insert(error);
+            }
+            Err(_) => {}
         }
+    }
+    if let Some(error) = unreadable {
+        if error == "Unsupported vault keyset version: 2" {
+            return Err(format!(
+                "{error}. This passphrase is correct, but the vault's keys are mid-replacement: \
+                 run 'vbrain rekey' against it from the command line to finish or roll back the \
+                 interrupted run, then open it here again."
+            ));
+        }
+        return Err(format!(
+            "{error}. This passphrase is correct, but this version of Vault Brain cannot read \
+             this vault keyset. Upgrade Vault Brain and try again."
+        ));
     }
     Err("Unable to unlock this vault: wrong passphrase, or the keyring is damaged.".into())
 }
@@ -361,6 +432,7 @@ pub(crate) fn random_key_set() -> KeySet {
         sync_change: new_key(),
         sync_envelope: new_key(),
         audit: new_key(),
+        legacy_change_identity: None,
     }
 }
 
@@ -766,6 +838,27 @@ mod tests {
             .expect("parse the keyring vector")
     }
 
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct LegacyVector {
+        passphrase: String,
+        keyset_plaintext: String,
+        keys: std::collections::HashMap<String, String>,
+        legacy_change_identity: String,
+        slot: KeyringSlot,
+    }
+
+    fn legacy_vector() -> LegacyVector {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("test")
+            .join("fixtures")
+            .join("keyring-legacy-vector.json");
+        serde_json::from_slice(&fs::read(path).expect("read the legacy keyring vector"))
+            .expect("parse the legacy keyring vector")
+    }
+
     /// The same shape `readKeyringStatus` returns in `src/keyring-status.ts`,
     /// so the application and `vbrain keyring status` describe one vault the
     /// same way.
@@ -818,6 +911,82 @@ mod tests {
         assert!(file.slots.iter().any(|slot| slot.id == recovery_id));
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_re_wrap_carries_the_legacy_change_identity_key_across() {
+        let dir = std::env::temp_dir().join(format!("vbrain-legacy-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let mut keys = random_key_set();
+        let legacy = Zeroizing::new([0x5au8; KEY_LENGTH]);
+        keys.legacy_change_identity = Some(legacy.clone());
+        write(
+            &dir,
+            &KeyringFile {
+                version: KEYRING_VERSION,
+                slots: vec![wrap_key_set(&keys, "the original passphrase", 14).unwrap()],
+            },
+        )
+        .unwrap();
+
+        change_passphrase_locked(&dir, "the original passphrase", "a replacement passphrase")
+            .unwrap();
+
+        let after = read(&dir).unwrap().expect("a keyring on disk");
+        let opened = unwrap_keyring(&after, "a replacement passphrase").unwrap();
+        assert_eq!(
+            opened
+                .legacy_change_identity
+                .as_ref()
+                .map(|key| BASE64.encode(key.as_ref())),
+            Some(BASE64.encode(legacy.as_ref())),
+            "the legacy change identity key must survive a re-wrap"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_keyset_without_a_legacy_key_serializes_without_the_field() {
+        let keys = random_key_set();
+        assert!(keys.legacy_change_identity.is_none());
+        let plaintext = serialize_key_set(&keys).unwrap();
+        assert!(
+            !plaintext.contains("legacyChangeIdentity"),
+            "the field must be omitted, not written as null: {}",
+            *plaintext
+        );
+    }
+
+    #[test]
+    fn a_version_one_keyset_carrying_retiring_keys_is_refused() {
+        let keys = random_key_set();
+        let plaintext = serialize_key_set(&keys).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&plaintext).unwrap();
+        value["retiring"] = serde_json::json!({
+            "documents": BASE64.encode([0x07u8; KEY_LENGTH]),
+            "kv": BASE64.encode([0x08u8; KEY_LENGTH]),
+            "syncEnvelope": BASE64.encode([0x09u8; KEY_LENGTH]),
+        });
+        let error = parse_key_set(&serde_json::to_vec(&value).unwrap()).unwrap_err();
+        assert!(
+            error.contains("retiring"),
+            "the refusal must name what it refused: {error}"
+        );
+    }
+
+    #[test]
+    fn a_version_one_keyset_carrying_null_retiring_or_legacy_keys_is_refused() {
+        let keys = random_key_set();
+        let plaintext = serialize_key_set(&keys).unwrap();
+        for field in ["retiring", "legacyChangeIdentity"] {
+            let mut value: serde_json::Value = serde_json::from_str(&plaintext).unwrap();
+            value[field] = serde_json::Value::Null;
+            assert!(
+                parse_key_set(&serde_json::to_vec(&value).unwrap()).is_err(),
+                "a present {field} field must not accept null"
+            );
+        }
     }
 
     #[test]
@@ -1028,6 +1197,74 @@ mod tests {
         let vector = vector();
         let keys = unwrap_slot(&vector.slot, &vector.passphrase).unwrap();
         assert_eq!(*serialize_key_set(&keys).unwrap(), vector.keyset_plaintext);
+    }
+
+    #[test]
+    fn the_legacy_vector_round_trips_through_this_core_byte_for_byte() {
+        let vector = legacy_vector();
+        let keys = unwrap_slot(&vector.slot, &vector.passphrase).unwrap();
+        for (name, expected) in [
+            ("documents", &keys.documents),
+            ("kv", &keys.kv),
+            ("attachmentId", &keys.attachment_id),
+            ("syncChange", &keys.sync_change),
+            ("syncEnvelope", &keys.sync_envelope),
+            ("audit", &keys.audit),
+        ] {
+            assert_eq!(
+                BASE64.encode(expected.as_ref()),
+                vector.keys[name],
+                "key {name}"
+            );
+        }
+        assert_eq!(
+            BASE64.encode(
+                keys.legacy_change_identity
+                    .as_ref()
+                    .expect("the legacy change identity key")
+                    .as_ref()
+            ),
+            vector.legacy_change_identity
+        );
+        assert_eq!(*serialize_key_set(&keys).unwrap(), vector.keyset_plaintext);
+    }
+
+    #[test]
+    fn a_keyset_this_core_cannot_read_is_not_reported_as_a_wrong_passphrase() {
+        let vector = vector();
+        let keys = unwrap_slot(&vector.slot, &vector.passphrase).unwrap();
+        let mut slot = wrap_key_set(&keys, "a definitely correct passphrase", 14).unwrap();
+        let plaintext = serialize_key_set(&keys)
+            .unwrap()
+            .replace("{\"version\":1,", "{\"version\":2,");
+        let derived = derive_slot_key("a definitely correct passphrase", &slot.kdf).unwrap();
+        let aad = slot_aad(&slot).unwrap();
+        let iv = decode_base64(&slot.wrapped.iv, 12, 12, "iv").unwrap();
+        let mut buffer = Zeroizing::new(plaintext.as_bytes().to_vec());
+        let cipher = Aes256Gcm::new_from_slice(derived.as_ref()).unwrap();
+        let tag = cipher
+            .encrypt_in_place_detached(Nonce::from_slice(&iv), &aad, &mut buffer)
+            .unwrap();
+        slot.wrapped.auth_tag = BASE64.encode(tag);
+        slot.wrapped.ciphertext = BASE64.encode(&*buffer);
+
+        let error = unwrap_keyring(
+            &KeyringFile {
+                version: KEYRING_VERSION,
+                slots: vec![slot],
+            },
+            "a definitely correct passphrase",
+        )
+        .unwrap_err();
+
+        assert!(
+            !error.contains("wrong passphrase"),
+            "a keyset version failure must not be reported as a wrong passphrase: {error}"
+        );
+        assert!(
+            error.contains("vbrain rekey"),
+            "the message must name the command that finishes an interrupted re-key: {error}"
+        );
     }
 
     #[test]

@@ -7,7 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { appendAudit, verifyAudit } from "../dist/audit.js";
+import { appendAudit, readAudit, verifyAudit } from "../dist/audit.js";
 import { DocumentVault } from "../dist/documents.js";
 import {
   commitRekey,
@@ -18,6 +18,7 @@ import {
   planRekey,
   recoverRekey,
   rekeyVault,
+  resumeRekey,
   STAGING_DIRNAME,
   stageRekey,
   stagedTree,
@@ -65,12 +66,140 @@ function seedVault(passphrase = PASSPHRASE) {
   vault.put({ id: note.id, path: "Atlas/First.md", title: "First", body: "# First\n\nsecond revision" });
   const canvas = vault.putCanvas({ path: "Atlas/Board.canvas", title: "Board", nodes: [], edges: [] });
   const attachment = vault.putAttachment(Buffer.from("phase 7.4 attachment"), "note.bin");
+  // Keep the fixture's history while exercising the retention artifact in every re-key.
+  vault.setRetentionPolicy({ version: 1, keepRevisions: 5, keepDays: null });
   vault.lock();
   upsertEntry(dir, "health", "BLOOD_TYPE", "0 Rh+", "blood group", passphrase);
   saveGrants(dir, emptyGrantFile(), passphrase);
   appendAudit(dir, { actor: "cli-direct-write", file: "health", key: "BLOOD_TYPE" }, passphrase);
   return { dir, noteId: note.id, canvasId: canvas.id, attachmentId: attachment.id };
 }
+
+// Kills the mutation "do not record a re-key": the audit key is pinned, so
+// both sides of this pair must verify after the passphrase and keyset change.
+test("a re-key appends one secret-free pending/allowed audit pair", () => {
+  const { dir } = seedVault();
+  const next = "phase-77-audited-rekey-passphrase";
+
+  const report = rekeyVault(dir, PASSPHRASE, next);
+  assert.equal(report.passphraseChanged, true);
+
+  const events = readAudit(dir).filter((entry) => entry.actor === "cli-keyring");
+  assert.deepEqual(events.map((entry) => entry.outcome), ["pending", "allowed"]);
+  assert.equal(events[0].key, events[1].key, "one re-key operation must share one audit key");
+  assert.match(events[0].key, /^rekey:[0-9a-f-]{36}$/u);
+  assert.equal(events[0].file, "keyring");
+  const serialized = JSON.stringify(events);
+  assert.equal(serialized.includes(PASSPHRASE), false);
+  assert.equal(serialized.includes(next), false);
+  assert.equal(serialized.includes(dir), false);
+  assert.equal(verifyAudit(dir, next).valid, true);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// Kills the mutation "only write terminal audit outcomes": after credentials
+// and recovery validation, a safe refusal before commit closes its own pair.
+test("a safely refused re-key closes its audit pair as denied", () => {
+  const { dir } = seedVault();
+  fs.writeFileSync(path.join(dir, "unclassified.enc"), "not a vault artifact");
+
+  assert.throws(() => rekeyVault(dir, PASSPHRASE, "phase-77-denied-rekey-passphrase"), /cannot classify/u);
+
+  const events = readAudit(dir).filter((entry) => entry.key.startsWith("rekey:"));
+  assert.deepEqual(events.map((entry) => entry.outcome), ["pending", "denied"]);
+  assert.equal(events[0].key, events[1].key);
+  assert.equal(verifyAudit(dir, PASSPHRASE).valid, true);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// Kills the mutation "treat an interrupted install as a denial": once commit
+// has been attempted, the journal is the recovery authority, not a terminal
+// audit event that would claim the outcome is known.
+test("a post-commit interruption leaves its audit operation pending", () => {
+  const { dir } = seedVault();
+  const tree = stagedTree(dir);
+  const realRenameSync = fs.renameSync;
+  let installs = 0;
+  try {
+    fs.renameSync = (from, to, ...rest) => {
+      if (String(from).startsWith(tree) && !String(to).startsWith(tree) && ++installs > 1) {
+        throw new Error("EIO: simulated interrupted install");
+      }
+      return realRenameSync(from, to, ...rest);
+    };
+    assert.throws(() => rekeyVault(dir, PASSPHRASE, "phase-77-interrupted-rekey-passphrase"), /interrupted install/u);
+  } finally {
+    fs.renameSync = realRenameSync;
+  }
+
+  const events = readAudit(dir).filter((entry) => entry.key.startsWith("rekey:"));
+  assert.deepEqual(events.map((entry) => entry.outcome), ["pending"]);
+  assert.equal(fs.existsSync(journalPath(dir)), true);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// Kills the mutation "return success when the terminal audit append fails":
+// the data commit is durable, but callers must receive the audit failure and
+// no fabricated `allowed` or `denied` outcome may be added afterward.
+test("a failed allowed audit append prevents a re-key success report", () => {
+  const { dir } = seedVault();
+  const next = "phase-77-audit-write-failure-passphrase";
+  const auditPath = path.join(dir, "audit.log");
+  const realAppendFileSync = fs.appendFileSync;
+  let auditAppends = 0;
+  try {
+    fs.appendFileSync = (destination, data, options) => {
+      if (path.resolve(destination) === auditPath) {
+        auditAppends += 1;
+        if (auditAppends === 2) throw new Error("EIO: simulated audit append failure");
+      }
+      return realAppendFileSync(destination, data, options);
+    };
+    assert.throws(() => rekeyVault(dir, PASSPHRASE, next), /audit append failure/u);
+  } finally {
+    fs.appendFileSync = realAppendFileSync;
+  }
+
+  assert.equal(auditAppends, 2);
+  assert.deepEqual(readAudit(dir).filter((entry) => entry.key.startsWith("rekey:")).map((entry) => entry.outcome), ["pending"]);
+  forgetVaultKeys();
+  assert.ok(openVaultKeys(dir, next), "the committed vault must still open under the new passphrase");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("the walk classifies the retention policy, and a re-key preserves it", (t) => {
+  const { dir } = seedVault();
+  t.after(() => {
+    forgetVaultKeys();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const policyPath = path.join(dir, "documents", "retention.enc");
+  const before = fs.readFileSync(policyPath);
+  const entry = planRekey(dir).find((item) => item.path === "documents/retention.enc");
+  assert.deepEqual(entry, {
+    path: "documents/retention.enc",
+    kind: "document",
+    identity: "secondbrain-vault:retention-policy:v1",
+  });
+  const next = "phase-77-retention-passphrase";
+  rekeyVault(dir, PASSPHRASE, next);
+  forgetVaultKeys();
+  assert.notDeepEqual(fs.readFileSync(policyPath), before);
+  const vault = new DocumentVault(dir, next);
+  try {
+    assert.deepEqual(vault.getRetentionPolicy(), {
+      version: 1,
+      keepRevisions: 5,
+      keepDays: null,
+    });
+  } finally {
+    vault.lock();
+  }
+});
 
 test("the walk classifies every encrypted artifact with the AAD that wrote it", () => {
   const { dir, noteId, canvasId, attachmentId } = seedVault();
@@ -537,12 +666,16 @@ function pinnedKeySet(oldKeys) {
  */
 function assertVaultUnchanged(dir, before) {
   const after = hashVault(dir);
-  for (const [relative, hash] of Object.entries(before)) {
-    assert.equal(after[relative], hash, `${relative} must not have changed`);
+  const withoutAudit = (hashes) =>
+    Object.fromEntries(Object.entries(hashes).filter(([relative]) => relative !== "audit.log" && relative !== "audit.head.json"));
+  const beforeComparable = withoutAudit(before);
+  const afterComparable = withoutAudit(after);
+  for (const [relative, hash] of Object.entries(beforeComparable)) {
+    assert.equal(afterComparable[relative], hash, `${relative} must not have changed`);
   }
   assert.deepEqual(
-    Object.keys(after).sort(),
-    Object.keys(before).sort(),
+    Object.keys(afterComparable).sort(),
+    Object.keys(beforeComparable).sort(),
     "a refused stage must not add or remove a single file anywhere in the vault",
   );
   assert.equal(fs.existsSync(stagingRoot(dir)), false, "the staging tree must not survive a refused stage");
@@ -1245,6 +1378,45 @@ test("a vault with a recovery slot re-keys given a matching kit and code, and bo
   fs.rmSync(kitDir, { recursive: true, force: true });
 });
 
+// `commitRekey` can fail after the recovery kit is rewritten but before it
+// publishes keyring.json. The operation is still too uncertain to audit as
+// denied or destructively clean up, but byte-identical original keyring bytes
+// prove the kit/vault mismatch warning is truthful and must not be suppressed.
+test("a failed pre-publication commit still warns when its rewritten recovery kit no longer matches", () => {
+  const { dir } = seedVault();
+  const kitDir = fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-rekey-kit-"));
+  const kit = path.join(kitDir, "recovery-kit.json");
+  const created = createRecoveryKit(dir, PASSPHRASE, kit);
+  forgetVaultKeys();
+
+  const realRenameSync = fs.renameSync;
+  try {
+    fs.renameSync = (from, to, ...rest) => {
+      if (String(to) === path.join(dir, "keyring.json")) {
+        throw new Error("EIO: simulated keyring publication failure");
+      }
+      return realRenameSync(from, to, ...rest);
+    };
+    assert.throws(
+      () => rekeyVault(dir, PASSPHRASE, NEW_PASSPHRASE, { recovery: { kitPath: kit, code: created.recoveryCode } }),
+      /offline recovery kit was already rewritten/iu,
+    );
+  } finally {
+    fs.renameSync = realRenameSync;
+  }
+
+  forgetVaultKeys();
+  assert.ok(openVaultKeys(dir, PASSPHRASE), "the proven-original keyring must retain the current passphrase");
+  assert.equal(
+    readAudit(dir).filter((entry) => entry.key.startsWith("rekey:")).at(-1)?.outcome,
+    "pending",
+    "the rewritten-kit mismatch is not a safe audit denial",
+  );
+
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.rmSync(kitDir, { recursive: true, force: true });
+});
+
 test("a wrong recovery code and a mismatched kit are both refused, non-mutating", () => {
   const { dir } = seedVault();
   const kitDir = fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-rekey-kit-"));
@@ -1564,22 +1736,25 @@ test("legacyChangeIdentity set by a re-key survives a later passphrase change", 
 });
 
 // --- Merge finding: Important 6 — a failed settle write must not misreport a
-// successful re-key. The settle write is call number `items.length + 4`:
-// `withVaultLock`'s own record (1), one write per staged item, the journal,
-// and the commit-point keyring write, all before the settle write this test
-// fails.
+// successful re-key. Target the settled keyring payload itself so this test
+// does not depend on unrelated lock or audit bookkeeping write counts.
 test("a failed settle write reports the truth instead of a failure that did not happen", () => {
   const { dir } = seedVault();
-  const items = planRekey(dir);
-  const settleWriteNumber = items.length + 4;
-
   const realWriteFileSync = fs.writeFileSync;
-  let writes = 0;
+  let settleWriteSeen = false;
   let report;
   try {
     fs.writeFileSync = (destination, data, options) => {
-      writes += 1;
-      if (writes === settleWriteNumber) {
+      let parsed;
+      try {
+        parsed = typeof data === "string" ? JSON.parse(data) : undefined;
+      } catch {
+        parsed = undefined;
+      }
+      const isSettledKeyring = parsed?.version === 2 && Array.isArray(parsed.slots) &&
+        JSON.stringify(parsed).includes('"wrapped"') && !JSON.stringify(parsed).includes('"retiring"');
+      if (isSettledKeyring) {
+        settleWriteSeen = true;
         const full = new Error("ENOSPC: no space left on device, write");
         full.code = "ENOSPC";
         throw full;
@@ -1591,7 +1766,7 @@ test("a failed settle write reports the truth instead of a failure that did not 
     fs.writeFileSync = realWriteFileSync;
   }
 
-  assert.equal(writes, settleWriteNumber, "the injected failure must land on the settle write, not before it");
+  assert.equal(settleWriteSeen, true, "the injected failure must land on the settle write, not before it");
   assert.equal(report.settled, false, "a failed settle write must be visible in the report");
   assert.equal(report.passphraseChanged, true, "the re-key itself succeeded past the commit point");
   assert.equal(report.resumed, false);
@@ -1633,16 +1808,22 @@ test("a file that appears while the re-key stages refuses the commit instead of 
 
   const before = hashVault(dir);
   const realWriteFileSync = fs.writeFileSync;
-  let writes = 0;
+  let stagedWrites = 0;
   try {
-    // `withVaultLock` writes its own record first, then writeFileAtomic
-    // (src/fs-safe.ts) issues exactly one writeFileSync per staged artifact.
-    // So the last staged write is call number `items.length + 1` — after the
-    // walk that planned the run, and before the commit that would bless it.
+    // Count encrypted staged payloads rather than all writes: lock and audit
+    // bookkeeping are intentionally independent of this race test.
     fs.writeFileSync = (destination, data, options) => {
       const result = realWriteFileSync(destination, data, options);
-      writes += 1;
-      if (writes === items.length + 1) realWriteFileSync(racerPath, racerBytes);
+      let parsed;
+      try {
+        parsed = typeof data === "string" ? JSON.parse(data) : undefined;
+      } catch {
+        parsed = undefined;
+      }
+      if (parsed?.iv && parsed?.authTag && parsed?.ciphertext) {
+        stagedWrites += 1;
+        if (stagedWrites === items.length) realWriteFileSync(racerPath, racerBytes);
+      }
       return result;
     };
 
@@ -1651,7 +1832,7 @@ test("a file that appears while the re-key stages refuses the commit instead of 
     fs.writeFileSync = realWriteFileSync;
   }
 
-  assert.equal(writes, items.length + 1, "the racing file must land only after the whole tree is staged");
+  assert.equal(stagedWrites, items.length, "the racing file must land only after the whole tree is staged");
 
   // Nothing live moved, nothing was committed, and the old passphrase still
   // opens the vault — the racer is the only new file, and it is still sealed
@@ -1719,6 +1900,22 @@ test("a re-key finishes an interrupted one instead of starting over", () => {
   assert.equal(fs.existsSync(stagingRoot(dir)), false);
   forgetVaultKeys();
   assert.ok(openVaultKeys(dir, NEW_PASSPHRASE), "the interrupted re-key's passphrase must open the vault");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// Recovery is intentionally passphrase-free, and therefore cannot sign an
+// audit entry. It resolves the journal left by an earlier run without claiming
+// a new re-key operation of its own.
+test("resumeRekey finishes an interruption without adding an audit entry", () => {
+  const { dir } = seedVault();
+  const { journal, keyring } = preparedRekey(dir);
+  fs.writeFileSync(journalPath(dir), `${JSON.stringify(journal)}\n`);
+  writeKeyring(dir, keyring);
+  const before = readAudit(dir).filter((entry) => entry.actor === "cli-keyring");
+
+  assert.equal(resumeRekey(dir), "finished");
+  assert.deepEqual(readAudit(dir).filter((entry) => entry.actor === "cli-keyring"), before);
 
   fs.rmSync(dir, { recursive: true, force: true });
 });
