@@ -90,8 +90,9 @@ drops it again on completion. Every build that predates it — including the Rus
 core until it is taught the field — rejects an unrecognized keyset version and
 refuses the vault, which is exactly the required behaviour: a vault caught
 mid-re-key must not be opened by a reader that would report success and then
-fail to decrypt every object the interrupted run had not reached. `vbrain rekey
---resume` is the migration path out of it.
+fail to decrypt every object the interrupted run had not reached. Run `vbrain rekey`
+again: it detects the journal and finishes or rolls back the interrupted run
+without requesting a passphrase or rotating another set of keys.
 
 There is no manual, periodic, or automatic rotation schedule for anything in
 this document. The one place content keys change — sync epoch rotation — is
