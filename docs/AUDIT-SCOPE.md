@@ -30,7 +30,7 @@ about:
 | `src/keyring-passphrase.ts` | 169 | Passphrase change: re-wrapping the keyset without touching a single encrypted object. |
 | `src/keyring-migrate.ts` | 200 | One-way migration of a pre-keyring vault, including the manifest version tombstone. |
 | `src/passphrase.ts` | 124 | Passphrase acquisition: masked prompt, environment variable, OS credential store precedence. |
-| `src/keychain.ts` | 336 | OS credential store adapters (DPAPI, Keychain, libsecret). |
+| `src/keychain.ts` | 381 | OS credential store adapters (DPAPI, Keychain, libsecret). |
 | `src/crypto.ts` | 239 | Top-level vault envelope (`*.kv.enc`): key derivation, AEAD seal/open. |
 | `src/document-crypto.ts` | 164 | Document-vault key-derivation manifest and per-object encrypted payload shape. |
 | `src/sync.ts` | 3,455 | Change envelopes, device certificates/registry, freshness checkpoints, canonical JSON/base64, attachment snapshot validation, apply logic. |

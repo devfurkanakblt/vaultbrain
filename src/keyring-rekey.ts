@@ -22,7 +22,7 @@ import {
   encryptDocumentBytes,
   type DocumentPayload,
 } from "./document-crypto.js";
-import { writeFileAtomic } from "./fs-safe.js";
+import { replaceFileAtomic, writeFileAtomic } from "./fs-safe.js";
 import {
   DEFAULT_SCRYPT_N,
   KEYRING_VERSION,
@@ -537,7 +537,7 @@ export function installStaged(vaultDir: string, journal: RekeyJournal): void {
     if (!fs.existsSync(staged)) continue;
     const live = resolveInside(vaultDir, relative);
     fs.mkdirSync(path.dirname(live), { recursive: true, mode: 0o700 });
-    fs.renameSync(staged, live);
+    replaceFileAtomic(staged, live);
   }
 }
 

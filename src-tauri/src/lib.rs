@@ -944,13 +944,15 @@ fn reject_symlink(path: &Path) -> Result<(), String> {
     for component in path.ancestors() {
         if component.exists() {
             let metadata = fs::symlink_metadata(component).map_err(|error| error.to_string())?;
-            let mut link_like = metadata.file_type().is_symlink();
+            #[cfg(not(windows))]
+            let link_like = metadata.file_type().is_symlink();
             #[cfg(windows)]
-            {
+            let link_like = {
                 use std::os::windows::fs::MetadataExt;
                 use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
-                link_like |= metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
-            }
+                metadata.file_type().is_symlink()
+                    || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            };
             if link_like {
                 return Err(format!(
                     "refusing symbolic link or reparse point: {}",

@@ -124,7 +124,7 @@ export function saveVaultFile(
   entries: KVEntry[],
   passphrase: string
 ): void {
-  if (!fs.existsSync(vaultDir)) fs.mkdirSync(vaultDir, { recursive: true });
+  if (!fs.existsSync(vaultDir)) fs.mkdirSync(vaultDir, { recursive: true, mode: 0o700 });
   const filePath = vaultFilePath(vaultDir, name);
   const plaintext = serializeKV(entries);
   const key = kvKeyForWrite(vaultDir, passphrase);
