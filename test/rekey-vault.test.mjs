@@ -1736,34 +1736,28 @@ test("legacyChangeIdentity set by a re-key survives a later passphrase change", 
 });
 
 // --- Merge finding: Important 6 — a failed settle write must not misreport a
-// successful re-key. Target the settled keyring payload itself so this test
+// successful re-key. Target the second atomic keyring replacement so this test
 // does not depend on unrelated lock or audit bookkeeping write counts.
 test("a failed settle write reports the truth instead of a failure that did not happen", () => {
   const { dir } = seedVault();
-  const realWriteFileSync = fs.writeFileSync;
+  const realRenameSync = fs.renameSync;
+  let keyringReplacements = 0;
   let settleWriteSeen = false;
   let report;
   try {
-    fs.writeFileSync = (destination, data, options) => {
-      let parsed;
-      try {
-        parsed = typeof data === "string" ? JSON.parse(data) : undefined;
-      } catch {
-        parsed = undefined;
-      }
-      const isSettledKeyring = parsed?.version === 2 && Array.isArray(parsed.slots) &&
-        JSON.stringify(parsed).includes('"wrapped"') && !JSON.stringify(parsed).includes('"retiring"');
-      if (isSettledKeyring) {
+    fs.renameSync = (source, destination) => {
+      if (path.resolve(destination) === path.join(dir, "keyring.json")) keyringReplacements += 1;
+      if (path.resolve(destination) === path.join(dir, "keyring.json") && keyringReplacements === 2) {
         settleWriteSeen = true;
         const full = new Error("ENOSPC: no space left on device, write");
         full.code = "ENOSPC";
         throw full;
       }
-      return realWriteFileSync(destination, data, options);
+      return realRenameSync(source, destination);
     };
     report = rekeyVault(dir, PASSPHRASE, NEW_PASSPHRASE);
   } finally {
-    fs.writeFileSync = realWriteFileSync;
+    fs.renameSync = realRenameSync;
   }
 
   assert.equal(settleWriteSeen, true, "the injected failure must land on the settle write, not before it");
@@ -1807,29 +1801,23 @@ test("a file that appears while the re-key stages refuses the commit instead of 
   forgetVaultKeys();
 
   const before = hashVault(dir);
-  const realWriteFileSync = fs.writeFileSync;
+  const realRenameSync = fs.renameSync;
+  const stagedTargets = new Set(items.map((item) => path.resolve(stagedTree(dir), item.path)));
   let stagedWrites = 0;
   try {
-    // Count encrypted staged payloads rather than all writes: lock and audit
-    // bookkeeping are intentionally independent of this race test.
-    fs.writeFileSync = (destination, data, options) => {
-      const result = realWriteFileSync(destination, data, options);
-      let parsed;
-      try {
-        parsed = typeof data === "string" ? JSON.parse(data) : undefined;
-      } catch {
-        parsed = undefined;
-      }
-      if (parsed?.iv && parsed?.authTag && parsed?.ciphertext) {
+    // Count completed staging destinations, independent of payload encoding.
+    fs.renameSync = (source, destination) => {
+      const result = realRenameSync(source, destination);
+      if (stagedTargets.delete(path.resolve(destination))) {
         stagedWrites += 1;
-        if (stagedWrites === items.length) realWriteFileSync(racerPath, racerBytes);
+        if (stagedTargets.size === 0) fs.writeFileSync(racerPath, racerBytes);
       }
       return result;
     };
 
     assert.throws(() => rekeyVault(dir, PASSPHRASE, NEW_PASSPHRASE), /racer\.kv\.enc/u);
   } finally {
-    fs.writeFileSync = realWriteFileSync;
+    fs.renameSync = realRenameSync;
   }
 
   assert.equal(stagedWrites, items.length, "the racing file must land only after the whole tree is staged");
