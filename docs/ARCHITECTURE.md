@@ -536,8 +536,9 @@ decrypted index; every later operation on that session fails until a new one is
 opened with the passphrase. The CLI mirrors it: `vbrain unlock --remember`
 places the passphrase in the OS credential store, `vbrain lock` removes it.
 
-The credential backends are Windows DPAPI (through PowerShell, with the secret
-crossing on stdin rather than argv), macOS Keychain via `security`, and
+The credential backends are Windows DPAPI (through PowerShell's direct
+`ProtectedData` API, with the secret crossing on stdin rather than argv and
+legacy SecureString blobs remaining readable), macOS Keychain via `security`, and
 libsecret via `secret-tool`. The macOS writer uses `security -i` and sends a
 base64 representation through stdin under a versioned service name, keeping the
 passphrase out of argv while retaining lookup compatibility with old records.

@@ -42,6 +42,27 @@ export function readBufferFileLimited(filePath: string, maxBytes: number, label:
   return fs.readFileSync(filePath);
 }
 
+const WINDOWS_REPLACE_RETRY_CODES = new Set(["EACCES", "EBUSY", "EPERM"]);
+
+/**
+ * Antivirus and indexers can briefly hold a just-written file on Windows.
+ * Retry only those transient sharing violations; every other rename failure
+ * remains immediate, and the successful operation is still one atomic rename.
+ */
+export function replaceFileAtomic(source: string, destination: string): void {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      fs.renameSync(source, destination);
+      return;
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+      if (process.platform !== "win32" || !WINDOWS_REPLACE_RETRY_CODES.has(code) || attempt >= 7) throw error;
+      const delayMs = 10 * 2 ** attempt;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
+    }
+  }
+}
+
 /**
  * Write and fsync a sibling temporary file before replacing the destination.
  * A crash can therefore leave either the old complete file or the new complete
@@ -67,7 +88,7 @@ export function writeFileAtomic(
     fs.fsyncSync(fd);
     fs.closeSync(fd);
     fd = undefined;
-    fs.renameSync(tempPath, filePath);
+    replaceFileAtomic(tempPath, filePath);
   } finally {
     if (fd !== undefined) fs.closeSync(fd);
     if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);

@@ -23,6 +23,7 @@ import {
   commandAvailable,
   forgetPassphrase,
   keychain,
+  protectWindowsCredential,
   recallPassphrase,
   rememberPassphrase,
   run,
@@ -66,6 +67,20 @@ test("macOS Keychain writes keep the passphrase out of argv", () => {
   assert.ok(!invocation.input.includes(secret));
   assert.match(invocation.input, /^add-generic-password -U -a [a-f0-9]{32} -s secondbrain-vault-v2 -w /u);
   assert.match(invocation.input, new RegExp(`${Buffer.from(secret, "utf8").toString("base64")}\\n$`, "u"));
+});
+
+test("Windows DPAPI writes keep the passphrase out of argv and version the blob", () => {
+  const secret = "spaces, quotes ' \" and newlines\nstay off argv";
+  let invocation;
+  const protectedBlob = protectWindowsCredential(secret, (command, args, input) => {
+    invocation = { command, args, input };
+    return Buffer.from("protected fixture", "utf8").toString("base64");
+  });
+
+  assert.equal(invocation.command, "powershell");
+  assert.ok(!invocation.args.some((argument) => argument.includes(secret)));
+  assert.equal(invocation.input, secret);
+  assert.equal(protectedBlob, `dpapi-v2:${Buffer.from("protected fixture", "utf8").toString("base64")}`);
 });
 
 function tempDir(label = "passphrase") {
