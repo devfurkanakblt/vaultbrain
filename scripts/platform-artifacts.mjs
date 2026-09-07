@@ -135,7 +135,8 @@ function archiveApp(app, archive) {
   visit(app, path.basename(app));
   const entries = files.flatMap(({ archivePath, stat, type, linkName = "", contents }) => {
     const attributes = [];
-    if (Buffer.byteLength(archivePath) > 100) attributes.push(paxRecord("path", archivePath));
+    const needsPaxPath = Buffer.byteLength(archivePath) > 100;
+    if (needsPaxPath) attributes.push(paxRecord("path", archivePath));
     if (Buffer.byteLength(linkName) > 100) attributes.push(paxRecord("linkpath", linkName));
     const paxContents = Buffer.from(attributes.join(""), "utf8");
     const pax = attributes.length
@@ -148,7 +149,12 @@ function archiveApp(app, archive) {
     const padding = Buffer.alloc((512 - (contents.length % 512)) % 512);
     return [
       ...pax,
-      tarHeader(archivePath, stat, type, Buffer.byteLength(linkName) > 100 ? "" : linkName),
+      tarHeader(
+        needsPaxPath ? "PaxPayload" : archivePath,
+        stat,
+        type,
+        Buffer.byteLength(linkName) > 100 ? "" : linkName,
+      ),
       contents,
       padding,
     ];

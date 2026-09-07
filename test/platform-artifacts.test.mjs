@@ -143,3 +143,30 @@ test("the app archive retains explicit directories and a long nested path", () =
     fs.rmSync(bundleDir, { recursive: true, force: true });
   }
 });
+
+test("the app archive preserves a path longer than the USTAR 255-byte limit", () => {
+  const bundleDir = tempDir();
+  try {
+    writeMacArtifacts(bundleDir);
+    const segments = ["a".repeat(90), "b".repeat(90), "c".repeat(90)];
+    const nestedFile = path.join(
+      bundleDir,
+      "macos",
+      "Vault Brain.app",
+      "Contents",
+      "Resources",
+      ...segments,
+      "note.txt",
+    );
+    fs.mkdirSync(path.dirname(nestedFile), { recursive: true });
+    fs.writeFileSync(nestedFile, "PAX fixture");
+
+    run(["--platform", "macos", "--bundle-dir", bundleDir]);
+    const listing = execFileSync("tar", ["-tzf", path.join(bundleDir, "macos", "Vault Brain.app.tar.gz")], {
+      encoding: "utf8",
+    });
+    assert.match(listing, new RegExp(`Vault Brain\\.app/Contents/Resources/${segments.join("/")}/note\\.txt`, "u"));
+  } finally {
+    fs.rmSync(bundleDir, { recursive: true, force: true });
+  }
+});
