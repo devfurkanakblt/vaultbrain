@@ -14,8 +14,10 @@ import {
   openVaultKeys,
   randomKeySet,
   unwrapSlot,
+  unwrapSlotKeySet,
   wrapKeySet,
   writeKeyring,
+  zeroKeySet,
 } from "../dist/keyring.js";
 
 import { decrypt, decryptWithKey, encrypt, encryptWithKey, envelopeVersion } from "../dist/crypto.js";
@@ -36,6 +38,9 @@ const VECTOR = JSON.parse(
     path.resolve(FIXTURES, "keyring-vector.json"),
     "utf8",
   ),
+);
+const LEGACY_VECTOR = JSON.parse(
+  fs.readFileSync(path.resolve(FIXTURES, "keyring-legacy-vector.json"), "utf8"),
 );
 
 test("a wrapped keyset round-trips and records its own cost", () => {
@@ -535,6 +540,53 @@ test("the cross-core vector records the keyset plaintext in key order", () => {
   ]).toString("utf8");
 
   assert.equal(plaintext, VECTOR.keysetPlaintext);
+});
+
+test("the legacy cross-core vector unwraps to its recorded keys and legacy key", () => {
+  const opened = unwrapSlotKeySet(LEGACY_VECTOR.slot, LEGACY_VECTOR.passphrase);
+  try {
+    for (const name of KEY_NAMES) {
+      assert.deepEqual(opened.keys[name], Buffer.from(LEGACY_VECTOR.keys[name], "base64"), name);
+    }
+    assert.equal(opened.retiring, null, "a version 1 keyset carries no retiring keys");
+    assert.deepEqual(
+      opened.legacyChangeIdentity,
+      Buffer.from(LEGACY_VECTOR.legacyChangeIdentity, "base64"),
+    );
+  } finally {
+    zeroKeySet(opened.keys);
+    opened.legacyChangeIdentity?.fill(0);
+  }
+});
+
+test("the legacy cross-core vector records the plaintext the real serializer writes", () => {
+  const keys = {};
+  for (const name of KEY_NAMES) keys[name] = Buffer.from(LEGACY_VECTOR.keys[name], "base64");
+  const legacy = Buffer.from(LEGACY_VECTOR.legacyChangeIdentity, "base64");
+  const slot = wrapKeySet(keys, PASSPHRASE, undefined, null, legacy);
+
+  const kek = crypto.scryptSync(PASSPHRASE, Buffer.from(slot.kdf.salt, "base64"), 32, {
+    N: slot.kdf.N,
+    r: slot.kdf.r,
+    p: slot.kdf.p,
+    maxmem: 256 * 1024 * 1024,
+  });
+  const aad = JSON.stringify({
+    context: "secondbrain-vault:keyring-slot:v1",
+    version: 2,
+    id: slot.id,
+    type: slot.type,
+    kdf: { name: slot.kdf.name, N: slot.kdf.N, r: slot.kdf.r, p: slot.kdf.p, salt: slot.kdf.salt },
+  });
+  const decipher = crypto.createDecipheriv("aes-256-gcm", kek, Buffer.from(slot.wrapped.iv, "base64"));
+  decipher.setAAD(Buffer.from(aad, "utf8"));
+  decipher.setAuthTag(Buffer.from(slot.wrapped.authTag, "base64"));
+  const plaintext = Buffer.concat([
+    decipher.update(Buffer.from(slot.wrapped.ciphertext, "base64")),
+    decipher.final(),
+  ]).toString("utf8");
+
+  assert.equal(plaintext, LEGACY_VECTOR.keysetPlaintext);
 });
 
 test("the cross-core vector fails closed when its slot header is rewritten", () => {

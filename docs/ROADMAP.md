@@ -162,9 +162,21 @@ can be raised per vault. Design contract:
         (`REKEY_STALE_MS`), and until it expires or a person deletes
         `.sbrain.lock` by hand, every command that touches the vault refuses to
         run. `lock` and `keychain-status` are unaffected; neither takes the lock.
-  - [ ] An audit entry for `rekey`. `migrate` and `passphrase change` now append
-        to the chain; the command that replaces every key still appends nothing,
-        so "when were this vault's keys last replaced" has no answer.
+
+- [ ] 7.7 Re-key interoperability and recovery corrections
+  - [ ] Classify retention policies during re-key (Task 0).
+  - [ ] Preserve `legacyChangeIdentity` through Rust keyset re-wrapping (Task 1).
+  - [ ] Record authenticated re-key audit events (Task 2).
+  - [ ] Correct unsupported-keyset errors and recovery documentation (Task 3).
+  - [ ] Verify recovery kits against current and retiring keys (Task 4).
+
+Follow-up work outside the five corrections:
+
+- [ ] Phase 13: enforce encrypted-artifact inventory coverage against the format
+      catalogue, so adding a new artifact cannot silently omit re-key support.
+- [ ] Decide the ownership of the personal-memory modules under `src/memory/`:
+      schedule the remaining integration as a phase or remove the unused modules.
+      The current modules alone do not deliver the personal-memory plan.
 
 ## Phase 8 — Key management the desktop can reach
 

@@ -5,6 +5,16 @@ Versioning once the encrypted storage format reaches 1.0.
 
 ## Unreleased
 
+- Re-key now includes the encrypted retention policy and preserves its values.
+- The Rust core preserves the optional `legacyChangeIdentity` key when
+  re-wrapping a keyset. A second cross-core vector covers this format field.
+- Re-key records authenticated pending and success events, or a denial for a
+  safely refused operation. Interrupted operations can remain pending; passphrase-free
+  recovery does not append events because it has no signing key.
+- Recovery verification supports a kit carrying current and retiring keys.
+  Unsupported keysets have a distinct desktop error, and the format guide now
+  names `vbrain rekey` rather than the nonexistent `--resume` option.
+
 - `vbrain purge note|canvas|attachment` permanently removes an object and every
   archived revision of it. `docs remove` archives the outgoing revision before
   it unlinks, so a removed note's content stayed in the vault for its lifetime

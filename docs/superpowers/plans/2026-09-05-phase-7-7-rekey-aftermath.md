@@ -135,6 +135,12 @@ says so.
 
 ### Task 0: The re-key walk classifies `documents/retention.enc`
 
+Task 0 implemented: retention classification and ciphertext-preservation regression
+coverage added. All 90 targeted tests, typecheck and targeted lint pass. The full
+suite reports 385/387 passing: the baseline Windows credential-store PowerShell
+failure remains, plus an unchanged sync-epoch test constructs an invalid RegExp
+from random base64 data. Graphify was updated. Tasks 1–4 remain pending.
+
 **Why this runs before everything else:** Phase 10 added `documents/retention.enc`
 — a real encrypted artifact, sealed under the `documents` key with AAD
 `secondbrain-vault:retention-policy:v1`, catalogued in `src/format-version.ts`

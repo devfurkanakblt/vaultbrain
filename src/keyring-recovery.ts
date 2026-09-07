@@ -278,7 +278,7 @@ export function restoreVaultKeyring(
   try {
     let verifiedObjects: number;
     try {
-      verifiedObjects = verifyRecoveryKeySet(vaultDir, keys);
+      verifiedObjects = verifyRecoveryKeySet(vaultDir, keys, retiring);
     } catch {
       throw new Error("This recovery kit does not authenticate the selected vault.");
     }
