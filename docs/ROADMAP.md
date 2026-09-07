@@ -259,17 +259,18 @@ file per edit forever.
 
 ## Phase 11 — macOS and Linux
 
-The desktop bundles only `msi` and `nsis`, the Rust job runs only on
-`windows-latest`, and `docs/AUDIT-SCOPE.md` records as an accepted risk that
-only the Windows credential-store path is exercised by tests. The macOS and
-Linux keychain backends are written but unproven.
+CI builds and validates native Windows, macOS and Linux bundles, and runs both
+the TypeScript durability suite and Rust suite across their supported hosts.
+Native credential-store smoke tests exercise full DPAPI, Keychain and libsecret
+round trips without placing the passphrase in a child process argument vector.
 
-- [ ] Bundle and test the desktop application on macOS and Linux.
-- [ ] Run the Rust suite on all three platforms in CI, and exercise the
+- [x] Bundle and test the desktop application on macOS and Linux.
+- [x] Run the Rust suite on all three platforms in CI, and exercise the
       `security` and `secret-tool` keychain backends where they are real.
-- [ ] Verify path handling, permissions and atomic replacement per platform.
+- [x] Verify path handling, permissions and atomic replacement per platform.
       The vault's durability guarantees are filesystem-specific and are
-      currently demonstrated on one filesystem only.
+      exercised by the native Node and Rust jobs rather than inferred from one
+      development filesystem.
 
 ## Phase 12 — Actually shipping
 

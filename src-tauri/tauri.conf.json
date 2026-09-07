@@ -32,7 +32,6 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["msi", "nsis"],
     "category": "Productivity",
     "shortDescription": "Local-first encrypted knowledge workspace",
     "longDescription": "A local-first encrypted Markdown knowledge workspace with narrow, auditable AI access.",

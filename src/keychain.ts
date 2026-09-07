@@ -6,9 +6,12 @@ import path from "node:path";
 import { readTextFileLimited } from "./fs-safe.js";
 
 const SERVICE = "secondbrain-vault";
+const MACOS_SERVICE = "secondbrain-vault-v2";
 
 export interface KeychainBackend {
   readonly name: string;
+  /** False when this build can only read and remove credentials written previously. */
+  readonly writable?: boolean;
   available(): boolean;
   store(account: string, secret: string): void;
   lookup(account: string): string | undefined;
@@ -23,10 +26,9 @@ export function accountFor(vaultDir: string): string {
 /**
  * Every backend call goes through here, so this is the one place that has to
  * keep a failing command from leaking its arguments. `execFileSync` builds
- * its failure message as "Command failed: <file> <args joined>", and more
- * than one backend passes a secret as an argv element (notably macOS'
- * `security -w <secret>`) — so on failure the message is replaced with one
- * that names only the command and its exit status, never the arguments.
+ * its failure message as "Command failed: <file> <args joined>". A future
+ * backend must never turn its arguments into an accidental disclosure, so the
+ * message is replaced with one that names only the command and its exit status.
  *
  * Exported only so tests can drive this sanitisation directly with a
  * guaranteed-to-fail command; no backend call site needs the export.
@@ -47,11 +49,10 @@ export function run(command: string, args: string[], input?: string): string {
     const signal = record && "signal" in record ? (record.signal as string | null | undefined) : undefined;
     const statusText = status === undefined || status === null ? "unknown" : String(status);
     const codeText = code === undefined || code === null ? "" : ` [${code}]`;
-    // `execFileSync`'s own error carries `spawnargs`, which on some backends
-    // (macOS' `security -w <secret>`) is the secret itself. Node's default
-    // inspection of a thrown error prints `.cause` too, so attaching the raw
-    // error as `cause` would leak the secret the moment anyone lets this
-    // propagate to a default handler or logs `util.inspect(error)` — the
+    // `execFileSync`'s own error carries `spawnargs`. Node's default inspection
+    // of a thrown error prints `.cause` too, so attaching the raw error as
+    // `cause` could leak sensitive arguments when anyone lets this propagate
+    // to a default handler or logs `util.inspect(error)` — the
     // sanitised `.message` alone is not enough of a guarantee. Attach only a
     // scrubbed cause carrying the diagnostic fields that cannot themselves
     // contain arguments, so `preserve-caught-error` stays satisfied without
@@ -70,6 +71,29 @@ function canRun(command: string, args: string[]): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Some command-line tools use a non-zero status for their help/usage screen.
+ * Availability only cares whether the executable started, not what that probe
+ * chose to return after it started.
+ */
+export function commandAvailable(
+  command: string,
+  args: string[] = [],
+  execute: typeof execFileSync = execFileSync,
+): boolean {
+  try {
+    execute(command, args, {
+      stdio: "ignore",
+      windowsHide: true,
+      timeout: 20_000,
+    });
+    return true;
+  } catch (error) {
+    const record = error && typeof error === "object" ? (error as Record<string, unknown>) : undefined;
+    return typeof record?.status === "number" || typeof record?.signal === "string";
   }
 }
 
@@ -141,40 +165,73 @@ const windowsBackend: KeychainBackend = {
   },
 };
 
+/** Store through security's interactive stdin, never through its argv. */
+export function storeMacosCredential(account: string, secret: string, execute: typeof run = run): void {
+  if (!/^[0-9a-f]{32}$/u.test(account)) throw new Error("Invalid macOS Keychain account.");
+  const encoded = Buffer.from(secret, "utf8").toString("base64");
+  execute("security", ["-i"], `add-generic-password -U -a ${account} -s ${MACOS_SERVICE} -w ${encoded}\n`);
+}
+
+function decodeMacosCredential(encoded: string): string | undefined {
+  const canonical = encoded.replace(/\r?\n$/u, "");
+  try {
+    const decoded = Buffer.from(canonical, "base64");
+    if (decoded.toString("base64") !== canonical) return undefined;
+    return decoded.toString("utf8");
+  } catch {
+    return undefined;
+  }
+}
+
 /**
- * macOS Keychain lookup remains available for credentials written by older
- * releases. New writes fail closed until a native binding can pass the secret
- * without exposing it in the child process argument vector.
+ * macOS stores new credentials under a versioned service as base64 text. The
+ * fixed interactive command receives that text on stdin, keeping the user's
+ * passphrase out of the child process argument vector. Lookup still falls back
+ * to the original service so credentials written by older releases keep working.
  */
 const darwinBackend: KeychainBackend = {
   name: "macos-keychain",
-  available: () => process.platform === "darwin" && canRun("security", ["-h"]),
-  store(_account, _secret) {
-    throw new Error(
-      "Remembering new passphrases on macOS is disabled until secure native Keychain input is available."
-    );
+  available: () => process.platform === "darwin" && commandAvailable("security", ["-h"]),
+  store(account, secret) {
+    storeMacosCredential(account, secret);
   },
   lookup(account) {
     try {
-      return run("security", ["find-generic-password", "-a", account, "-s", SERVICE, "-w"]).replace(/\n$/u, "");
+      const decoded = decodeMacosCredential(
+        run("security", ["find-generic-password", "-a", account, "-s", MACOS_SERVICE, "-w"]),
+      );
+      if (decoded !== undefined) return decoded;
+    } catch {
+      // Fall through to the service name used before stdin-safe writes.
+    }
+    try {
+      return run("security", ["find-generic-password", "-a", account, "-s", SERVICE, "-w"]).replace(/\r?\n$/u, "");
     } catch {
       return undefined;
     }
   },
   forget(account) {
+    let removed = false;
+    try {
+      run("security", ["delete-generic-password", "-a", account, "-s", MACOS_SERVICE]);
+      removed = true;
+    } catch {
+      // A missing versioned item is expected for credentials from older releases.
+    }
     try {
       run("security", ["delete-generic-password", "-a", account, "-s", SERVICE]);
-      return true;
+      removed = true;
     } catch {
-      return false;
+      // A missing legacy item is expected for credentials written by this release.
     }
+    return removed;
   },
 };
 
 /** Linux: libsecret via secret-tool, which reads the secret from stdin. */
 const linuxBackend: KeychainBackend = {
   name: "libsecret",
-  available: () => process.platform === "linux" && canRun("secret-tool", ["--version"]),
+  available: () => process.platform === "linux" && commandAvailable("secret-tool"),
   store(account, secret) {
     run("secret-tool", ["store", "--label=Vault Brain", "service", SERVICE, "account", account], secret);
   },
@@ -197,6 +254,7 @@ const linuxBackend: KeychainBackend = {
 
 const unavailableBackend: KeychainBackend = {
   name: "none",
+  writable: false,
   available: () => false,
   store() {
     throw new Error("No OS credential store is available on this system.");
@@ -244,10 +302,9 @@ export function forgetPassphrase(vaultDir: string): boolean {
  * caller must not report failure for an operation that completed.
  *
  * The failure `error`, if any, is always a short fixed description — never the
- * raw error from the backend. On some backends (notably macOS, which passes
- * the secret as an argv element to `security`) `execFileSync`'s failure
- * message embeds the full command line, which would put the new passphrase in
- * cleartext into logs or a terminal. When the update cannot complete, the
+ * raw error from the backend. `execFileSync`'s failure message embeds the full
+ * command line, so forwarding one unchanged could put sensitive metadata in
+ * logs or a terminal. When the update cannot complete, the
  * stale credential is forgotten instead of left behind, since a stale
  * credential makes every later command fail against the *old* passphrase with
  * no indication why; `cleared` reports whether that forget succeeded.
