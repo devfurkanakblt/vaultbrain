@@ -20,12 +20,14 @@ import {
 } from "../dist/keyring.js";
 import {
   accountFor,
+  commandAvailable,
   forgetPassphrase,
   keychain,
   recallPassphrase,
   rememberPassphrase,
   run,
   setKeychainBackend,
+  storeMacosCredential,
   updateRememberedPassphrase,
 } from "../dist/keychain.js";
 import { changeVaultPassphrase } from "../dist/keyring-passphrase.js";
@@ -33,6 +35,38 @@ import { loadVaultFile, upsertEntry } from "../dist/store.js";
 
 const PASSPHRASE = "phase-73-current-passphrase";
 const NEW_PASSPHRASE = "phase-73-replacement-passphrase";
+
+test("command availability accepts an installed utility whose usage exits non-zero", () => {
+  assert.equal(
+    commandAvailable("secret-tool", [], () => {
+      throw Object.assign(new Error("usage"), { status: 2 });
+    }),
+    true,
+  );
+  assert.equal(
+    commandAvailable("missing", [], () => {
+      throw Object.assign(new Error("missing"), { code: "ENOENT" });
+    }),
+    false,
+  );
+});
+
+test("macOS Keychain writes keep the passphrase out of argv", () => {
+  const account = "a".repeat(32);
+  const secret = "spaces, quotes ' \" and newlines\nstay off argv";
+  let invocation;
+  storeMacosCredential(account, secret, (command, args, input) => {
+    invocation = { command, args, input };
+    return "";
+  });
+
+  assert.equal(invocation.command, "security");
+  assert.deepEqual(invocation.args, ["-i"]);
+  assert.ok(!invocation.args.some((argument) => argument.includes(secret)));
+  assert.ok(!invocation.input.includes(secret));
+  assert.match(invocation.input, /^add-generic-password -U -a [a-f0-9]{32} -s secondbrain-vault-v2 -w /u);
+  assert.match(invocation.input, new RegExp(`${Buffer.from(secret, "utf8").toString("base64")}\\n$`, "u"));
+});
 
 function tempDir(label = "passphrase") {
   return fs.mkdtempSync(path.join(os.tmpdir(), `vault-brain-${label}-`));
@@ -169,11 +203,7 @@ test("a slot the current passphrase cannot open is preserved untouched", () => {
   ]);
   const slots = readSlots(dir);
   assert.equal(slots.length, 2, "no slot may be dropped or added");
-  assert.deepEqual(
-    slots[1],
-    recovery,
-    "the foreign slot must survive byte for byte, still at its original index",
-  );
+  assert.deepEqual(slots[1], recovery, "the foreign slot must survive byte for byte, still at its original index");
   forgetVaultKeys();
   assert.ok(openVaultKeys(dir, "recovery-slot-passphrase"));
 
@@ -185,14 +215,8 @@ test("every refusal leaves keyring.json byte-identical", () => {
   const before = fs.readFileSync(path.join(dir, "keyring.json"));
 
   assert.throws(() => changeVaultPassphrase(dir, PASSPHRASE, "short"), /at least 12 characters/iu);
-  assert.throws(
-    () => changeVaultPassphrase(dir, PASSPHRASE, PASSPHRASE),
-    /same as the current one/iu,
-  );
-  assert.throws(
-    () => changeVaultPassphrase(dir, "wrong-current-passphrase", NEW_PASSPHRASE),
-    /wrong passphrase/iu,
-  );
+  assert.throws(() => changeVaultPassphrase(dir, PASSPHRASE, PASSPHRASE), /same as the current one/iu);
+  assert.throws(() => changeVaultPassphrase(dir, "wrong-current-passphrase", NEW_PASSPHRASE), /wrong passphrase/iu);
 
   assert.deepEqual(fs.readFileSync(path.join(dir, "keyring.json")), before);
   fs.rmSync(dir, { recursive: true, force: true });
@@ -227,10 +251,7 @@ test("--allow-same-passphrase re-wraps at the current cost without changing the 
 test("an 11-character new passphrase is refused and a 12-character one is accepted", () => {
   const { dir } = seedVault();
 
-  assert.throws(
-    () => changeVaultPassphrase(dir, PASSPHRASE, "a".repeat(11)),
-    /at least 12 characters/iu,
-  );
+  assert.throws(() => changeVaultPassphrase(dir, PASSPHRASE, "a".repeat(11)), /at least 12 characters/iu);
 
   const report = changeVaultPassphrase(dir, PASSPHRASE, "b".repeat(12));
   assert.equal(report.slotsRewritten, 1);
@@ -250,10 +271,7 @@ test("two slots that both open under the current passphrase but carry different 
   });
   const before = fs.readFileSync(path.join(dir, "keyring.json"));
 
-  assert.throws(
-    () => changeVaultPassphrase(dir, PASSPHRASE, NEW_PASSPHRASE),
-    /different keyset/iu,
-  );
+  assert.throws(() => changeVaultPassphrase(dir, PASSPHRASE, NEW_PASSPHRASE), /different keyset/iu);
   assert.deepEqual(
     fs.readFileSync(path.join(dir, "keyring.json")),
     before,
@@ -329,10 +347,7 @@ test("a store that refuses the write is reported rather than thrown, and never l
     assert.ok(result.error, "a failure must be reported");
     for (const value of Object.values(result)) {
       if (typeof value === "string") {
-        assert.ok(
-          !value.includes(NEW_PASSPHRASE),
-          `field must not contain the passphrase: ${value}`,
-        );
+        assert.ok(!value.includes(NEW_PASSPHRASE), `field must not contain the passphrase: ${value}`);
       }
     }
   } finally {
@@ -473,8 +488,17 @@ test("the CLI refuses a short new passphrase and leaves the vault alone", () => 
 });
 
 test("the CLI never takes the current passphrase from the OS credential store", (t) => {
-  if (!keychain().available()) {
-    t.skip("no OS credential store is available on this machine");
+  const originalLocalAppData = process.env.LOCALAPPDATA;
+  const isolatedLocalAppData =
+    process.platform === "win32" ? fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-local-app-data-")) : undefined;
+  if (isolatedLocalAppData) process.env.LOCALAPPDATA = isolatedLocalAppData;
+
+  const backend = keychain();
+  if (!backend.available() || backend.writable === false) {
+    if (originalLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+    else process.env.LOCALAPPDATA = originalLocalAppData;
+    if (isolatedLocalAppData) fs.rmSync(isolatedLocalAppData, { recursive: true, force: true });
+    t.skip("no writable OS credential store is available on this machine");
     return;
   }
 
@@ -503,6 +527,9 @@ test("the CLI never takes the current passphrase from the OS credential store", 
   } finally {
     forgetPassphrase(dir);
     fs.rmSync(dir, { recursive: true, force: true });
+    if (originalLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+    else process.env.LOCALAPPDATA = originalLocalAppData;
+    if (isolatedLocalAppData) fs.rmSync(isolatedLocalAppData, { recursive: true, force: true });
   }
 });
 

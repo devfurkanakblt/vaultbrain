@@ -6,6 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { readWindowsInstallerDetails } from "../scripts/platform-artifacts.mjs";
+
 const root = path.resolve(import.meta.dirname, "..");
 const script = path.join(root, "scripts", "platform-artifacts.mjs");
 
@@ -42,6 +44,22 @@ function run(args, options = {}) {
     ...options,
   });
 }
+
+test("passes an MSI path to PowerShell over stdin instead of the command line", () => {
+  const msi = String.raw`C:\Masaüstü\build output\Vault Brain_0.2.0_x64_en-US.msi`;
+  let invocation;
+  const details = readWindowsInstallerDetails(msi, (command, args, options) => {
+    invocation = { command, args, options };
+    return JSON.stringify({ name: "Vault Brain", version: "0.2.0", template: "x64;1033" });
+  });
+
+  assert.deepEqual(details, { name: "Vault Brain", version: "0.2.0", template: "x64;1033" });
+  assert.equal(invocation.command, "powershell");
+  assert.equal(invocation.options.input, msi);
+  assert.ok(!invocation.args.includes(msi), "the MSI path must not be re-parsed as a PowerShell argument");
+  assert.match(invocation.args.at(-1), /InputEncoding=\[Text\.UTF8Encoding\]/u);
+  assert.match(invocation.args.at(-1), /In\.ReadToEnd/u);
+});
 
 test("fails when the selected platform's required artifact is absent", () => {
   const bundleDir = tempDir();

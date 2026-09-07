@@ -28,9 +28,19 @@ function tempDir(label = "durability") {
   return fs.mkdtempSync(path.join(os.tmpdir(), `vault-brain-${label}-`));
 }
 
+function copyTree(from, to) {
+  fs.mkdirSync(to, { recursive: true });
+  for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
+    const source = path.join(from, entry.name);
+    const destination = path.join(to, entry.name);
+    if (entry.isDirectory()) copyTree(source, destination);
+    else fs.copyFileSync(source, destination);
+  }
+}
+
 function copyFixture(name) {
   const target = tempDir(name);
-  fs.cpSync(path.join(FIXTURES, name), target, { recursive: true });
+  copyTree(path.join(FIXTURES, name), target);
   return target;
 }
 
@@ -230,24 +240,18 @@ test("a second writer is refused while a live lock is held, and reclaims a stale
     (error) => error instanceof VaultBusyError && /being written by process 999999/u.test(error.message),
   );
 
-  fs.writeFileSync(
-    lockPath,
-    foreign(new Date(Date.now() - 120_000).toISOString(), process.pid)
-  );
+  fs.writeFileSync(lockPath, foreign(new Date(Date.now() - 120_000).toISOString(), process.pid));
   assert.throws(
     () => vault.put({ path: "Notes/StillLocked.md", body: "# Still locked" }),
     /being written by process/u,
-    "an old lock owned by a live PID must never be reclaimed"
+    "an old lock owned by a live PID must never be reclaimed",
   );
 
-  fs.writeFileSync(
-    lockPath,
-    foreign(new Date(Date.now() - 120_000).toISOString(), 999_999, "remote-host")
-  );
+  fs.writeFileSync(lockPath, foreign(new Date(Date.now() - 120_000).toISOString(), 999_999, "remote-host"));
   assert.throws(
     () => vault.put({ path: "Notes/Remote.md", body: "# Remote" }),
     /being written by process/u,
-    "a remote-host lock needs explicit recovery because its liveness is unknown"
+    "a remote-host lock needs explicit recovery because its liveness is unknown",
   );
 
   // A lock left behind by a crashed process must not wedge the vault forever.

@@ -81,6 +81,23 @@ test("encrypted storage writes atomically and schema never contains values", () 
   );
 });
 
+test("atomic vault writes preserve Unicode paths and private modes on the host filesystem", () => {
+  const root = tempVault();
+  const vault = path.join(root, "Masaüstü vault space");
+  upsertEntry(vault, "health", "PRIVATE_NOTE", "complete replacement", "path test", PASSPHRASE);
+
+  const encrypted = vaultFilePath(vault, "health");
+  assert.equal(loadVaultFile(vault, "health", PASSPHRASE)[0].value, "complete replacement");
+  assert.deepEqual(
+    fs.readdirSync(vault).filter((name) => name.endsWith(".tmp")),
+    [],
+  );
+  if (process.platform !== "win32") {
+    assert.equal(fs.statSync(vault).mode & 0o777, 0o700);
+    assert.equal(fs.statSync(encrypted).mode & 0o777, 0o600);
+  }
+});
+
 test("date-only upper bounds include the complete UTC day", () => {
   const schema = {
     generatedAt: new Date().toISOString(),

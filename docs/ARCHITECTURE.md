@@ -538,11 +538,12 @@ places the passphrase in the OS credential store, `vbrain lock` removes it.
 
 The credential backends are Windows DPAPI (through PowerShell, with the secret
 crossing on stdin rather than argv), macOS Keychain via `security`, and
-libsecret via `secret-tool`. Only the Windows backend is exercised by the test
-suite, and `security` takes the secret as a command-line argument, which is
-briefly visible to that user's own processes. All three protect the secret from
-other users and other machines; none protects it from code already running as
-the user.
+libsecret via `secret-tool`. The macOS writer uses `security -i` and sends a
+base64 representation through stdin under a versioned service name, keeping the
+passphrase out of argv while retaining lookup compatibility with old records.
+CI exercises store, lookup and deletion on all three native hosts. All three
+protect a stored secret from other users and other machines; none protects it
+from code already running as the user.
 
 ## Current desktop slice
 

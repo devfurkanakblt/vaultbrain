@@ -239,6 +239,21 @@ function validateMacos(bundleDir, outputDir, expected) {
   ];
 }
 
+export function readWindowsInstallerDetails(msi, execute = execFileSync) {
+  return JSON.parse(
+    execute(
+      "powershell",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "[Console]::InputEncoding=[Text.UTF8Encoding]::new($false); $p=[Console]::In.ReadToEnd(); $i=New-Object -ComObject WindowsInstaller.Installer; $d=$i.OpenDatabase($p,0); $v=@{}; 'ProductName','ProductVersion'|%{$q=$d.OpenView(\"SELECT `Value` FROM `Property` WHERE `Property`='$_'\");$q.Execute();$r=$q.Fetch();$v[$_]=$r.StringData(1)}; $s=$d.SummaryInformation(0); @{name=$v.ProductName;version=$v.ProductVersion;template=$s.Property(7)}|ConvertTo-Json -Compress",
+      ],
+      { encoding: "utf8", input: msi },
+    ),
+  );
+}
+
 function validateWindows(bundleDir, expected, installedExecutable) {
   const msi = exactlyOne(
     matchingFiles(path.join(bundleDir, "msi"), (name) => name.endsWith(".msi")),
@@ -251,19 +266,7 @@ function validateWindows(bundleDir, expected, installedExecutable) {
   const bootstrapArchitecture = peArchitecture(nsis);
   if (bootstrapArchitecture !== "x86" && bootstrapArchitecture !== "x64")
     throw new Error(`Windows NSIS bootstrap architecture is unsupported: ${bootstrapArchitecture}`);
-  const details = JSON.parse(
-    execFileSync(
-      "powershell",
-      [
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        "param($p) $i=New-Object -ComObject WindowsInstaller.Installer; $d=$i.OpenDatabase($p,0); $v=@{}; 'ProductName','ProductVersion'|%{$q=$d.OpenView(\"SELECT `Value` FROM `Property` WHERE `Property`='$_'\");$q.Execute();$r=$q.Fetch();$v[$_]=$r.StringData(1)}; $s=$d.SummaryInformation(0); @{name=$v.ProductName;version=$v.ProductVersion;template=$s.Property(7)}|ConvertTo-Json -Compress",
-        msi,
-      ],
-      { encoding: "utf8" },
-    ),
-  );
+  const details = readWindowsInstallerDetails(msi);
   if (details.name !== expected.productName)
     throw new Error(
       `Windows identifier mismatch: expected ${expected.productName}, found ${details.name ?? "missing"}`,
@@ -370,9 +373,11 @@ function main() {
   );
 }
 
-try {
-  main();
-} catch (error) {
-  process.stderr.write(`${error.message}\n`);
-  process.exitCode = 1;
+if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
+  try {
+    main();
+  } catch (error) {
+    process.stderr.write(`${error.message}\n`);
+    process.exitCode = 1;
+  }
 }

@@ -442,7 +442,7 @@ npm run desktop:dev
 # Full native application against encrypted vault files
 npm run tauri:dev
 
-# Produce signed-ready MSI and NSIS installer artifacts
+# Produce native host bundles (MSI/NSIS, app/DMG, or deb)
 npm run tauri:build
 
 # Faster local release check without installer generation
@@ -794,10 +794,12 @@ cost scales with the number of _keys_, not the size of your notes.
   decrypts a value, it's plaintext in that process's memory / stdout — treat
   it like any other secret in a terminal.
 - The passphrase prompt is masked on a real terminal, and `vbrain unlock
---remember` can hand the passphrase to the OS credential store instead
-  (Windows DPAPI, macOS Keychain, libsecret on Linux). Only the Windows path is
-  exercised by this project's tests, because that is the platform it is
-  developed on. An OS credential store protects the secret from other users and
+  --remember` can hand the passphrase to Windows DPAPI, macOS Keychain, or
+  libsecret on Linux. The macOS backend sends a base64 representation through
+  `security -i` on stdin under a versioned service name, so the passphrase never
+  appears in the child process argument vector; lookup remains compatible with
+  older records. CI exercises a full store/lookup/delete cycle on every host OS.
+  An OS credential store protects the secret from other users and
   other machines — not from code already running as you.
 - `VBRAIN_PASSPHRASE` still wins over both, which is what makes scripts and MCP
   work; an environment variable is visible to your own processes, so prefer the

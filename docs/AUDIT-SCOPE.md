@@ -30,7 +30,7 @@ about:
 | `src/keyring-passphrase.ts` | 169 | Passphrase change: re-wrapping the keyset without touching a single encrypted object. |
 | `src/keyring-migrate.ts` | 200 | One-way migration of a pre-keyring vault, including the manifest version tombstone. |
 | `src/passphrase.ts` | 124 | Passphrase acquisition: masked prompt, environment variable, OS credential store precedence. |
-| `src/keychain.ts` | 279 | OS credential store adapters (DPAPI, Keychain, libsecret). |
+| `src/keychain.ts` | 336 | OS credential store adapters (DPAPI, Keychain, libsecret). |
 | `src/crypto.ts` | 239 | Top-level vault envelope (`*.kv.enc`): key derivation, AEAD seal/open. |
 | `src/document-crypto.ts` | 164 | Document-vault key-derivation manifest and per-object encrypted payload shape. |
 | `src/sync.ts` | 3,455 | Change envelopes, device certificates/registry, freshness checkpoints, canonical JSON/base64, attachment snapshot validation, apply logic. |
@@ -165,10 +165,11 @@ weaknesses is worse than no scope document:
   is everything sealed afterward. This is by design, not an oversight, but
   it means revocation is not equivalent to retroactively erasing a departed
   device's access to history.
-- **Only the Windows credential-store path is exercised by tests.** `vbrain
-  unlock --remember` can hand the passphrase to macOS Keychain or libsecret
-  on Linux, but this project's test suite runs on and validates only the
-  Windows DPAPI path.
+- **Native credential stores inherit the logged-in user's trust boundary.** CI
+  exercises real Windows DPAPI, macOS Keychain and Linux libsecret
+  store/lookup/delete cycles. Secrets cross child-process boundaries on stdin,
+  not argv. These stores protect against another user or machine, not code
+  already executing as the logged-in user.
 - **Attachment bytes now travel outside the change envelope, and the relay
   keeps them forever.** The former ceiling — `MAX_SYNC_ATTACHMENT_BYTES` =
   6,242,304 raw bytes, imposed because a whole attachment had to fit base64

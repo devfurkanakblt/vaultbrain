@@ -21,6 +21,16 @@ const FIXTURE_PASSPHRASE = "fixture-only-passphrase";
 const OWNER = "11111111-1111-4111-8111-111111111111";
 const REVOKED = "22222222-2222-4222-8222-222222222222";
 
+function copyTree(from, to) {
+  fs.mkdirSync(to, { recursive: true });
+  for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
+    const source = path.join(from, entry.name);
+    const destination = path.join(to, entry.name);
+    if (entry.isDirectory()) copyTree(source, destination);
+    else fs.copyFileSync(source, destination);
+  }
+}
+
 test("the format version surface is frozen and complete", () => {
   assert.equal(VAULT_FORMAT_VERSION, "1.0");
 
@@ -180,7 +190,7 @@ test("the committed attachment blob fixture pins the version 3 manifest body", (
 test("a second device reassembles the committed attachment from its staged blobs", () => {
   const targetDir = fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-blob-fixture-"));
   fs.rmSync(targetDir, { recursive: true, force: true });
-  fs.cpSync(path.join(BLOBS_FIXTURE, "target"), targetDir, { recursive: true });
+  copyTree(path.join(BLOBS_FIXTURE, "target"), targetDir);
   const sourceDir = path.join(BLOBS_FIXTURE, "source");
 
   const source = new SyncChangeLog(sourceDir, FIXTURE_PASSPHRASE);
@@ -219,9 +229,7 @@ test("a device signature covers the change body version, not a pinned literal", 
     const attachment = log.changes().find((change) => change.mutation.objectType === "attachment");
     assert.equal(attachment.version, 3);
 
-    const record = manager
-      .state()
-      .body.devices.find((device) => device.certificate.deviceId === attachment.deviceId);
+    const record = manager.state().body.devices.find((device) => device.certificate.deviceId === attachment.deviceId);
     const publicKey = crypto.createPublicKey({
       key: Buffer.from(record.certificate.publicKey, "base64"),
       format: "der",
