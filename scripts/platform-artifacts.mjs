@@ -75,6 +75,7 @@ function peArchitecture(file) {
   const machine = contents.readUInt16LE(offset + 4);
   if (machine === 0x8664) return "x64";
   if (machine === 0xaa64) return "arm64";
+  if (machine === 0x014c) return "x86";
   return `machine-${machine.toString(16)}`;
 }
 
@@ -95,7 +96,7 @@ function tarHeader(name, stat, type = "0", linkName = "") {
   octal(stat.mode & 0o777, 100, 8);
   octal(0, 108, 8);
   octal(0, 116, 8);
-  octal(type === "0" ? stat.size : 0, 124, 12);
+  octal(type === "0" || type === "x" ? stat.size : 0, 124, 12);
   octal(0, 136, 12);
   header.fill(0x20, 148, 156);
   write(type, 156, 1);
@@ -108,9 +109,18 @@ function tarHeader(name, stat, type = "0", linkName = "") {
   return header;
 }
 
+function paxRecord(key, value) {
+  const body = ` ${key}=${value}\n`;
+  let length = Buffer.byteLength(body) + 1;
+  while (length !== Buffer.byteLength(`${length}${body}`)) length = Buffer.byteLength(`${length}${body}`);
+  return `${length}${body}`;
+}
+
 function archiveApp(app, archive) {
   const files = [];
   function visit(directory, archiveDirectory) {
+    const directoryStat = fs.lstatSync(directory);
+    files.push({ archivePath: `${archiveDirectory}/`, stat: directoryStat, type: "5", contents: Buffer.alloc(0) });
     for (const entry of fs.readdirSync(directory).sort((left, right) => left.localeCompare(right))) {
       const item = path.join(directory, entry);
       const archivePath = `${archiveDirectory}/${entry}`;
@@ -123,9 +133,25 @@ function archiveApp(app, archive) {
     }
   }
   visit(app, path.basename(app));
-  const entries = files.flatMap(({ archivePath, stat, type, linkName, contents }) => {
+  const entries = files.flatMap(({ archivePath, stat, type, linkName = "", contents }) => {
+    const attributes = [];
+    if (Buffer.byteLength(archivePath) > 100) attributes.push(paxRecord("path", archivePath));
+    if (Buffer.byteLength(linkName) > 100) attributes.push(paxRecord("linkpath", linkName));
+    const paxContents = Buffer.from(attributes.join(""), "utf8");
+    const pax = attributes.length
+      ? [
+          tarHeader("PaxHeader", { mode: stat.mode, size: paxContents.length }, "x"),
+          paxContents,
+          Buffer.alloc((512 - (paxContents.length % 512)) % 512),
+        ]
+      : [];
     const padding = Buffer.alloc((512 - (contents.length % 512)) % 512);
-    return [tarHeader(archivePath, stat, type, linkName), contents, padding];
+    return [
+      ...pax,
+      tarHeader(archivePath, stat, type, Buffer.byteLength(linkName) > 100 ? "" : linkName),
+      contents,
+      padding,
+    ];
   });
   fs.mkdirSync(path.dirname(archive), { recursive: true });
   fs.writeFileSync(archive, zlib.gzipSync(Buffer.concat([...entries, Buffer.alloc(1024)]), { mtime: 0 }));
@@ -190,6 +216,7 @@ function validateMacos(bundleDir, outputDir, expected) {
     {
       path: relative(bundleDir, dmg),
       kind: "dmg",
+      nativeIdentity: expected.identifier,
       architecture: "arm64",
       sha256: sha256(dmg),
       checksumEntries: [{ path: relative(bundleDir, dmg), sha256: sha256(dmg) }],
@@ -198,6 +225,7 @@ function validateMacos(bundleDir, outputDir, expected) {
     {
       path: relative(bundleDir, archive),
       kind: "app-tar-gz",
+      nativeIdentity: expected.identifier,
       architecture,
       sha256: sha256(archive),
       checksumEntries: [{ path: relative(bundleDir, archive), sha256: sha256(archive) }],
@@ -205,7 +233,7 @@ function validateMacos(bundleDir, outputDir, expected) {
   ];
 }
 
-function validateWindows(bundleDir, expected) {
+function validateWindows(bundleDir, expected, installedExecutable) {
   const msi = exactlyOne(
     matchingFiles(path.join(bundleDir, "msi"), (name) => name.endsWith(".msi")),
     "Windows artifact: *.msi",
@@ -214,8 +242,9 @@ function validateWindows(bundleDir, expected) {
     matchingFiles(path.join(bundleDir, "nsis"), (name) => name.endsWith("-setup.exe")),
     "Windows artifact: *-setup.exe",
   );
-  const architecture = peArchitecture(nsis);
-  if (architecture !== "x64") throw new Error(`Windows architecture mismatch: expected x64, found ${architecture}`);
+  const bootstrapArchitecture = peArchitecture(nsis);
+  if (bootstrapArchitecture !== "x86" && bootstrapArchitecture !== "x64")
+    throw new Error(`Windows NSIS bootstrap architecture is unsupported: ${bootstrapArchitecture}`);
   const details = JSON.parse(
     execFileSync(
       "powershell",
@@ -237,13 +266,30 @@ function validateWindows(bundleDir, expected) {
     throw new Error(`Windows version mismatch: expected ${expected.version}, found ${details.version ?? "missing"}`);
   if (!/x64/iu.test(details.template ?? ""))
     throw new Error(`Windows MSI architecture mismatch: expected x64, found ${details.template ?? "missing"}`);
-  return [msi, nsis].map((file) => ({
-    path: relative(bundleDir, file),
-    kind: path.extname(file).slice(1),
-    architecture: "x64",
-    sha256: sha256(file),
-    checksumEntries: [{ path: relative(bundleDir, file), sha256: sha256(file) }],
-  }));
+  const payloadArchitecture = installedExecutable
+    ? peArchitecture(installedExecutable)
+    : "unverified (requires --installed-executable)";
+  if (payloadArchitecture !== "x64" && !payloadArchitecture.startsWith("unverified"))
+    throw new Error(`Windows installed payload architecture mismatch: expected x64, found ${payloadArchitecture}`);
+  return [
+    {
+      path: relative(bundleDir, msi),
+      kind: "msi",
+      nativeIdentity: expected.productName,
+      architecture: "x64",
+      sha256: sha256(msi),
+      checksumEntries: [{ path: relative(bundleDir, msi), sha256: sha256(msi) }],
+    },
+    {
+      path: relative(bundleDir, nsis),
+      kind: "nsis",
+      nativeIdentity: expected.productName,
+      bootstrapArchitecture,
+      payloadArchitecture,
+      sha256: sha256(nsis),
+      checksumEntries: [{ path: relative(bundleDir, nsis), sha256: sha256(nsis) }],
+    },
+  ];
 }
 
 function validateLinux(bundleDir, expected) {
@@ -251,10 +297,10 @@ function validateLinux(bundleDir, expected) {
     matchingFiles(path.join(bundleDir, "deb"), (name) => name.endsWith(".deb")),
     "Linux artifact: *.deb",
   );
-  const fields = execFileSync("dpkg-deb", ["--field", deb, "Package", "Version", "Architecture"], { encoding: "utf8" })
-    .trim()
-    .split(/\r?\n/u);
-  const [packageName, version, architecture] = fields;
+  const field = (name) => execFileSync("dpkg-deb", ["--field", deb, name], { encoding: "utf8" }).trim();
+  const packageName = field("Package");
+  const version = field("Version");
+  const architecture = field("Architecture");
   const expectedPackage = expected.productName
     .toLowerCase()
     .replace(/[^a-z0-9]+/gu, "-")
@@ -269,6 +315,7 @@ function validateLinux(bundleDir, expected) {
     {
       path: relative(bundleDir, deb),
       kind: "deb",
+      nativeIdentity: packageName,
       architecture: "amd64",
       sha256: sha256(deb),
       checksumEntries: [{ path: relative(bundleDir, deb), sha256: sha256(deb) }],
@@ -281,6 +328,8 @@ function main() {
   const config = readConfig();
   const platform = options.platform ?? hostPlatforms[process.platform];
   if (!supportedPlatforms.has(platform)) throw new Error(`Unsupported platform: ${platform ?? process.platform}`);
+  if (options.identifier && platform !== "macos")
+    throw new Error("--identifier is only supported for macos; Windows and Linux verify native package identity");
   const bundleDir = path.resolve(options.bundleDir ?? path.join(root, "src-tauri", "target", "release", "bundle"));
   const outputDir = path.resolve(options.outputDir ?? bundleDir);
   if (path.relative(bundleDir, outputDir).startsWith(".."))
@@ -294,7 +343,7 @@ function main() {
     platform === "macos"
       ? validateMacos(bundleDir, outputDir, expected)
       : platform === "windows"
-        ? validateWindows(bundleDir, expected)
+        ? validateWindows(bundleDir, expected, options.installedExecutable)
         : validateLinux(bundleDir, expected);
   const checksumEntries = artifacts
     .flatMap((artifact) => artifact.checksumEntries)
@@ -308,10 +357,10 @@ function main() {
   );
   fs.writeFileSync(
     uploadManifest,
-    `${JSON.stringify({ platform, version: expected.version, identifier: expected.identifier, artifacts: artifacts.map(({ checksumEntries: _entries, ...artifact }) => artifact) }, null, 2)}\n`,
+    `${JSON.stringify({ platform, version: expected.version, configuredIdentifier: expected.identifier, artifacts: artifacts.map(({ checksumEntries: _entries, ...artifact }) => artifact) }, null, 2)}\n`,
   );
   process.stdout.write(
-    `${JSON.stringify({ platform, version: expected.version, identifier: expected.identifier, artifacts: artifacts.map((artifact) => artifact.path), checksumManifest: relative(bundleDir, checksumManifest), uploadManifest: relative(bundleDir, uploadManifest) })}\n`,
+    `${JSON.stringify({ platform, version: expected.version, configuredIdentifier: expected.identifier, artifacts: artifacts.map((artifact) => artifact.path), checksumManifest: relative(bundleDir, checksumManifest), uploadManifest: relative(bundleDir, uploadManifest) })}\n`,
   );
 }
 

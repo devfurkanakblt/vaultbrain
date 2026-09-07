@@ -55,6 +55,18 @@ test("fails when the selected platform's required artifact is absent", () => {
   }
 });
 
+test("rejects a bundle-id override for Windows because MSI identity is ProductName", () => {
+  const bundleDir = tempDir();
+  try {
+    assert.throws(
+      () => run(["--platform", "windows", "--identifier", "other.bundle", "--bundle-dir", bundleDir]),
+      /--identifier is only supported for macos/u,
+    );
+  } finally {
+    fs.rmSync(bundleDir, { recursive: true, force: true });
+  }
+});
+
 test("rejects an app bundle whose executable is not ARM64", () => {
   const bundleDir = tempDir();
   try {
@@ -74,7 +86,7 @@ test("writes portable upload and checksum manifests for valid macOS artifacts", 
     const uploads = JSON.parse(fs.readFileSync(path.join(bundleDir, "upload-artifacts.json"), "utf8"));
 
     assert.equal(output.platform, "macos");
-    assert.equal(output.identifier, "dev.vaultbrain.desktop");
+    assert.equal(output.configuredIdentifier, "dev.vaultbrain.desktop");
     assert.deepEqual(
       uploads.artifacts.map((artifact) => artifact.path),
       ["dmg/Vault Brain_0.2.0_aarch64.dmg", "macos/Vault Brain.app.tar.gz"],
@@ -99,6 +111,34 @@ test("repeated validation produces an identical checksum manifest", () => {
       crypto.createHash("sha256").update(first).digest("hex"),
       crypto.createHash("sha256").update(second).digest("hex"),
     );
+  } finally {
+    fs.rmSync(bundleDir, { recursive: true, force: true });
+  }
+});
+
+test("the app archive retains explicit directories and a long nested path", () => {
+  const bundleDir = tempDir();
+  try {
+    writeMacArtifacts(bundleDir);
+    const longDirectory = "resource-".repeat(12);
+    const nestedFile = path.join(
+      bundleDir,
+      "macos",
+      "Vault Brain.app",
+      "Contents",
+      "Resources",
+      longDirectory,
+      "note.txt",
+    );
+    fs.mkdirSync(path.dirname(nestedFile), { recursive: true });
+    fs.writeFileSync(nestedFile, "long path fixture");
+
+    run(["--platform", "macos", "--bundle-dir", bundleDir]);
+    const archive = path.join(bundleDir, "macos", "Vault Brain.app.tar.gz");
+    const listing = execFileSync("tar", ["-tvzf", archive], { encoding: "utf8" });
+
+    assert.match(listing, /d.+Vault Brain\.app\/Contents\/Resources\/$/mu);
+    assert.match(listing, new RegExp(`Vault Brain\\.app/Contents/Resources/${longDirectory}/note\\.txt`, "u"));
   } finally {
     fs.rmSync(bundleDir, { recursive: true, force: true });
   }
