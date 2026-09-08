@@ -7,6 +7,7 @@ import { readTextFileLimited } from "./fs-safe.js";
 
 const SERVICE = "secondbrain-vault";
 const MACOS_SERVICE = "secondbrain-vault-v2";
+const WINDOWS_DPAPI_PREFIX = "dpapi-v2:";
 
 export interface KeychainBackend {
   readonly name: string;
@@ -104,6 +105,71 @@ function credentialDir(): string {
   return path.join(base, "credentials");
 }
 
+function isCanonicalBase64(value: string): boolean {
+  try {
+    const decoded = Buffer.from(value, "base64");
+    return decoded.length > 0 && decoded.toString("base64") === value;
+  } catch {
+    return false;
+  }
+}
+
+/** Protect UTF-8 bytes with Windows DPAPI without putting the secret in argv. */
+export function protectWindowsCredential(secret: string, execute: typeof run = run): string {
+  const blob = execute(
+    "powershell",
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      "Add-Type -AssemblyName System.Security;" +
+        "$plain=[Console]::In.ReadToEnd();" +
+        "$bytes=[Text.Encoding]::UTF8.GetBytes($plain);" +
+        "$protected=[Security.Cryptography.ProtectedData]::Protect($bytes,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser);" +
+        "[Console]::Out.Write([Convert]::ToBase64String($protected))",
+    ],
+    secret,
+  ).trim();
+  if (!isCanonicalBase64(blob)) throw new Error("DPAPI did not return a credential blob.");
+  return `${WINDOWS_DPAPI_PREFIX}${blob}`;
+}
+
+function unprotectWindowsCredential(value: string): string {
+  const blob = value.slice(WINDOWS_DPAPI_PREFIX.length);
+  if (!isCanonicalBase64(blob)) throw new Error("Invalid DPAPI credential blob.");
+  return run(
+    "powershell",
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      "Add-Type -AssemblyName System.Security;" +
+        "$blob=[Console]::In.ReadToEnd().Trim();" +
+        "$protected=[Convert]::FromBase64String($blob);" +
+        "$bytes=[Security.Cryptography.ProtectedData]::Unprotect($protected,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser);" +
+        "[Console]::Out.Write([Text.Encoding]::UTF8.GetString($bytes))",
+    ],
+    blob,
+  );
+}
+
+/** Read blobs written before the direct ProtectedData format was introduced. */
+function unprotectLegacyWindowsCredential(blob: string): string {
+  if (!/^[0-9a-fA-F]+$/u.test(blob)) throw new Error("Invalid legacy DPAPI credential blob.");
+  return run(
+    "powershell",
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      "$blob = [Console]::In.ReadToEnd().Trim(); " +
+        "$sec = ConvertTo-SecureString -String $blob; " +
+        "[Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))",
+    ],
+    blob,
+  ).replace(/\r?\n$/u, "");
+}
+
 /**
  * Windows: DPAPI through PowerShell. The blob can only be decrypted by the
  * same Windows user on the same machine, so the file on disk is useless to
@@ -118,18 +184,7 @@ const windowsBackend: KeychainBackend = {
   available: () =>
     process.platform === "win32" && canRun("powershell", ["-NoProfile", "-NonInteractive", "-Command", "exit 0"]),
   store(account, secret) {
-    const blob = run(
-      "powershell",
-      [
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        "$plain = [Console]::In.ReadToEnd(); " +
-          "ConvertTo-SecureString -String $plain -AsPlainText -Force | ConvertFrom-SecureString",
-      ],
-      secret,
-    ).trim();
-    if (!/^[0-9a-fA-F]+$/u.test(blob)) throw new Error("DPAPI did not return a credential blob.");
+    const blob = protectWindowsCredential(secret);
     const dir = credentialDir();
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     fs.writeFileSync(path.join(dir, `${account}.dpapi`), blob, { mode: 0o600 });
@@ -139,19 +194,9 @@ const windowsBackend: KeychainBackend = {
     if (!fs.existsSync(file)) return undefined;
     const blob = readTextFileLimited(file, 1024 * 1024, "DPAPI credential").trim();
     try {
-      const secret = run(
-        "powershell",
-        [
-          "-NoProfile",
-          "-NonInteractive",
-          "-Command",
-          "$blob = [Console]::In.ReadToEnd().Trim(); " +
-            "$sec = ConvertTo-SecureString -String $blob; " +
-            "[Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))",
-        ],
-        blob,
-      );
-      return secret.replace(/\r?\n$/u, "");
+      return blob.startsWith(WINDOWS_DPAPI_PREFIX)
+        ? unprotectWindowsCredential(blob)
+        : unprotectLegacyWindowsCredential(blob);
     } catch {
       // Written by a different user or machine: treat as absent, not as an error.
       return undefined;
