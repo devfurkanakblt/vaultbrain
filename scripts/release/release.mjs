@@ -172,6 +172,15 @@ export function createReleaseOverlay({ publicKey }) {
   };
 }
 
+export function isOwnedDraftRelease({ createdReleaseId, observedRelease }) {
+  return (
+    Number.isSafeInteger(createdReleaseId) &&
+    Number.isSafeInteger(observedRelease?.id) &&
+    observedRelease.id === createdReleaseId &&
+    observedRelease.isDraft === true
+  );
+}
+
 export function inspectReleaseArtifacts(directory, { version, requireProvenance = true }) {
   if (!STABLE_SEMVER.test(version)) fail("Invalid stable release version");
   const root = path.resolve(directory);

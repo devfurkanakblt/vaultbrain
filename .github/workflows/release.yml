@@ -198,23 +198,54 @@ jobs:
           cp "${{ steps.attest.outputs.bundle-path }}" release-flat/provenance.intoto.jsonl
           gh attestation verify "release-flat/$subject" --repo "$GITHUB_REPOSITORY" --bundle release-flat/provenance.intoto.jsonl
           node scripts/release/assemble-release.mjs release-flat "$RELEASE_TAG" "$(date --utc +%Y-%m-%dT%H:%M:%SZ)"
-      - name: Create immutable draft and upload complete assets
+      - id: create_draft
+        name: Create this run's immutable draft
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          gh release create "$RELEASE_TAG" --draft --verify-tag --target "$RELEASE_SHA" --title "Vault Brain $RELEASE_TAG"
-          gh release upload "$RELEASE_TAG" release-flat/*
-      - name: Download draft assets and verify bytes, checksums, signatures, and metadata
+          release="$(gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
+            -f tag_name="$RELEASE_TAG" \
+            -f target_commitish="$RELEASE_SHA" \
+            -f name="Vault Brain $RELEASE_TAG" \
+            -F draft=true)"
+          release_id="$(jq -er '.id' <<<"$release")"
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+          test "$(jq -r '.draft' <<<"$release")" = true
+      - name: Upload and verify this run's complete draft assets
         env:
           GH_TOKEN: ${{ github.token }}
           TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
         shell: bash
         run: |
           set -euo pipefail
+          gh release upload "$RELEASE_TAG" release-flat/*
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y minisign
           mkdir downloaded-release
           gh release download "$RELEASE_TAG" --dir downloaded-release
           node scripts/release/verify-download.mjs release-flat downloaded-release
+      - name: Remove only this run's incomplete draft
+        if: ${{ failure() && steps.create_draft.outputs.release_id != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CREATED_RELEASE_ID: ${{ steps.create_draft.outputs.release_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! observed_release="$(gh api "repos/$GITHUB_REPOSITORY/releases/$CREATED_RELEASE_ID" 2>/dev/null)"; then
+            exit 0
+          fi
+          if node --input-type=module -e '
+            import { isOwnedDraftRelease } from "./scripts/release/release.mjs";
+            const [createdReleaseId, observedRelease] = process.argv.slice(1);
+            process.exit(isOwnedDraftRelease({
+              createdReleaseId: Number(createdReleaseId),
+              observedRelease: JSON.parse(observedRelease),
+            }) ? 0 : 1);
+          ' "$CREATED_RELEASE_ID" "$observed_release"; then
+            gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/$CREATED_RELEASE_ID"
+          else
+            echo "The observed release is not this run's draft; refusing deletion." >&2
+          fi

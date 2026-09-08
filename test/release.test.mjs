@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -9,6 +10,7 @@ import {
   createLatestManifest,
   decodeTauriMinisignText,
   inspectReleaseArtifacts,
+  isOwnedDraftRelease,
   validateReleaseVersions,
   verifyDownloadedAssets,
   writeReleaseChecksums,
@@ -91,6 +93,23 @@ test("decodeTauriMinisignText rejects corrupt encoded Tauri signing material", (
     () => decodeTauriMinisignText(Buffer.from("not minisign text").toString("base64"), "signature"),
     /minisign/iu,
   );
+});
+
+test("isOwnedDraftRelease permits cleanup only for the current run's still-draft release", () => {
+  assert.equal(isOwnedDraftRelease({ createdReleaseId: 73, observedRelease: { id: 73, isDraft: true } }), true);
+  assert.equal(isOwnedDraftRelease({ createdReleaseId: 73, observedRelease: { id: 74, isDraft: true } }), false);
+  assert.equal(isOwnedDraftRelease({ createdReleaseId: 73, observedRelease: { id: 73, isDraft: false } }), false);
+  assert.equal(isOwnedDraftRelease({ createdReleaseId: "73", observedRelease: { id: 73, isDraft: true } }), false);
+});
+
+test("verify-download CLI fails closed when the updater public key is unavailable", () => {
+  const result = spawnSync(process.execPath, ["scripts/release/verify-download.mjs", "expected", "downloaded"], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: { ...process.env, TAURI_UPDATER_PUBLIC_KEY: "" },
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /public key/iu);
 });
 
 test("inspectReleaseArtifacts accepts exactly one safe package and signature for every supported updater target", () => {
