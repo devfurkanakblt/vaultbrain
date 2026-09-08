@@ -177,7 +177,7 @@ export function isOwnedDraftRelease({ createdReleaseId, observedRelease }) {
     Number.isSafeInteger(createdReleaseId) &&
     Number.isSafeInteger(observedRelease?.id) &&
     observedRelease.id === createdReleaseId &&
-    observedRelease.isDraft === true
+    observedRelease.draft === true
   );
 }
 

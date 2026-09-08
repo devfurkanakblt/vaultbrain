@@ -95,11 +95,12 @@ test("decodeTauriMinisignText rejects corrupt encoded Tauri signing material", (
   );
 });
 
-test("isOwnedDraftRelease permits cleanup only for the current run's still-draft release", () => {
-  assert.equal(isOwnedDraftRelease({ createdReleaseId: 73, observedRelease: { id: 73, isDraft: true } }), true);
-  assert.equal(isOwnedDraftRelease({ createdReleaseId: 73, observedRelease: { id: 74, isDraft: true } }), false);
-  assert.equal(isOwnedDraftRelease({ createdReleaseId: 73, observedRelease: { id: 73, isDraft: false } }), false);
-  assert.equal(isOwnedDraftRelease({ createdReleaseId: "73", observedRelease: { id: 73, isDraft: true } }), false);
+test("isOwnedDraftRelease accepts only the current still-draft REST release", () => {
+  assert.equal(isOwnedDraftRelease({ createdReleaseId: 73, observedRelease: { id: 73, draft: true } }), true);
+  assert.equal(isOwnedDraftRelease({ createdReleaseId: 73, observedRelease: { id: 74, draft: true } }), false);
+  assert.equal(isOwnedDraftRelease({ createdReleaseId: 73, observedRelease: { id: 73, draft: false } }), false);
+  assert.equal(isOwnedDraftRelease({ createdReleaseId: 73, observedRelease: { id: 73, isDraft: true } }), false);
+  assert.equal(isOwnedDraftRelease({ createdReleaseId: "73", observedRelease: { id: 73, draft: true } }), false);
 });
 
 test("verify-download CLI fails closed when the updater public key is unavailable", () => {
