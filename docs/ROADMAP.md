@@ -279,14 +279,13 @@ provenance, then uploads the result as a workflow artifact, which expires.
 Nothing is published, and there is no update path, so a security fix cannot
 reach anyone who already installed a build.
 
-- [ ] Publish signed installers with their checksums, SBOM and provenance as
-      release assets.
-- [ ] An update path, with a recorded decision about whether it is automatic.
+  - [x] Publish signed installers with their checksums, SBOM and provenance as
+        release assets.
+  - [ ] An update path, with a recorded decision about whether it is automatic.
       An updater is also a code-delivery channel into a vault holding the
       user's secrets, so that choice is a security decision, not a convenience.
-- [ ] Put the evidence that matters into CI. `recovery:drill` runs nowhere, and
-      only the 1,000-note benchmark gates a change while the roadmap claims 10k
-      and 100k gates.
+  - [x] Put recovery and 10k/100k benchmark evidence into CI. Native cross-platform
+        updater installation remains a release-environment acceptance gate.
 
 ## Phase 13 — One implementation of each thing
 

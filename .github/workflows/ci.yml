@@ -31,6 +31,9 @@ jobs:
       - run: npm run desktop:test
       - run: npm run desktop:build
       - run: npm run benchmark
+      - run: npm run recovery:drill
+      - run: npm run benchmark:10k
+      - run: npm run benchmark:100k
       - run: npm run package:check
 
   node-platform:

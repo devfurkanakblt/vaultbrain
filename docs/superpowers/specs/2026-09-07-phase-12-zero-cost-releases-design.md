@@ -23,8 +23,9 @@ another contributor owns its failures. Do not repair those failures here.
 - Publish only complete immutable versioned releases: final artifacts, signatures,
   checksums, SPDX SBOM and provenance. Create a draft; maintainer publishes separately.
 - Tag must match npm/Cargo/Tauri versions and belong to main. Same-commit acceptance
-  evidence is mandatory. No push, merge, actual release publication or secret provisioning
-  in this implementation turn.
+  evidence is mandatory. Actual release publication and secret provisioning require a
+  separate action. The later 2026-09-08 user amendment authorizes integration of main
+  and pushing the completed phase-12 branch, not publishing a release.
 
 ## Targets and update channel
 

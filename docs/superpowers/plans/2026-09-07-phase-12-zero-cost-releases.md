@@ -4,11 +4,14 @@ Spec: docs/superpowers/specs/2026-09-07-phase-12-zero-cost-releases-design.md
 
 Baseline: origin/main 7226c13. Isolated branch phase-12. User approved parallel
 development on 2026-09-08; Phase 11 repair belongs to another contributor.
+On 2026-09-08 the user authorized integrating origin/main 75c8f6f and pushing
+the completed phase-12 branch. Actual release publication remains a separate action.
 
 ## Global Constraints
 
-Follow the spec. No paid services, production secret generation, push, merge or release
-publication in this turn. Preserve Phase 11 files outside this worktree. Missing
+Follow the spec. No paid services, production secret generation or release publication.
+Main integration and phase-12 branch push are authorized by the later user amendment.
+Preserve Phase 11 files outside this worktree. Missing
 production signing configuration must fail closed, never use a test key as production.
 
 ### Task 1: Release artifacts and draft publication
@@ -68,4 +71,5 @@ backup, user approval, recovery-kit limitations and no automatic rollback. Do no
 acceptance complete without evidence. Run focused/full quality, Rust quality, benchmarks,
 recovery drill, package check and graphify update. Compare failures against baseline;
 do not repair unrelated Phase 11 failures. Review each task and whole branch. Prepare
-focused local commits only; leave publication and production key provisioning to maintainer.
+focused commits and push phase-12 after validation as subsequently authorized; leave
+release publication and production key provisioning to the maintainer.
