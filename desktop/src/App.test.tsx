@@ -57,7 +57,12 @@ const bridgeMock = vi.hoisted(() => ({
   deleteAttachment: vi.fn(),
 }));
 
+const updaterMock = vi.hoisted(() => ({
+  status: vi.fn(), check: vi.fn(), download: vi.fn(), cancel: vi.fn(), install: vi.fn(), subscribe: vi.fn(),
+}));
+
 vi.mock("./bridge", () => ({ vaultBridge: bridgeMock }));
+vi.mock("./updater", () => ({ updaterClient: updaterMock }));
 vi.mock("./Editor", () => ({
   MarkdownEditor: ({ value, onChange }: { value: string; onChange: (value: string) => void }) => (
     <textarea aria-label="Markdown body" value={value} onChange={(event) => onChange(event.target.value)} />
@@ -207,6 +212,12 @@ describe("desktop workspace", () => {
       id, path: sampleNote.path, title: sampleNote.title, tags: sampleNote.tags,
       properties: { ...sampleNote.properties, [key]: value }, updatedAt: sampleNote.updatedAt,
     }));
+    updaterMock.status.mockResolvedValue({ phase: "idle", currentVersion: "0.2.0" });
+    updaterMock.check.mockResolvedValue({ phase: "up-to-date", currentVersion: "0.2.0" });
+    updaterMock.download.mockResolvedValue({ phase: "ready", currentVersion: "0.2.0", availableVersion: "0.3.0" });
+    updaterMock.cancel.mockResolvedValue({ phase: "cancelled", currentVersion: "0.2.0" });
+    updaterMock.install.mockResolvedValue(undefined);
+    updaterMock.subscribe.mockResolvedValue(() => undefined);
   });
 
   it("unlocks locally and opens the first encrypted note", async () => {
@@ -215,6 +226,16 @@ describe("desktop workspace", () => {
     expect(screen.getByText("VB")).toBeInTheDocument();
     expect(screen.getByRole("navigation", { name: "Vault notes" })).toBeInTheDocument();
     expect(screen.getByText("Encrypted & saved")).toBeInTheDocument();
+  });
+
+  it("exposes updates without checking the network automatically", async () => {
+    await unlockWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "Updates" }));
+    expect(await screen.findByRole("heading", { name: "Application updates" })).toBeInTheDocument();
+    expect(updaterMock.status).toHaveBeenCalledOnce();
+    expect(updaterMock.check).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Check for updates" }));
+    await waitFor(() => expect(updaterMock.check).toHaveBeenCalledOnce());
   });
 
   it("fills the vault path from the native folder chooser", async () => {

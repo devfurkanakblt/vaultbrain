@@ -218,6 +218,7 @@ earlier formats so a future change has to prove it can still read them.
 Key-material commands add paired `pending` and `allowed`/`denied` entries to
 the same authenticated audit chain as content access. Recovery codes, kit
 paths and key material are never included in those entries.
+
 - `vbrain rekey` replaces the vault's keys and re-encrypts every object under
   them. Use it when a passphrase has leaked: a passphrase change re-wraps the
   same keys, so the leaked passphrase would still open a copy of
@@ -429,7 +430,7 @@ seconds and answers a full-text query in about 3 ms p95.
 ## Native desktop workspace
 
 The repository now includes a Tauri 2 desktop application. Its React webview has
-no direct filesystem or key access; forty-two capability-scoped commands cross into
+no direct filesystem or key access; fifty-one capability-scoped commands cross into
 the Rust core for unlock, lock, the whole note lifecycle, search, backlinks,
 value-minimized graph topology, typed property rows, templates and daily notes,
 encrypted canvases, content-addressed attachments and sandboxed plugins. The
@@ -449,13 +450,31 @@ npm run tauri:build
 npm run tauri:build -- --no-bundle
 ```
 
+Application updates are deliberately manual. Open **Updates**, then separately
+approve the check, download, and final installation. The native controller owns
+the fixed GitHub Releases feed, supported bundle target, timeout, downloaded
+bytes, and mandatory Tauri signature verification; the webview never receives
+an update URL, signing key, or installer path. Installation first flushes note
+and canvas edits, aborts if either save fails, and locks and clears the vault
+before the verified package is applied.
+
+Builds installed before the updater was added need one manual bootstrap install.
+The free release path does not provide Authenticode or Apple publisher identity,
+so Windows SmartScreen or macOS Gatekeeper may warn even though in-app updates
+remain cryptographically signed. Back up the updater private key offline: losing
+it can force another manual reinstall. Updates have no automatic rollback and
+remain optional, so an unavailable release channel never blocks offline work.
+Maintainers should follow the [release runbook](docs/RELEASE.md) for signing-key
+provisioning, draft verification, the real cross-platform update drill, and publish.
+
 The current workspace includes a lock screen, file tree, tab strip, CodeMirror
 Markdown editor, reading view, split pane, properties, outline, backlinks,
 encrypted search, quick switcher, command palette, keyboard shortcuts, theme
-editor, local knowledge graph, filterable property table, spatial canvas and
-attachment library. Dirty notes are persisted before
-navigation, before a tab closes and before lock, so the 700 ms autosave window
-cannot discard an edit.
+editor, local knowledge graph, filterable property table, spatial canvas,
+attachment library and a manual updater. Dirty notes are persisted before
+navigation, before a tab closes and before lock. Canvas and note saves are also
+drained before updater installation, so neither debounce window nor an in-flight
+write can race the vault lock.
 
 | Shortcut                                  | Action                                                                    |
 | ----------------------------------------- | ------------------------------------------------------------------------- |

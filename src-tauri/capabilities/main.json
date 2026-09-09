@@ -59,6 +59,11 @@
     "allow-create-recovery-kit",
     "allow-keyring-status",
     "allow-sync-status",
-    "allow-sync-verify-registry"
+    "allow-sync-verify-registry",
+    "allow-update-status",
+    "allow-check-for-update",
+    "allow-download-update",
+    "allow-cancel-update",
+    "allow-install-update"
   ]
 }

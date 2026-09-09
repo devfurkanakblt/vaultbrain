@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { ArrowRight, FileImage, FileText, FolderKanban, Group, Link2, LoaderCircle, Maximize2, MousePointer2, Plus, Save, StickyNote, Trash2, X, ZoomIn, ZoomOut } from "lucide-react";
 import { vaultBridge } from "./bridge";
 import { useConfirm } from "./Confirm";
@@ -11,6 +11,10 @@ interface CanvasBoardProps {
   onRefresh: () => Promise<void>;
   onOpenNote: (id: string) => void;
   onNotice: Notify;
+}
+
+export interface CanvasBoardHandle {
+  flush(): Promise<void>;
 }
 
 const SURFACE_WIDTH = 3200;
@@ -58,7 +62,7 @@ function place(x: number, y: number, width: number, height: number) {
   };
 }
 
-export function CanvasBoard({ canvases, notes, attachments, onRefresh, onOpenNote, onNotice }: CanvasBoardProps) {
+export const CanvasBoard = forwardRef<CanvasBoardHandle, CanvasBoardProps>(function CanvasBoard({ canvases, notes, attachments, onRefresh, onOpenNote, onNotice }, ref) {
   const [canvas, setCanvas] = useState<CanvasDocument>();
   const [selected, setSelected] = useState<string>();
   const [connecting, setConnecting] = useState<string>();
@@ -73,6 +77,12 @@ export function CanvasBoard({ canvases, notes, attachments, onRefresh, onOpenNot
   const [linkUrl, setLinkUrl] = useState("");
   const [view, setView] = useState<Viewport>(ORIGIN);
   const saveTimer = useRef<number | undefined>(undefined);
+  const saveInFlight = useRef<Promise<void> | null>(null);
+  const savingGeneration = useRef(0);
+  const generation = useRef(0);
+  const lastSaveError = useRef<unknown>(undefined);
+  const dirtyRef = useRef(false);
+  const canvasRef = useRef<CanvasDocument | undefined>(undefined);
   const frame = useRef<HTMLDivElement>(null);
   const pan = useRef<{ pointerX: number; pointerY: number; view: Viewport; moved: boolean } | null>(null);
   const [confirm, confirmDialog] = useConfirm();
@@ -179,9 +189,12 @@ export function CanvasBoard({ canvases, notes, attachments, onRefresh, onOpenNot
     try {
       const opened = await vaultBridge.getCanvas(reference);
       setCanvas(opened);
+      canvasRef.current = opened;
       setSelected(undefined);
       setConnecting(undefined);
       setDirty(false);
+      dirtyRef.current = false;
+      generation.current = 0;
       // Frame the board before it is seen, so a wide canvas does not open on
       // an empty corner of its own surface.
       requestAnimationFrame(() => fit(opened.nodes));
@@ -190,29 +203,51 @@ export function CanvasBoard({ canvases, notes, attachments, onRefresh, onOpenNot
     }
   }
 
-  async function save() {
-    if (!canvas || saving) return;
-    setSaving(true);
-    window.clearTimeout(saveTimer.current);
-    try {
-      const stored = await vaultBridge.saveCanvas({
-        id: canvas.id,
-        path: canvas.path,
-        title: canvas.title,
-        nodes: canvas.nodes,
-        edges: canvas.edges,
-        createdAt: canvas.createdAt,
-        baseRevision: canvas.revision,
-      });
-      setCanvas(stored);
-      setDirty(false);
-      await onRefresh();
-    } catch (error) {
-      onNotice(error instanceof Error ? error.message : String(error), "error");
-    } finally {
-      setSaving(false);
+  async function save(raise = false) {
+    if (saveInFlight.current) {
+      const pendingGeneration = savingGeneration.current;
+      await saveInFlight.current;
+      if (dirtyRef.current && generation.current > pendingGeneration) await save(raise);
+      else if (raise && dirtyRef.current && lastSaveError.current) throw lastSaveError.current;
+      return;
     }
+    const pending = canvasRef.current;
+    if (!pending || !dirtyRef.current) return;
+    setSaving(true);
+    const persistedGeneration = generation.current;
+    savingGeneration.current = persistedGeneration;
+    lastSaveError.current = undefined;
+    window.clearTimeout(saveTimer.current);
+    const operation = (async () => {
+      try {
+        const stored = await vaultBridge.saveCanvas({ id: pending.id, path: pending.path, title: pending.title, nodes: pending.nodes, edges: pending.edges, createdAt: pending.createdAt, baseRevision: pending.revision });
+        if (generation.current === persistedGeneration) {
+          setCanvas(stored); canvasRef.current = stored;
+          setDirty(false); dirtyRef.current = false;
+        } else {
+          const current = canvasRef.current;
+          if (current) {
+            const rebased = { ...current, revision: stored.revision, updatedAt: stored.updatedAt };
+            canvasRef.current = rebased; setCanvas(rebased);
+          }
+          setDirty(true); dirtyRef.current = true;
+        }
+        await onRefresh();
+      } catch (error) {
+        lastSaveError.current = error;
+        onNotice(error instanceof Error ? error.message : String(error), "error");
+        if (raise) throw error;
+      } finally {
+        setSaving(false);
+        saveInFlight.current = null;
+      }
+    })();
+    saveInFlight.current = operation;
+    await operation;
+    if (raise && dirtyRef.current && generation.current > persistedGeneration) await save(true);
   }
+
+  useImperativeHandle(ref, () => ({ flush: () => save(true) }), [canvas, dirty]);
 
   async function create(event: React.FormEvent) {
     event.preventDefault();
@@ -221,10 +256,13 @@ export function CanvasBoard({ canvases, notes, attachments, onRefresh, onOpenNot
       const title = createTitle.trim();
       const created = await vaultBridge.saveCanvas({ path: `${createPath}${title}`, title, nodes: [], edges: [] });
       setCanvas(created);
+      canvasRef.current = created;
       setView(ORIGIN);
       setCreateOpen(false);
       setCreateTitle("");
       setDirty(false);
+      dirtyRef.current = false;
+      generation.current = 0;
       await onRefresh();
     } catch (error) {
       onNotice(error instanceof Error ? error.message : String(error), "error");
@@ -234,8 +272,14 @@ export function CanvasBoard({ canvases, notes, attachments, onRefresh, onOpenNot
   }
 
   function change(mutator: (current: CanvasDocument) => CanvasDocument) {
-    setCanvas((current) => current ? mutator(current) : current);
+    setCanvas((current) => {
+      const next = current ? mutator(current) : current;
+      canvasRef.current = next;
+      return next;
+    });
     setDirty(true);
+    dirtyRef.current = true;
+    generation.current += 1;
   }
 
   function addNode(node: CanvasNode) {
@@ -437,4 +481,4 @@ export function CanvasBoard({ canvases, notes, attachments, onRefresh, onOpenNot
     {confirmDialog}
     {createOpen && <div className="overlay" onMouseDown={(event) => event.target === event.currentTarget && setCreateOpen(false)}><form className="new-note-dialog canvas-create" onSubmit={(event) => void create(event)}><div className="new-note-icon"><FolderKanban size={20} /></div><p className="eyebrow">NEW ENCRYPTED CANVAS</p><h2>Make room for the idea.</h2><label><span>Title</span><input autoFocus value={createTitle} onChange={(event) => setCreateTitle(event.target.value)} placeholder="Product map" /></label><label><span>Folder</span><input value={createPath} onChange={(event) => setCreatePath(event.target.value)} /></label><div><button type="button" onClick={() => setCreateOpen(false)}>Cancel</button><button disabled={!createTitle.trim() || saving}>{saving ? "Creating…" : "Create canvas"}</button></div></form></div>}
   </section>;
-}
+});

@@ -160,6 +160,7 @@ The link index is updated in the same logical transaction as a note revision:
   whether a directory of that name exists, learning that the vault holds that
   exact file without decrypting anything. Closing it is an identity migration
   and has not been done.
+
 - Session keys are kept only in the privileged core and zeroized on lock.
 - Per-device sync keys and per-agent grants are derived/separated by purpose.
 - Every encrypted record authenticates its format version and logical identity as associated data.
@@ -175,14 +176,38 @@ signed plugins created with that identifier.
 
 ## Trust boundaries
 
-| Principal       | Default access                                                  |
-| --------------- | --------------------------------------------------------------- |
-| Desktop webview | Rendered active-note data only; no raw filesystem or key access |
-| CLI direct mode | Explicit user-requested operation                               |
-| MCP agent       | Catalog discovery only; content requires a scoped grant         |
-| Plugin          | No capabilities until declared and approved                     |
-| Sync server     | Ciphertext, opaque object IDs and minimal routing metadata      |
-| Exporter        | Selected decrypted notes for a user-confirmed destination       |
+| Principal       | Default access                                                   |
+| --------------- | ---------------------------------------------------------------- |
+| Desktop webview | Rendered active-note data only; no raw filesystem or key access  |
+| CLI direct mode | Explicit user-requested operation                                |
+| MCP agent       | Catalog discovery only; content requires a scoped grant          |
+| Plugin          | No capabilities until declared and approved                      |
+| Sync server     | Ciphertext, opaque object IDs and minimal routing metadata       |
+| Exporter        | Selected decrypted notes for a user-confirmed destination        |
+| Updater webview | State and user-intent commands only; no URL, key or package path |
+
+The updater is a native controller, not a webview download client. It reads the
+fixed HTTPS release endpoint and embedded public key from the signed application
+configuration, validates that metadata still points at the expected repository,
+version and platform bundle, and retains both the candidate and verified bytes
+in native memory. The frontend can only request status, check, download, cancel,
+or install through five argument-free commands.
+
+Installation is an exclusive vault state. The controller accepts it only after
+a verified download and only while the vault session is absent. The UI first
+drains debounced and in-flight note and canvas saves, then locks the vault; a
+failed save leaves the editor open and never calls install. Once the native gate
+closes, unlock and every centralized vault write refuse work until an install
+failure releases it. Successful installation restarts the process, so session
+keys are dropped and zeroized before new application code runs.
+
+CI validates this in layers. Unit tests cover the sealed native controller and the
+manual UI/save ordering. Each native build then feeds its actual platform package to
+a synthetic vN-to-vN+1 transition harness, which requires a higher package version,
+a stable application identifier, and byte-identical vault identity and contents.
+The final production-signed, fixed-feed installation and restart drill remains a
+release-environment gate on every supported platform; synthetic evidence is not
+reported as that live acceptance result.
 
 ## Performance strategy
 
@@ -552,7 +577,7 @@ The first native desktop slice is operational on Windows:
 
 - a Tauri 2 shell with a strict content-security policy and no filesystem, shell,
   network or dialog plugin exposed to the webview
-- forty-six explicitly allowlisted IPC commands for unlock, lock, list, open,
+- fifty-one explicitly allowlisted IPC commands for unlock, lock, list, open,
   save, create, move, delete, history, restore, templates, daily notes, search,
   backlinks, value-minimized graph data, typed property rows, saved views,
   workspace state, unlinked mentions, canvases, attachments and plugins
