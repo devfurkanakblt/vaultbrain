@@ -817,6 +817,20 @@ pub(crate) fn create_recovery_kit_locked(
 mod tests {
     use super::*;
 
+    /// macOS hands out temp paths under `/var/folders/...`, and `/var` is a
+    /// symlink to `/private/var`, which `reject_symlink` refuses. Resolve the
+    /// base directory so these tests exercise the guard on their own paths
+    /// rather than on the platform's temp layout.
+    fn temp_root() -> std::path::PathBuf {
+        let dir = std::env::temp_dir();
+        if cfg!(windows) {
+            // Canonicalizing hands back a verbatim extended-length path here.
+            dir
+        } else {
+            fs::canonicalize(&dir).unwrap_or(dir)
+        }
+    }
+
     #[derive(Debug, Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Vector {
@@ -868,7 +882,7 @@ mod tests {
     /// — is the same afterwards.
     #[test]
     fn changing_the_passphrase_keeps_the_keyset_and_preserves_a_recovery_slot() {
-        let dir = std::env::temp_dir().join(format!("vbrain-passphrase-{}", Uuid::new_v4()));
+        let dir = temp_root().join(format!("vbrain-passphrase-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         let keys = random_key_set();
         let before = keys.documents.clone();
@@ -915,7 +929,7 @@ mod tests {
 
     #[test]
     fn a_re_wrap_carries_the_legacy_change_identity_key_across() {
-        let dir = std::env::temp_dir().join(format!("vbrain-legacy-{}", Uuid::new_v4()));
+        let dir = temp_root().join(format!("vbrain-legacy-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         let mut keys = random_key_set();
         let legacy = Zeroizing::new([0x5au8; KEY_LENGTH]);
@@ -991,7 +1005,7 @@ mod tests {
 
     #[test]
     fn a_passphrase_change_refuses_a_weak_or_unchanged_secret_and_a_wrong_current_one() {
-        let dir = std::env::temp_dir().join(format!("vbrain-passphrase-bad-{}", Uuid::new_v4()));
+        let dir = temp_root().join(format!("vbrain-passphrase-bad-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         let keys = random_key_set();
         write(
@@ -1023,8 +1037,8 @@ mod tests {
     /// passphrase is the permanent loss of every note.
     #[test]
     fn a_recovery_kit_opens_the_vault_and_survives_a_passphrase_change() {
-        let dir = std::env::temp_dir().join(format!("vbrain-kit-{}", Uuid::new_v4()));
-        let outside = std::env::temp_dir().join(format!("vbrain-kit-out-{}", Uuid::new_v4()));
+        let dir = temp_root().join(format!("vbrain-kit-{}", Uuid::new_v4()));
+        let outside = temp_root().join(format!("vbrain-kit-out-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         fs::create_dir_all(&outside).unwrap();
         let kit_path = outside.join("kit.json");
@@ -1072,7 +1086,7 @@ mod tests {
 
     #[test]
     fn a_recovery_kit_is_refused_inside_the_vault_it_recovers() {
-        let dir = std::env::temp_dir().join(format!("vbrain-kit-inside-{}", Uuid::new_v4()));
+        let dir = temp_root().join(format!("vbrain-kit-inside-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         let keys = random_key_set();
         write(
@@ -1109,7 +1123,7 @@ mod tests {
 
     #[test]
     fn status_reports_slot_headers_without_unwrapping_anything() {
-        let dir = std::env::temp_dir().join(format!("vbrain-status-{}", Uuid::new_v4()));
+        let dir = temp_root().join(format!("vbrain-status-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         let keys = random_key_set();
         let primary = wrap_key_set(&keys, "a status passphrase", 14).unwrap();
@@ -1353,7 +1367,7 @@ mod tests {
 
     #[test]
     fn a_keyring_file_survives_a_write_and_a_read() {
-        let dir = std::env::temp_dir().join(format!("vault-brain-keyring-{}", Uuid::new_v4()));
+        let dir = temp_root().join(format!("vault-brain-keyring-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         let keys = random_key_set();
         let file = KeyringFile {
