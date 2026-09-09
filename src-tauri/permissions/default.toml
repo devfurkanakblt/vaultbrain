@@ -271,3 +271,28 @@ commands.allow = ["sync_status"]
 identifier = "allow-sync-verify-registry"
 description = "Allows verifying the owner's Ed25519 signature over the encrypted sync device registry. Read-only: cannot enroll, revoke or rotate."
 commands.allow = ["sync_verify_registry"]
+
+[[permission]]
+identifier = "allow-update-status"
+description = "Allows reading the native updater state without starting network activity."
+commands.allow = ["update_status"]
+
+[[permission]]
+identifier = "allow-check-for-update"
+description = "Allows an explicit user action to check the fixed signed release channel for an upgrade."
+commands.allow = ["check_for_update"]
+
+[[permission]]
+identifier = "allow-download-update"
+description = "Allows downloading and verifying only the update selected by the native updater."
+commands.allow = ["download_update"]
+
+[[permission]]
+identifier = "allow-cancel-update"
+description = "Allows cancelling the currently running native update download."
+commands.allow = ["cancel_update"]
+
+[[permission]]
+identifier = "allow-install-update"
+description = "Allows installing only a previously downloaded and verified update while the vault is locked."
+commands.allow = ["install_update"]

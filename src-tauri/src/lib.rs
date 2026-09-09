@@ -22,7 +22,10 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -35,6 +38,7 @@ use zeroize::Zeroizing;
 type HmacSha256 = Hmac<Sha256>;
 mod audit;
 mod keyring;
+mod updater;
 const INDEX_AAD: &str = "secondbrain-vault:document-index:v1";
 const DERIVED_LAYOUT: u8 = 5;
 const KEY_CHECK_CONTEXT: &str = "secondbrain-vault:document-key:v1";
@@ -139,6 +143,9 @@ struct VaultSession {
     /// The `audit` key, absent on a legacy vault. See `SessionKeys`.
     audit_key: Option<Zeroizing<[u8; 32]>>,
     index: DocumentIndex,
+    /// Shared with the updater controller. Once installation begins, every
+    /// write path fails closed even if it was queued before the vault lock.
+    install_gate: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1183,6 +1190,9 @@ fn with_vault_write<T>(
     session: &mut VaultSession,
     operation: impl FnOnce(&mut VaultSession) -> Result<T, String>,
 ) -> Result<T, String> {
+    if session.install_gate.load(Ordering::Acquire) {
+        return Err("vault writes are blocked while an update is installing".into());
+    }
     let _guard = VaultWriteGuard::acquire(&session.vault_dir)?;
     refresh_session_index(session)?;
     operation(session)
@@ -1845,6 +1855,7 @@ fn open_session(vault_path: &str, passphrase: &str) -> Result<VaultSession, Stri
         attachment_id_key,
         audit_key,
         index: DocumentIndex::empty(),
+        install_gate: Arc::new(AtomicBool::new(false)),
     };
     refresh_session_index(&mut session)?;
     if !index_existed {
@@ -3463,8 +3474,17 @@ fn unlock_vault(
     vault_path: String,
     passphrase: String,
     state: State<'_, AppState>,
+    updater_state: State<'_, updater::UpdaterState>,
 ) -> Result<VaultInfo, String> {
-    let session = open_session(&vault_path, &passphrase)?;
+    let mut session_slot = state
+        .session
+        .lock()
+        .map_err(|_| "vault session lock poisoned".to_string())?;
+    if updater_state.installation_blocks_vault_access() {
+        return Err("vault unlock is blocked while an update is installing".into());
+    }
+    let mut session = open_session(&vault_path, &passphrase)?;
+    session.install_gate = updater_state.install_gate();
     let info = VaultInfo {
         name: session
             .vault_dir
@@ -3480,10 +3500,7 @@ fn unlock_vault(
         .lock()
         .map_err(|_| "plugin instance lock poisoned")?
         .clear();
-    *state
-        .session
-        .lock()
-        .map_err(|_| "vault session lock poisoned")? = Some(session);
+    *session_slot = Some(session);
     Ok(info)
 }
 
@@ -5827,11 +5844,42 @@ fn pick_vault_directory(app: AppHandle) -> Result<Option<String>, String> {
     Ok(Some(path.to_string_lossy().into_owned()))
 }
 
+#[tauri::command(async)]
+fn install_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    updater_state: State<'_, updater::UpdaterState>,
+) -> Result<(), String> {
+    // Holding the session mutex makes the gate transition atomic with the
+    // locked-vault assertion. A queued write either finishes before this point
+    // or observes the gate in `with_vault_write`; a concurrent unlock checks it
+    // before publishing a new session.
+    let session = state
+        .session
+        .lock()
+        .map_err(|_| "vault session lock poisoned".to_string())?;
+    let (update, bytes) = updater::begin_install(&updater_state, session.is_none())?;
+    drop(session);
+    updater::emit_current(&app, &updater_state)?;
+
+    if update.install(bytes).is_err() {
+        let value = updater::fail_install(&updater_state)?;
+        let _ = tauri::Emitter::emit(&app, "vaultbrain://update-state", value);
+        return Err("the update could not be installed".into());
+    }
+
+    // Windows exits from the updater plugin after launching the installer.
+    // macOS and Linux return after replacement and require an explicit restart.
+    app.restart();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::default())
+        .manage(updater::UpdaterState::default())
         .invoke_handler(tauri::generate_handler![
             pick_vault_directory,
             unlock_vault,
@@ -5887,6 +5935,11 @@ pub fn run() {
             keyring_status,
             sync_status,
             sync_verify_registry,
+            updater::update_status,
+            updater::check_for_update,
+            updater::download_update,
+            updater::cancel_update,
+            install_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Vault Brain");

@@ -28,9 +28,15 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run test:platform-artifacts
+      - run: npm run test:release
+      - run: npm run test:update-acceptance
       - run: npm run desktop:test
       - run: npm run desktop:build
       - run: npm run benchmark
+      - run: npm run recovery:drill
+      - run: npm run benchmark:10k
+      - run: npm run benchmark:100k
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
       - run: npm run package:check
 
   node-platform:
@@ -97,6 +103,28 @@ jobs:
       - run: npm run tauri:build
       - name: Validate native bundle artifacts
         run: node scripts/platform-artifacts.mjs --platform ${{ matrix.platform }}
+      - name: Verify the synthetic two-version native package transition
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.platform }}" in
+            windows)
+              targets=(windows-msi windows-nsis)
+              ;;
+            macos)
+              targets=(macos-dmg)
+              ;;
+            linux)
+              targets=(linux-deb)
+              ;;
+          esac
+          for target in "${targets[@]}"; do
+            node scripts/release/native-update-acceptance.mjs \
+              --platform "${{ matrix.platform }}" \
+              --target "$target" \
+              --bundle-dir src-tauri/target/release/bundle \
+              --vault-dir test/fixtures/keyring-v2
+          done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: vault-brain-${{ matrix.platform }}-${{ github.sha }}

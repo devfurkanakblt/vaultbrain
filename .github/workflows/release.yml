@@ -1,26 +1,104 @@
-name: Windows release
+name: Draft release
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing stable tag to package as a draft
+        required: true
+        type: string
 
 permissions:
   contents: read
 
+concurrency:
+  group: draft-release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
-  installers:
-    runs-on: windows-latest
-    permissions:
-      contents: read
-      id-token: write
-      attestations: write
+  validate-release:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      sha: ${{ steps.release.outputs.sha }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
+      - run: npm ci
+      - name: Require a public repository
+        env:
+          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+        shell: bash
+        run: test "$REPOSITORY_PRIVATE" = false
+      - id: release
+        name: Validate immutable stable release input
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"
+          RELEASE_SHA="$(git rev-list -n 1 "$RELEASE_TAG")"
+          git checkout --detach "$RELEASE_SHA"
+          node scripts/release/validate-versions.mjs "$RELEASE_TAG"
+          git fetch origin main
+          git merge-base --is-ancestor "$RELEASE_SHA" origin/main
+          CI_RUN="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$RELEASE_SHA&branch=main&event=push&per_page=1" --jq '.workflow_runs[0]')"
+          test "$CI_RUN" != "null"
+          test "$(jq -r '.head_sha' <<<"$CI_RUN")" = "$RELEASE_SHA"
+          test "$(jq -r '.status' <<<"$CI_RUN")" = "completed"
+          test "$(jq -r '.conclusion' <<<"$CI_RUN")" = "success"
+          if gh release view "$RELEASE_TAG" --json isDraft >/dev/null 2>&1; then
+            echo "Refusing to overwrite an existing release, including a published release." >&2
+            exit 1
+          fi
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "sha=$RELEASE_SHA" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: validate-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows
+            os: windows-latest
+            config: src-tauri/tauri.windows.conf.json
+          - platform: macos
+            os: macos-15
+            config: src-tauri/tauri.macos.conf.json
+          - platform: linux
+            os: ubuntu-latest
+            config: src-tauri/tauri.linux.conf.json
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.validate-release.outputs.sha }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install Linux desktop build dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
         with:
           toolchain: stable
@@ -28,71 +106,146 @@ jobs:
         with:
           workspaces: src-tauri
       - run: npm ci
-      - run: npm audit --audit-level=high
-      - run: npm run quality
-      - run: npm run quality:rust
-      - run: npm run tauri:build
-      - name: Require Authenticode credentials for stable releases
-        if: startsWith(github.ref, 'refs/tags/v1.')
-        shell: pwsh
+      - name: Create fail-closed signed-release overlay
         env:
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE) -or
-              [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) {
-            throw "Stable v1 releases require WINDOWS_CERTIFICATE and WINDOWS_CERTIFICATE_PASSWORD secrets."
-          }
-      - name: Authenticode-sign Windows installers
-        shell: pwsh
+          TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
+        run: node scripts/release/prepare-config.mjs scripts/release/tauri.release.conf.json
+      - name: Build signed ${{ matrix.platform }} updater artifacts
         env:
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        shell: bash
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE) -or
-              [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) {
-            Write-Host 'Authenticode credentials are absent; leaving this pre-1.0 test artifact unsigned.'
-            exit 0
-          }
-          $certificatePath = Join-Path $env:RUNNER_TEMP 'vault-brain-authenticode.pfx'
-          try {
-            [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
-            $installers = Get-ChildItem src-tauri/target/release/bundle -Recurse -File -Include *.msi,*.exe
-            if (-not $installers) { throw 'No Windows installers were produced.' }
-            foreach ($installer in $installers) {
-              & signtool sign /fd SHA256 /td SHA256 /tr https://timestamp.digicert.com /f $certificatePath /p $env:WINDOWS_CERTIFICATE_PASSWORD $installer.FullName
-              if ($LASTEXITCODE -ne 0) { throw "signtool failed for $($installer.Name)." }
-              & signtool verify /pa /all $installer.FullName
-              if ($LASTEXITCODE -ne 0) { throw "Authenticode verification failed for $($installer.Name)." }
-            }
-          } finally {
-            if (Test-Path -LiteralPath $certificatePath) {
-              Remove-Item -LiteralPath $certificatePath -Force
-            }
-          }
-      - name: Generate SHA-256 checksums
-        shell: pwsh
+          set -euo pipefail
+          test -n "$TAURI_SIGNING_PRIVATE_KEY"
+          npm run tauri:build -- --config scripts/release/tauri.release.conf.json --config ${{ matrix.config }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: vault-brain-${{ matrix.platform }}-${{ needs.validate-release.outputs.tag }}
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/msi/*.msi.sig
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            src-tauri/target/release/bundle/nsis/*-setup.exe.sig
+            src-tauri/target/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
+            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/deb/*.deb.sig
+
+  create-draft:
+    needs: [validate-release, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    env:
+      RELEASE_TAG: ${{ needs.validate-release.outputs.tag }}
+      RELEASE_SHA: ${{ needs.validate-release.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.validate-release.outputs.sha }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: vault-brain-*-${{ needs.validate-release.outputs.tag }}
+          path: release-artifacts
+          merge-multiple: true
+      - name: Flatten only supported final bundle files
+        shell: bash
         run: |
-          Get-ChildItem src-tauri/target/release/bundle -Recurse -File -Include *.msi,*.exe |
-            Get-FileHash -Algorithm SHA256 |
-            ForEach-Object { "$($_.Hash.ToLower())  $($_.Path.Replace((Get-Location).Path + '\\', ''))" } |
-            Set-Content -Encoding ascii src-tauri/target/release/bundle/checksums.sha256
+          set -euo pipefail
+          mkdir release-flat
+          while IFS= read -r -d '' source; do
+            name="${source##*/}"
+            case "$name" in
+              *.msi|*.msi.sig|*-setup.exe|*-setup.exe.sig|*.app.tar.gz|*.app.tar.gz.sig|*.dmg|*.deb|*.deb.sig) ;;
+              *) continue ;;
+            esac
+            test ! -e "release-flat/$name"
+            cp "$source" "release-flat/$name"
+          done < <(find release-artifacts -type f -print0)
       - uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
           path: .
           format: spdx-json
-          output-file: src-tauri/target/release/bundle/sbom.spdx.json
+          output-file: release-flat/sbom.spdx.json
           upload-artifact: false
           upload-release-assets: false
-      - uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+      - name: Create immutable package subject checksums
+        shell: bash
+        run: |
+          node scripts/release/assemble-release.mjs --subjects release-flat "$RELEASE_TAG"
+      - id: attest
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
         with:
-          subject-checksums: src-tauri/target/release/bundle/checksums.sha256
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: vault-brain-windows-${{ github.ref_name }}
-          if-no-files-found: error
-          path: |
-            src-tauri/target/release/bundle/msi/*.msi
-            src-tauri/target/release/bundle/nsis/*-setup.exe
-            src-tauri/target/release/bundle/checksums.sha256
-            src-tauri/target/release/bundle/sbom.spdx.json
+          subject-checksums: release-flat/checksums.sha256
+      - name: Save and verify the signed provenance bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          subject="$(cut -c67- release-flat/checksums.sha256 | head -n 1)"
+          cp "${{ steps.attest.outputs.bundle-path }}" release-flat/provenance.intoto.jsonl
+          gh attestation verify "release-flat/$subject" --repo "$GITHUB_REPOSITORY" --bundle release-flat/provenance.intoto.jsonl
+          node scripts/release/assemble-release.mjs release-flat "$RELEASE_TAG" "$(date --utc +%Y-%m-%dT%H:%M:%SZ)"
+      - id: create_draft
+        name: Create this run's immutable draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release="$(gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
+            -f tag_name="$RELEASE_TAG" \
+            -f target_commitish="$RELEASE_SHA" \
+            -f name="Vault Brain $RELEASE_TAG" \
+            -F draft=true)"
+          release_id="$(jq -er '.id' <<<"$release")"
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+          test "$(jq -r '.draft' <<<"$release")" = true
+      - name: Upload and verify this run's complete draft assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" release-flat/*
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y minisign
+          mkdir downloaded-release
+          gh release download "$RELEASE_TAG" --dir downloaded-release
+          node scripts/release/verify-download.mjs release-flat downloaded-release
+      - name: Remove only this run's incomplete draft
+        if: ${{ failure() && steps.create_draft.outputs.release_id != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CREATED_RELEASE_ID: ${{ steps.create_draft.outputs.release_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! observed_release="$(gh api "repos/$GITHUB_REPOSITORY/releases/$CREATED_RELEASE_ID" 2>/dev/null)"; then
+            exit 0
+          fi
+          if node --input-type=module -e '
+            import { isOwnedDraftRelease } from "./scripts/release/release.mjs";
+            const [createdReleaseId, observedRelease] = process.argv.slice(1);
+            process.exit(isOwnedDraftRelease({
+              createdReleaseId: Number(createdReleaseId),
+              observedRelease: JSON.parse(observedRelease),
+            }) ? 0 : 1);
+          ' "$CREATED_RELEASE_ID" "$observed_release"; then
+            gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/$CREATED_RELEASE_ID"
+          else
+            echo "The observed release is not this run's draft; refusing deletion." >&2
+          fi

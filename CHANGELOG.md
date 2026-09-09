@@ -5,6 +5,18 @@ Versioning once the encrypted storage format reaches 1.0.
 
 ## Unreleased
 
+- Added a draft-only GitHub Releases pipeline for signed Tauri updater artifacts,
+  checksums, SPDX SBOM, provenance and fixed bundle-specific update targets.
+- Added a native-owned, manual desktop updater with separate check, download,
+  cancellation and install consent. It pins the release source, rejects unsafe
+  metadata, verifies the Tauri signature, flushes note and canvas writes, and
+  locks the vault before installation. Offline work never depends on the update
+  channel.
+- CI now runs the release contract, recovery drill, 10k/100k benchmark gates and a
+  synthetic two-version transition against each native package. The harness rejects
+  version or application-identity drift and any vault identity/content change. Real
+  production-signed native installation remains a release-environment acceptance gate.
+
 - Re-key now includes the encrypted retention policy and preserves its values.
 - The Rust core preserves the optional `legacyChangeIdentity` key when
   re-wrapping a keyset. A second cross-core vector covers this format field.

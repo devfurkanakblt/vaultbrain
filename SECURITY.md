@@ -18,14 +18,27 @@ affected versions, impact, and any suggested mitigation.
 
 See "Supported versions" above for the current release-readiness gate.
 
-## Windows release signing
+## Release and updater signing
 
-Stable `v1.*` release tags fail closed unless the repository has both
-`WINDOWS_CERTIFICATE` (a base64-encoded Authenticode PFX) and
-`WINDOWS_CERTIFICATE_PASSWORD` secrets. The release workflow signs every MSI
-and NSIS executable with SHA-256, obtains an RFC 3161 timestamp, verifies the
-signature, and only then produces checksums, SBOM and provenance. Pre-1.0
-artifacts without these secrets must be described as unsigned test builds.
+The zero-cost release channel does not use an Authenticode certificate or an
+Apple Developer ID. Windows SmartScreen and macOS Gatekeeper can therefore warn
+on a first install even when the downloaded bytes match the published checksum.
+Those operating-system publisher warnings must not be described as bypassed.
+
+The in-app updater has a separate, mandatory Tauri signature. Its public key and
+fixed HTTPS GitHub Releases feed are embedded at build time; the webview cannot
+replace either one or supply an installer path. A release build fails closed
+when the public key or private signing secret is missing. Keep an offline backup
+of the updater private key: losing it can make a manual reinstall necessary for
+existing installations.
+The vault recovery kit is unrelated to this release key and cannot restore it.
+
+Updates are never checked, downloaded, or installed automatically. Before a
+verified package is installed, the desktop app saves pending note and canvas
+edits and locks the vault. Any save, download, signature, or install failure
+stops the operation without disabling ordinary offline use. The updater has no
+automatic rollback; release acceptance therefore includes a real two-version
+installation drill on every supported platform.
 
 ## What the grant layer does and does not claim
 
@@ -39,7 +52,7 @@ a boundary against a model:
 - The security boundary is the passphrase and the encrypted files. `vbrain get`
   (Mode 1) remains the only path that involves no model at all.
 
-Report a grant that can be bypassed *without* the passphrase — for example a
+Report a grant that can be bypassed _without_ the passphrase — for example a
 scope that leaks a value it should mask — through the flow above.
 
 ## Keyring and recovery limits

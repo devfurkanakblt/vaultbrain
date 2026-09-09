@@ -42,7 +42,7 @@ import { AttachmentLibrary } from "./AttachmentLibrary";
 import { vaultBridge } from "./bridge";
 import { CommandPalette, type PaletteCommand } from "./CommandPalette";
 import { useConfirm } from "./Confirm";
-import { CanvasBoard } from "./CanvasBoard";
+import { CanvasBoard, type CanvasBoardHandle } from "./CanvasBoard";
 import { ContextPanel } from "./ContextPanel";
 import type { OutlineItem } from "./ContextPanel";
 import { KnowledgeGraph } from "./KnowledgeGraph";
@@ -56,6 +56,8 @@ import { clearOwnedClipboard, copyWithExpiry } from "./secure-clipboard";
 import { KeyringStatus } from "./KeyringStatus";
 import { SyncStatus } from "./SyncStatus";
 import { ThemeEditor } from "./ThemeEditor";
+import { UpdatePanel } from "./UpdatePanel";
+import { prepareUpdaterInstall } from "./update-install";
 import { WorkspacesDialog } from "./Workspaces";
 import { applyTheme, clearTheme, DEFAULT_THEME, loadTheme, saveTheme, type ThemeSettings } from "./theme";
 import { useVirtualWindow } from "./virtual";
@@ -65,7 +67,7 @@ const MarkdownEditor = lazy(() => import("./Editor").then((module) => ({ default
 const MarkdownPreview = lazy(() => import("./Preview"));
 
 type ViewMode = "write" | "read";
-type WorkspaceView = "notes" | "graph" | "properties" | "canvas" | "files" | "plugins" | "sync" | "keys";
+type WorkspaceView = "notes" | "graph" | "properties" | "canvas" | "files" | "plugins" | "sync" | "keys" | "updates";
 type LockReason = "manual" | "inactivity";
 /**
  * A message and how it should read. Success and failure shared one green tick
@@ -79,6 +81,10 @@ type TreeRow =
 const IDLE_CHOICES = [1, 5, 15, 0];
 const CLIPBOARD_TTL_MS = 30_000;
 const TREE_ROW_HEIGHT = 30;
+
+function needsSave(state: SaveState) {
+  return state === "dirty" || state === "error";
+}
 
 function relativeTime(iso: string) {
   const minutes = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 60000));
@@ -323,6 +329,13 @@ export function App() {
   const [theme, setTheme] = useState<ThemeSettings>(loadTheme);
   const [themeOpen, setThemeOpen] = useState(false);
   const saveTimer = useRef<number | undefined>(undefined);
+  const canvasBoard = useRef<CanvasBoardHandle>(null);
+  const activeRef = useRef<NoteDocument | undefined>(active);
+  const saveStateRef = useRef<SaveState>(saveState);
+  const noteGeneration = useRef(0);
+  const noteSaveInFlight = useRef<Promise<boolean> | null>(null);
+  activeRef.current = active;
+  saveStateRef.current = saveState;
 
   const treeRows = useMemo<TreeRow[]>(() => folders(notes).flatMap(([folder, items]) => {
     const open = expanded.has(folder);
@@ -393,20 +406,45 @@ export function App() {
   }, []);
 
   const persistActive = useCallback(async () => {
-    if (!active || (saveState !== "dirty" && saveState !== "error")) return true;
-    setSaveState("saving");
-    try {
-      const saved = await vaultBridge.saveNote(active);
-      setActive(saved);
-      rememberTab(saved);
-      setSaveState("saved");
-      await refreshList();
+    if (noteSaveInFlight.current) {
+      const saved = await noteSaveInFlight.current;
+      if (!saved) return false;
+      if (needsSave(saveStateRef.current)) return persistActive();
       return true;
-    } catch {
-      setSaveState("error");
-      return false;
     }
-  }, [active, refreshList, rememberTab, saveState]);
+    const pending = activeRef.current;
+    if (!pending || !needsSave(saveStateRef.current)) return true;
+    const persistedGeneration = noteGeneration.current;
+    setSaveState("saving");
+    saveStateRef.current = "saving";
+    const operation = (async () => {
+      try {
+        const saved = await vaultBridge.saveNote(pending);
+        if (noteGeneration.current === persistedGeneration) {
+          activeRef.current = saved; setActive(saved); rememberTab(saved);
+          setSaveState("saved"); saveStateRef.current = "saved";
+        } else {
+          const current = activeRef.current;
+          if (current) {
+            const rebased = { ...current, revision: saved.revision, updatedAt: saved.updatedAt };
+            activeRef.current = rebased; setActive(rebased);
+          }
+          setSaveState("dirty"); saveStateRef.current = "dirty";
+        }
+        await refreshList();
+        return true;
+      } catch {
+        setSaveState("error"); saveStateRef.current = "error";
+        return false;
+      } finally {
+        noteSaveInFlight.current = null;
+      }
+    })();
+    noteSaveInFlight.current = operation;
+    const saved = await operation;
+    if (saved && needsSave(saveStateRef.current)) return persistActive();
+    return saved;
+  }, [refreshList, rememberTab]);
 
   async function unlock(path: string, passphrase: string) {
     const info = await vaultBridge.unlock(path, passphrase);
@@ -469,8 +507,14 @@ export function App() {
   }, [active, openTabs, persistActive, secondary]);
 
   const mutateActive = useCallback((change: Partial<NoteDocument>) => {
-    setActive((current) => current ? { ...current, ...change } : current);
+    setActive((current) => {
+      const next = current ? { ...current, ...change } : current;
+      activeRef.current = next;
+      return next;
+    });
     setSaveState("dirty");
+    saveStateRef.current = "dirty";
+    noteGeneration.current += 1;
   }, []);
 
   const saveNow = useCallback(async () => { await persistActive(); }, [persistActive]);
@@ -496,8 +540,8 @@ export function App() {
     }
   }, [fail, report]);
 
-  const lock = useCallback(async (reason: LockReason = "manual") => {
-    if (active && (saveState === "dirty" || saveState === "error")) {
+  const lock = useCallback(async (reason: LockReason = "manual", editsAlreadySaved = false) => {
+    if (!editsAlreadySaved && active && (saveState === "dirty" || saveState === "error")) {
       setSaveState("saving");
       try {
         await vaultBridge.saveNote(active);
@@ -521,6 +565,14 @@ export function App() {
       ? `Locked automatically after ${idleMinutes} minute${idleMinutes === 1 ? "" : "s"} without activity. The clipboard was cleared too.`
       : "");
   }, [active, idleMinutes, saveState]);
+
+  const prepareUpdateInstall = useCallback(async () => {
+    await prepareUpdaterInstall(
+      persistActive,
+      async () => canvasBoard.current?.flush(),
+      async () => lock("manual", true),
+    );
+  }, [lock, persistActive]);
 
   useEffect(() => {
     if (saveState !== "dirty") return;
@@ -952,6 +1004,7 @@ export function App() {
           ><KeyRound size={14} /><span>Keys</span>{keyringStatus && !keyringStatus.recoveryConfigured
             ? <span className="attention-dot" aria-label="This vault has no recovery kit" />
             : null}</button>
+          <button className={workspaceView === "updates" ? "active" : ""} onClick={() => void showWorkspace("updates")}><RefreshCw size={14} /><span>Updates</span></button>
         </div>
         <button className="quick-find" onClick={() => setSearchOpen(true)}><Search size={15} /><span>Find anything…</span><kbd>⇧⌘F</kbd></button>
         {bookmarks.length > 0 && <div className="bookmark-block">
@@ -998,6 +1051,11 @@ export function App() {
           <p><b>{notes.length}</b> encrypted {notes.length === 1 ? "note" : "notes"} <span>·</span> <b>{spread.length}</b> {spread.length === 1 ? "folder" : "folders"} <span>·</span> local</p>
         </div>
       </aside>
+
+      <div className="workspace-view-slot" hidden={workspaceView !== "canvas"}><CanvasBoard
+        ref={canvasBoard} canvases={canvases} notes={notes} attachments={attachments}
+        onRefresh={refreshAssets} onOpenNote={openFromKnowledge} onNotice={report}
+      /></div>
 
       {workspaceView === "notes" ? <section className="document-stage">
         {openTabs.length > 0 && <div className="tab-strip" role="tablist" aria-label="Open notes">
@@ -1067,14 +1125,7 @@ export function App() {
           <div><span>UTF-8</span><span>MARKDOWN</span><span>Ln {active.body.split("\n").length}</span></div>
         </footer>}
       </section> : workspaceView === "graph" ? <KnowledgeGraph graph={graph} onOpen={openFromKnowledge} />
-      : workspaceView === "canvas" ? <CanvasBoard
-        canvases={canvases}
-        notes={notes}
-        attachments={attachments}
-        onRefresh={refreshAssets}
-        onOpenNote={openFromKnowledge}
-        onNotice={report}
-      />
+      : workspaceView === "canvas" ? null
       : workspaceView === "files" ? <AttachmentLibrary
         attachments={attachments}
         onRefresh={refreshAssets}
@@ -1106,6 +1157,7 @@ export function App() {
             <h3>This vault isn't enrolled in sync</h3>
             <p>Enroll a device from the CLI to see the registry, checkpoint and change counts here. The desktop app never enrolls, revokes, or mutates sync state itself.</p>
           </div>)
+      : workspaceView === "updates" ? <UpdatePanel onPrepareInstall={prepareUpdateInstall} />
       : <PropertyTable
         rows={propertyRows}
         views={savedViews}

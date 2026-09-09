@@ -79,11 +79,11 @@ and no hosted service is ever required.
   - [x] Emit changes automatically from note/canvas/attachment transactions and apply resolved remote changes to live storage
   - [x] Capture plugin package and plugin-policy transactions
   - [ ] Portable workspace state. The Phase 6 plan defines portable state as
-    notes, canvases, attachments, plugin packages, `plugin-policy`,
-    `saved-views` and `workspace` including bookmarks. Only `plugin-policy` is
-    captured. Saved views, bookmarks and layouts live solely in the Rust core's
-    `workspace.enc`, which the TypeScript core — the one that owns sync —
-    cannot read at all, so a second device silently loses them.
+        notes, canvases, attachments, plugin packages, `plugin-policy`,
+        `saved-views` and `workspace` including bookmarks. Only `plugin-policy` is
+        captured. Saved views, bookmarks and layouts live solely in the Rust core's
+        `workspace.enc`, which the TypeScript core — the one that owns sync —
+        cannot read at all, so a second device silently loses them.
 - [x] Owner-signed device enrollment and sequence-bounded removal
   - [x] Ed25519 proof-of-possession requests, signed certificates and encrypted registry exchange
   - [x] Per-change device signatures, authority pinning, rollback rejection and revocation cutoffs
@@ -98,18 +98,18 @@ and no hosted service is ever required.
   - [ ] Desktop-driven enrollment, revocation and relay exchange
 - [x] Resumable chunked transport for large attachment blobs
   - [x] Version 3 change bodies carry an attachment manifest; the bytes
-    travel as content-addressed, AEAD-sealed 1 MiB blobs
+        travel as content-addressed, AEAD-sealed 1 MiB blobs
   - [x] Per-chunk idempotent push and pull, and an apply that fails closed
-    while a chunk is missing
+        while a chunk is missing
   - [x] `sync blobs status/fetch/prune` and relay-free bundle transport via
-    `sync export --bundle` / `sync import`
+        `sync export --bundle` / `sync import`
 - [x] Automated encrypted-backup plus relay catch-up recovery drill
 - [ ] External security audit and stable 1.0 format
   - [x] Stable 1.0 on-disk format with committed conformance fixtures
   - [x] Frozen format inventory covers the keyring: `keyring.json` is in
-    `FORMAT_COMPATIBILITY` and the artifact catalogue, and the version 2
-    manifest tombstone is a stated 1.x carve-out rather than an undeclared
-    version bump
+        `FORMAT_COMPATIBILITY` and the artifact catalogue, and the version 2
+        manifest tombstone is a stated 1.x carve-out rather than an undeclared
+        version bump
   - [ ] External security audit (readiness package in `docs/AUDIT-SCOPE.md`)
 
 ## Phase 7 — Key wrapping, passphrase change and re-key
@@ -132,7 +132,7 @@ can be raised per vault. Design contract:
 - [x] 7.4 `vbrain rekey`
   - [x] Fresh data keys and a re-encrypted vault, so a leaked passphrase has an answer
   - [x] Resumable: interrupt a re-key at a random object, resume, and assert the
-    vault is complete and consistent
+        vault is complete and consistent
 - [x] 7.5 Survivable keyrings: a second way in, a way to look inside, and a record of every change
   - [x] Recovery slot, so one forgotten passphrase or one damaged `keyring.json` is not
         the permanent loss of every note. The format already carries a slot list and
@@ -193,7 +193,7 @@ keyring write path — `wrap_key_set`, `unwrap_keyring`, `read`, `write` — ove
 `scrypt`, `aes-gcm`, `sha2`, `hmac` and `rand`. Keyring status, passphrase
 change and recovery-kit creation therefore need no cryptographic primitive the
 desktop core does not already have, and are implemented natively. Recovery
-*restore* and re-key are not: restore verifies vault ciphertext before
+_restore_ and re-key are not: restore verifies vault ciphertext before
 replacing a damaged keyring, which would mean a second `openSyncChange`, and
 re-key rewrites every object. Both stay in the CLI, and the application's job
 is to name the exact command. Restore in particular runs when `keyring.json`
@@ -274,19 +274,22 @@ round trips without placing the passphrase in a child process argument vector.
 
 ## Phase 12 — Actually shipping
 
-The release workflow signs, checksums, produces an SPDX SBOM and attests build
-provenance, then uploads the result as a workflow artifact, which expires.
-Nothing is published, and there is no update path, so a security fix cannot
-reach anyone who already installed a build.
+The release workflow builds Tauri-signed updater packages, checksums them,
+produces an SPDX SBOM and attests build provenance, then prepares an immutable
+draft release for a maintainer to publish. The native updater and its UI are
+implemented, but Phase 12 acceptance still depends on the real two-version
+installation drill on every supported platform.
 
-- [ ] Publish signed installers with their checksums, SBOM and provenance as
-      release assets.
-- [ ] An update path, with a recorded decision about whether it is automatic.
+- [x] Build and stage signed installers with their checksums, SBOM and provenance
+      in an immutable draft-release workflow.
+- [x] An update path, with a recorded decision that it is never automatic.
       An updater is also a code-delivery channel into a vault holding the
       user's secrets, so that choice is a security decision, not a convenience.
-- [ ] Put the evidence that matters into CI. `recovery:drill` runs nowhere, and
-      only the 1,000-note benchmark gates a change while the roadmap claims 10k
-      and 100k gates.
+- [x] Put recovery, 10k/100k benchmark, release-contract and synthetic two-version
+      native package-transition evidence into CI.
+- [ ] Provision and back up the production signing key, execute the draft workflow,
+      and record real signed vN-to-vN+1 updater installation on Windows x64, macOS
+      ARM64 and Linux x64 before the maintainer publishes the draft.
 
 ## Phase 13 — One implementation of each thing
 
