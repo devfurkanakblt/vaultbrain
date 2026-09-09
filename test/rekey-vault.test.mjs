@@ -1499,6 +1499,90 @@ test("a re-key rotates exactly the three content keys and pins exactly the three
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test("identity rotation renames attachments, preserves canvas history, and starts a clean owner sync epoch", () => {
+  const { dir, attachmentId } = seedVault();
+  const vault = new DocumentVault(dir, PASSPHRASE);
+  const canvas = vault.putCanvas({
+    path: "Atlas/Attached.canvas",
+    title: "Attached",
+    nodes: [{ id: "file", type: "file", attachmentId, file: "note.bin", x: 0, y: 0, width: 1, height: 1 }],
+    edges: [],
+  });
+  vault.putCanvas({
+    id: canvas.id,
+    path: canvas.path,
+    title: canvas.title,
+    nodes: [{ id: "file", type: "file", attachmentId, file: "renamed.bin", x: 0, y: 0, width: 1, height: 1 }],
+    edges: [],
+  });
+  vault.lock();
+
+  const next = "phase-77-identity-rotation-passphrase";
+  const report = rekeyVault(dir, PASSPHRASE, next, {
+    rotateIdentities: { ownerLabel: "Rekeyed owner", ownerDeviceId: "66666666-6666-4666-8666-666666666666" },
+  });
+
+  assert.deepEqual(report.rotated.sort(), ["attachmentId", "documents", "kv", "syncChange", "syncEnvelope"].sort());
+  assert.equal(report.pinned.map((entry) => entry.name).includes("audit"), true);
+  forgetVaultKeys();
+  const rotatedKeys = openVaultKeys(dir, next);
+  assert.equal(rotatedKeys.legacyChangeIdentity, undefined, "identity rotation must not carry the retired change identity");
+  zeroKeySet(rotatedKeys);
+  const reopened = new DocumentVault(dir, next);
+  const attachments = reopened.listAttachments();
+  assert.equal(attachments.length, 1);
+  assert.notEqual(attachments[0].id, attachmentId);
+  assert.deepEqual(reopened.getAttachment(attachments[0].id).data, Buffer.from("phase 7.4 attachment"));
+  assert.equal(reopened.getCanvas(canvas.id).nodes[0].attachmentId, attachments[0].id);
+  assert.equal(reopened.getCanvasRevision(canvas.id, 1).nodes[0].attachmentId, attachments[0].id);
+  reopened.lock();
+  const manager = new SyncDeviceManager(dir, next);
+  assert.deepEqual(manager.state().body.devices.map((device) => device.certificate.deviceId), ["66666666-6666-4666-8666-666666666666"]);
+  manager.close();
+  const log = new SyncChangeLog(dir, next);
+  assert.ok(log.changes().length > 0, "the clean sync epoch must bootstrap current portable content");
+  log.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("identity rotation recovery replays post-install identity deletions after a crash", () => {
+  const { dir, attachmentId } = seedVault();
+  const next = "phase-77-identity-delete-recovery-passphrase";
+  const liveAttachment = path.join(dir, "documents", "attachments", attachmentId, "manifest.enc");
+  const realRmSync = fs.rmSync;
+  let injected = false;
+  try {
+    fs.rmSync = (target, options) => {
+      if (!injected && path.resolve(target) === liveAttachment) {
+        injected = true;
+        throw new Error("simulated crash during identity deletion");
+      }
+      return realRmSync(target, options);
+    };
+    assert.throws(
+      () => rekeyVault(dir, PASSPHRASE, next, {
+        rotateIdentities: { ownerLabel: "Rekeyed owner", ownerDeviceId: "77777777-7777-4777-8777-777777777777" },
+      }),
+      /simulated crash/u,
+    );
+  } finally {
+    fs.rmSync = realRmSync;
+  }
+  assert.equal(injected, true);
+  assert.equal(resumeRekey(dir), "finished");
+  forgetVaultKeys();
+  const reopened = new DocumentVault(dir, next);
+  assert.equal(reopened.listAttachments().length, 1);
+  assert.equal(fs.existsSync(liveAttachment), false, "recovery must finish the retiring identity deletion");
+  assert.equal(
+    fs.existsSync(path.join(dir, "documents", "attachments", attachmentId)),
+    false,
+    "recovery must remove the old attachment identity directory too",
+  );
+  reopened.lock();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 // seedVault() produces no sync change, so the orchestration's sync-change
 // branch — and the syncEnvelope rotation that only shows up there — is
 // otherwise never driven end to end.

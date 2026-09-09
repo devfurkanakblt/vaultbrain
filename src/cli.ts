@@ -27,6 +27,7 @@ import { changeVaultPassphrase, MIN_PASSPHRASE_LENGTH } from "./keyring-passphra
 import { MALFORMED_JOURNAL_MESSAGE, journalPath, rekeyVault, resumeRekey, stagingRoot } from "./keyring-rekey.js";
 import { detectVaultFormat } from "./keyring.js";
 import { readKeyringStatus } from "./keyring-status.js";
+import { inspectVaultLock, recoverVaultLock } from "./vault-lock.js";
 import {
   createRecoveryKit,
   generateRecoveryCode,
@@ -143,7 +144,13 @@ function commandPath(actionCommand: Command): string {
 
 program.hook("preAction", (_thisCommand, actionCommand) => {
   const fullCommand = commandPath(actionCommand);
-  if (fullCommand === "rekey" || fullCommand === "init" || fullCommand === "lock" || fullCommand === "keychain-status") {
+  if (
+    fullCommand === "rekey" ||
+    fullCommand === "init" ||
+    fullCommand === "lock" ||
+    fullCommand === "keychain-status" ||
+    fullCommand.startsWith("vault-lock ")
+  ) {
     return;
   }
   const dir = program.opts().vault as string;
@@ -2366,10 +2373,14 @@ program
   .command("rekey")
   .description("replace the vault keyset and re-encrypt every object under it")
   .option("--keep-passphrase", "rotate the keys but keep wrapping them under the current passphrase")
+  .option("--rotate-identities", "replace attachment and sync identities, reset sync peers, and bootstrap a new owner")
+  .option("--backup <file>", "verified encrypted backup required before rotating identities")
+  .option("--owner-label <label>", "label for the new sync owner after identity rotation", "Rekeyed owner")
   .option("--recovery-kit <file>", "offline recovery kit to advance alongside this re-key")
   .action(async (opts) => {
     const dir = program.opts().vault;
     const keepPassphrase = Boolean(opts.keepPassphrase);
+    const rotateIdentities = Boolean(opts.rotateIdentities);
 
     // An interrupted run is settled first, and settling it asks for nothing.
     // Recovery needs no passphrase, and the passphrase it leaves in force is
@@ -2418,6 +2429,17 @@ program
       ? ""
       : (process.env.VBRAIN_NEW_PASSPHRASE ?? (await readNewPassphrase()));
 
+    // Identity rotation destroys the local sync authority and old attachment
+    // addresses. Require a backup that this process has opened successfully
+    // before the point-of-no-return re-key begins.
+    if (rotateIdentities) {
+      const backupPath = opts.backup as string | undefined;
+      if (!backupPath) throw new Error("--rotate-identities requires --backup <file> for a verified encrypted backup.");
+      createBackup(dir, backupPath, current);
+      verifyBackup(backupPath, current);
+      console.log(`Verified encrypted backup at ${path.resolve(backupPath)} before identity rotation.`);
+    }
+
     // Only asked for when a kit was named: a vault with no recovery slot must
     // not be made to answer a recovery-code prompt it has no use for, and one
     // that does have a slot but was given no kit here refuses inside
@@ -2436,7 +2458,13 @@ program
 
     let report;
     try {
-      report = rekeyVault(dir, current, next, { keepPassphrase, recovery });
+      report = rekeyVault(dir, current, next, {
+        keepPassphrase,
+        recovery,
+        rotateIdentities: rotateIdentities
+          ? { ownerLabel: String(opts.ownerLabel), ownerDeviceId: crypto.randomUUID() }
+          : undefined,
+      });
     } catch (error) {
       reportMalformedJournal(dir, error);
       throw error;
@@ -2497,12 +2525,16 @@ program
       }
     }
 
-    console.log("Attachment identities, sync change IDs and the audit chain are unchanged by design:");
+    console.log(rotateIdentities
+      ? "Identity rotation reset sync authority and attachment addresses. Existing peers must re-enroll into this vault."
+      : "Attachment identities, sync change IDs and the audit chain are unchanged by design:");
     for (const pinned of report.pinned) {
       console.log(`  ${pinned.name} is pinned because ${pinned.reason}.`);
     }
     console.log(
-      "Someone who kept the old keyset can still confirm a guessed file is in this vault, though they cannot read it.",
+      rotateIdentities
+        ? "The old keyset cannot confirm current attachment or sync identities; older backups and relay copies remain unchanged."
+        : "Someone who kept the old keyset can still confirm a guessed file is in this vault, though they cannot read it.",
     );
   });
 
@@ -2535,6 +2567,29 @@ program
       forgetPassphrase(dir)
         ? `Locked: the remembered passphrase for ${dir} was removed from the OS credential store.`
         : `Nothing to forget: no remembered passphrase for ${dir}.`,
+    );
+  });
+
+const vaultLock = program
+  .command("vault-lock")
+  .description("inspect or safely recover the on-disk writer lock without opening the vault");
+
+vaultLock
+  .command("status")
+  .description("print the lock state as JSON")
+  .action(() => {
+    console.log(JSON.stringify(inspectVaultLock(program.opts().vault), null, 2));
+  });
+
+vaultLock
+  .command("recover")
+  .description("remove a lock only when its same-host owner PID is proven dead")
+  .action(() => {
+    const result = recoverVaultLock(program.opts().vault);
+    console.log(
+      result.recovered
+        ? "Recovered dead same-host vault lock."
+        : "No vault lock exists; nothing to recover.",
     );
   });
 

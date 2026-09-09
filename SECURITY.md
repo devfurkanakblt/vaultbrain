@@ -64,9 +64,11 @@ scope that leaks a value it should mask — through the flow above.
   separately: possession of both kit and code is equivalent to vault access.
 - Removing a recovery slot does not erase offline kit copies. A suspected kit
   disclosure requires removing the slot, re-keying the content and creating a
-  new kit. Permanent attachment-ID, sync-change-ID and audit keys deliberately
-  survive re-key, so an old kit still exposes those stable identities and can
-  open ciphertext backups made before the re-key.
+  new kit. Ordinary re-key keeps attachment-ID, sync-change-ID and audit keys
+  stable, so an old kit still exposes those identities and can open ciphertext
+  backups made before the re-key. `vbrain rekey --rotate-identities --backup`
+  is the explicit migration when those identities must change; it starts a new
+  sync authority and leaves old backups and relay copies for separate disposal.
 
 - Changing the passphrase does not re-encrypt content. It replaces the wrapping
   around the vault's keys, nothing more. Anyone who already knew the old
@@ -83,10 +85,12 @@ scope that leaks a value it should mask — through the flow above.
   If the kit rewrite succeeds but the vault commit fails, the rewritten kit no
   longer matches the vault; the command reports how to replace it using the
   still-working current passphrase.
-- A re-key pins the two keys that derive identities, `attachmentId` and
-  `syncChange`. Someone who kept the old keyset can therefore still confirm
-  that a guessed file or a guessed sync change is present, from directory
-  names alone, without decrypting anything. They cannot read its contents.
+- The default re-key pins the two keys that derive identities, `attachmentId`
+  and `syncChange`. Someone who kept the old keyset can therefore still confirm
+  that a guessed file or a guessed sync change is present, from directory names
+  alone, without decrypting anything. They cannot read its contents. Identity
+  rotation changes both keys, rewrites references through their parsed formats,
+  and rejects the old device authority until the device is enrolled again.
 
 ## Accepted re-key limitations
 
@@ -113,6 +117,19 @@ scope that leaks a value it should mask — through the flow above.
 - When multiple slots open under the supplied passphrase, re-key uses the first
   keyset; it does not compare every opened keyset for equality. Corrupt or
   inconsistent slots must not be treated as an independently verified backup.
+
+## Lock recovery and desktop sync limits
+
+- `vbrain vault-lock recover` removes only a lock whose owner is on the same
+  host and whose PID is proven absent. It never removes a live, inaccessible,
+  remote-host or malformed lock. The command does not inspect or alter a re-key
+  journal or staging tree; after recovery, resume the existing `vbrain rekey`
+  path.
+- Desktop sync runs the packaged helper through a native private channel. The
+  helper receives the passphrase only for that operation and does not accept
+  shell commands, arbitrary executable paths or ambient frontend filesystem
+  access. The relay remains an availability service: it stores opaque encrypted
+  artifacts and can withhold or delete them.
 
 ## Disclosure process
 

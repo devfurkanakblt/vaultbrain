@@ -1150,13 +1150,18 @@ export function App() {
         onChanged={async () => setKeyringStatus(await vaultBridge.keyringStatus())}
         onNotice={report}
       />
-      : workspaceView === "sync" ? (syncStatus?.enrolled
-        ? <SyncStatus status={syncStatus} registryVerified={syncRegistryVerified} />
-        : <div className="sync-empty">
-            <RefreshCw size={30} />
-            <h3>This vault isn't enrolled in sync</h3>
-            <p>Enroll a device from the CLI to see the registry, checkpoint and change counts here. The desktop app never enrolls, revokes, or mutates sync state itself.</p>
-          </div>)
+      : workspaceView === "sync" ? <SyncStatus status={syncStatus} registryVerified={syncRegistryVerified} onRun={async (operation, input) => {
+          if (!vault) throw new Error("Unlock a vault before syncing.");
+          if (!(await persistActive())) throw new Error("Save the current note before syncing.");
+          await canvasBoard.current?.flush();
+          const result = await vaultBridge.desktopSync({ operation, vaultPath: vault.path, passphrase: String(input.passphrase ?? ""), ...(input as Omit<Parameters<typeof vaultBridge.desktopSync>[0], "operation" | "vaultPath" | "passphrase">) });
+          const next = await vaultBridge.syncStatus();
+          setSyncStatus(next);
+          setSyncRegistryVerified(next.enrolled ? await vaultBridge.syncVerifyRegistry() : null);
+          await refreshList();
+          report("Sync state refreshed.");
+          return result;
+        }} onCancel={() => vaultBridge.desktopSyncCancel()} />
       : workspaceView === "updates" ? <UpdatePanel onPrepareInstall={prepareUpdateInstall} />
       : <PropertyTable
         rows={propertyRows}

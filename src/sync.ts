@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { isPortableStateId, parsePortableState, readPortableState, writePortableState, type PortableStateId } from "./portable-state.js";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -2703,6 +2704,80 @@ export class SyncedDocumentVault extends DocumentVault {
     return this.deviceId;
   }
 
+  getPortableState(id: PortableStateId): SyncJson {
+    if (this.syncClosed) throw new Error("This vault session is locked.");
+    return readPortableState(this.blobSession, id);
+  }
+
+  setPortableState(id: PortableStateId, value: unknown): void {
+    const targetValue = parsePortableState(id, value);
+    withVaultLock(this.syncVaultDir, () => {
+      this.runLocalTransaction(this.localDeviceId(), [{
+        objectType: "vault", objectId: id, operation: "put", input: targetValue,
+        beforeStorageRevision: null, targetStorageRevision: null,
+        beforeValue: this.getPortableState(id), targetValue,
+      }]);
+    });
+  }
+
+  /** Capture disk writes made by the native core while it is exclusively paused. */
+  captureDesktopChanges(): { captured: number } {
+    return withVaultLock(this.syncVaultDir, () => {
+      const deviceId = this.localDeviceId();
+      const live = new Map<string, SyncLocalStorageOperation>();
+      const add = (objectType: SyncLocalStorageOperation["objectType"], objectId: string, value: unknown, revision: number | null, input: unknown = value): void => {
+        const targetValue = prevalidateLocalCaptureSnapshot(value, "Desktop snapshot");
+        live.set(`${objectType}\0${objectId}`, { objectType, objectId, operation: "put", input: asSyncJson(input), beforeStorageRevision: revision, targetStorageRevision: revision, beforeValue: targetValue, targetValue });
+      };
+      for (const item of super.list()) {
+        const note = super.get(item.id);
+        add("note", note.id, noteSnapshot(note), note.revision);
+      }
+      for (const item of super.listCanvases()) {
+        const canvas = super.getCanvas(item.id);
+        add("canvas", canvas.id, canvasSnapshot(canvas), canvas.revision);
+      }
+      for (const item of super.listAttachments()) {
+        const attachment = super.getAttachment(item.id);
+        add("attachment", item.id, attachmentSnapshot(attachment.data, attachment.info, blobSealKey(this.blobSession), this.blobStore), null);
+      }
+      for (const item of super.listPlugins()) {
+        const plugin = super.getPlugin(item.id);
+        add("plugin", plugin.manifest.id, pluginSnapshot(plugin), plugin.revision, { ...pluginSnapshot(plugin), localEnabled: plugin.enabled });
+      }
+      add("vault", PLUGIN_POLICY_OBJECT_ID, super.pluginSecurityPolicy(), null);
+      for (const id of ["workspace", "saved-views"] as const) add("vault", id, this.getPortableState(id), null);
+      const changes = this.changeLog.changes();
+      const known = new Map<string, SyncChange>();
+      for (const change of changes) {
+        const { objectType, objectId } = change.mutation;
+        const applied = this.changeLog.applied(objectType, objectId);
+        if (applied?.changeId === change.id) known.set(`${objectType}\0${objectId}`, change);
+      }
+      let captured = 0;
+      for (const [key, operation] of live) {
+        const applied = known.get(key);
+        if (applied?.mutation.operation === "put" && sameStorageValue(operation.objectType, applied.mutation.value, operation.targetValue)) continue;
+        if (!applied && changes.some(change => `${change.mutation.objectType}\0${change.mutation.objectId}` === key)) {
+          throw new Error("Apply or resolve existing remote changes before capturing an untracked desktop object.");
+        }
+        // Current storage already equals target, so transaction recovery only installs the envelope and cursor.
+        const resolution = this.changeLog.resolve(operation.objectType, operation.objectId);
+        if (resolution.status === "conflict") throw new Error("Resolve the existing conflict before capturing further desktop edits.");
+        const baseRevision = resolution.winner?.mutation.revision ?? null;
+        const envelopes = this.changeLog.prepareLocalChanges(deviceId, [{ objectType: operation.objectType, objectId: operation.objectId, operation: "put", baseRevision, revision: (baseRevision ?? 0) + 1, value: operation.targetValue }]);
+        this.localTransaction.run({ deviceId, operations: [operation], changes: envelopes }, this.transactionEffects());
+        captured += 1;
+      }
+      for (const [key, applied] of known) {
+        if (live.has(key) || applied.mutation.operation === "delete" || applied.mutation.objectType === "vault") continue;
+        this.runLocalTransaction(deviceId, [{ objectType: applied.mutation.objectType, objectId: applied.mutation.objectId, operation: "delete", input: null, beforeStorageRevision: null, targetStorageRevision: null, beforeValue: null, targetValue: null }]);
+        captured += 1;
+      }
+      return { captured };
+    });
+  }
+
   private tryNote(reference: string): NoteDocument | undefined {
     try {
       return super.get(reference);
@@ -2983,6 +3058,14 @@ export class SyncedDocumentVault extends DocumentVault {
       }
 
       if (operation.objectType === "vault") {
+        if (isPortableStateId(operation.objectId) && operation.operation === "put") {
+          const current = this.getPortableState(operation.objectId);
+          if (!sameSyncValue(current, operation.targetValue)) {
+            this.assertExpectedDocumentState(operation, null, current);
+            writePortableState(this.blobSession, operation.objectId, operation.targetValue);
+          }
+          continue;
+        }
         if (operation.objectId !== PLUGIN_POLICY_OBJECT_ID || operation.operation !== "put") {
           throw new Error("Unsupported synchronized vault storage operation.");
         }
@@ -3298,6 +3381,9 @@ export class SyncedDocumentVault extends DocumentVault {
 
   private remoteChangeMaterialized(change: SyncChange, receipt: SyncApplyReceipt): boolean {
     const { objectType, objectId, operation, value } = change.mutation;
+    if (objectType === "vault" && isPortableStateId(objectId) && operation === "put") {
+      return sameSyncValue(this.getPortableState(objectId), parsePortableState(objectId, value));
+    }
     if (objectType === "note") {
       const current = this.tryNote(objectId);
       return operation === "delete"
@@ -3394,6 +3480,10 @@ export class SyncedDocumentVault extends DocumentVault {
 
   private applyStorageChange(change: SyncChange): void {
     const { objectType, objectId, operation, value } = change.mutation;
+    if (objectType === "vault" && isPortableStateId(objectId) && operation === "put") {
+      writePortableState(this.blobSession, objectId, value);
+      return;
+    }
     if (objectType === "note") {
       const current = this.tryNote(objectId);
       if (operation === "delete") {

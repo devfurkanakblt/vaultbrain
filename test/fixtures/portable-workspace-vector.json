@@ -1,0 +1,10 @@
+{
+  "key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+  "value": { "version": 1, "bookmarks": [{ "id": "note-id", "label": "Pinned", "createdAt": "2026-09-09T00:00:00Z" }], "layouts": [] },
+  "payload": {
+    "version": 1,
+    "iv": "AwMDAwMDAwMDAwMD",
+    "authTag": "p5HU1l+LrIJEQKEUT+ao3A==",
+    "ciphertext": "XtzVZihbNy0UYnltx3WdY4JXjY7G/udSFYX8k4qBYoKTyRJW/tbMJOykaWnsrIIpBR4xlODsUxJICgKBXV7tCYOGXznbhE4ze9aFsfmn/R7Nk51FOll+HdZh5I1RfXwu565R3sMWVDhe931UFw=="
+  }
+}

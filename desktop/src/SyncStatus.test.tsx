@@ -1,5 +1,5 @@
-import { cleanup, render, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { SyncStatus } from "./SyncStatus";
 import type { SyncStatusData } from "./types";
@@ -93,5 +93,18 @@ describe("SyncStatus", () => {
     render(<SyncStatus status={base} registryVerified={false} />);
     const summary = within(screen.getByLabelText("Registry summary"));
     expect(summary.getByText("does not verify")).toBeInTheDocument();
+  });
+
+  it("lists conflict heads through the helper and lets the user select one", async () => {
+    const onRun = vi.fn().mockResolvedValue({
+      result: {
+        conflicts: [{ objectType: "note", objectId: "note-1", heads: ["head-1", "head-2"] }],
+      },
+    });
+    render(<SyncStatus status={base} onRun={onRun} />);
+    fireEvent.change(screen.getByLabelText("Vault passphrase"), { target: { value: "passphrase" } });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh conflicts" }));
+    await waitFor(() => expect(onRun).toHaveBeenCalledWith("conflicts", expect.objectContaining({ passphrase: "passphrase" })));
+    expect(screen.getByRole("button", { name: /note:note-1 \(2 heads\)/u })).toBeInTheDocument();
   });
 });

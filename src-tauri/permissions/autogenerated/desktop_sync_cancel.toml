@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-sync-cancel"
+description = "Enables the desktop_sync_cancel command without any pre-configured scope."
+commands.allow = ["desktop_sync_cancel"]
+
+[[permission]]
+identifier = "deny-desktop-sync-cancel"
+description = "Denies the desktop_sync_cancel command without any pre-configured scope."
+commands.deny = ["desktop_sync_cancel"]

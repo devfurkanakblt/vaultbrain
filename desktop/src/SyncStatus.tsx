@@ -1,31 +1,90 @@
 import { AlertTriangle, Ban, CheckCircle2, Fingerprint, RefreshCw, ShieldAlert, ShieldCheck } from "lucide-react";
+import { useState } from "react";
+import type { DesktopSyncOperation } from "../../src/desktop-sync-protocol.js";
 import type { SyncStatusData } from "./types";
 
 interface SyncStatusProps {
   status: SyncStatusData | null;
   /** Owner-signature check from `sync_verify_registry`; `null` until it answers. */
   registryVerified?: boolean | null;
+  onRun?: (operation: DesktopSyncOperation, input: Record<string, unknown>) => Promise<unknown>;
+  onCancel?: () => Promise<void>;
+}
+
+interface DesktopConflict {
+  objectType: string;
+  objectId: string;
+  heads: string[];
 }
 
 /**
- * Read-only visibility into the CLI-owned sync store: enrollment, the
- * device registry, the active checkpoint and honest change/object counts.
- * There is deliberately no button here that enrolls, revokes, imports,
- * applies or relays -- every mutating sync operation stays in the CLI so the
- * sync protocol keeps exactly one authoritative implementation. This panel
- * only ever reads what `sync_status` and `sync_verify_registry` report.
+ * Visibility into the native sync store plus explicit, one-shot operations
+ * delegated to the packaged TypeScript helper. The panel never opens files or
+ * shells from the webview; the native bridge owns the request boundary.
  */
-export function SyncStatus({ status, registryVerified = null }: SyncStatusProps) {
-  if (!status || !status.enrolled) return null;
+export function SyncStatus({ status, registryVerified = null, onRun, onCancel }: SyncStatusProps) {
+  const [passphrase, setPassphrase] = useState("");
+  const [deviceName, setDeviceName] = useState("");
+  const [deviceId, setDeviceId] = useState("");
+  const [relayUrl, setRelayUrl] = useState("");
+  const [relayToken, setRelayToken] = useState("");
+  const [requestText, setRequestText] = useState("");
+  const [objectType, setObjectType] = useState("");
+  const [objectId, setObjectId] = useState("");
+  const [selectedHeadId, setSelectedHeadId] = useState("");
+  const [conflicts, setConflicts] = useState<DesktopConflict[]>([]);
+  const [lastOperation, setLastOperation] = useState<DesktopSyncOperation | null>(null);
+  const [busy, setBusy] = useState<DesktopSyncOperation | null>(null);
+  const [error, setError] = useState("");
+  const readConflicts = (value: unknown): DesktopConflict[] => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+    const result = (value as { result?: unknown }).result;
+    if (!result || typeof result !== "object" || Array.isArray(result)) return [];
+    const entries = (result as { conflicts?: unknown }).conflicts;
+    if (!Array.isArray(entries)) return [];
+    return entries.flatMap((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+      const candidate = entry as { objectType?: unknown; objectId?: unknown; heads?: unknown };
+      if (typeof candidate.objectType !== "string" || typeof candidate.objectId !== "string" || !Array.isArray(candidate.heads) || candidate.heads.some((head) => typeof head !== "string")) return [];
+      return [{ objectType: candidate.objectType, objectId: candidate.objectId, heads: candidate.heads as string[] }];
+    });
+  };
+  const run = async (operation: DesktopSyncOperation) => {
+    if (!onRun || !passphrase) { setError("Enter this vault's passphrase for the one-time sync operation."); return; }
+    setBusy(operation); setLastOperation(operation); setError("");
+    try {
+      const value = await onRun(operation, { passphrase, deviceName, deviceId, relayUrl, relayToken, enrollmentRequest: requestText ? JSON.parse(requestText) : undefined, authorityFingerprint: status?.authorityFingerprint, objectType, objectId, selectedHeadId });
+      if (operation === "conflicts") setConflicts(readConflicts(value));
+    }
+    catch (caught) { setError(caught instanceof Error ? caught.message : "Sync operation failed."); }
+    finally { setBusy(null); setPassphrase(""); }
+  };
+  const cancel = async () => {
+    if (!busy || !onCancel) return;
+    try { await onCancel(); setError("Sync operation cancelled."); }
+    catch (caught) { setError(caught instanceof Error ? caught.message : "Could not cancel sync operation."); }
+  };
+
+  // Keep the original read-only embedding contract for callers that do not
+  // provide the native sidecar. The desktop app opts into the controls below
+  // by passing onRun; this also lets older hosts render status during upgrade.
+  if (!onRun && (!status || !status.enrolled)) return null;
 
   return <section className="sync-view" aria-label="Sync status">
     <header className="sync-header">
       <div>
-        <p className="eyebrow">CLI-OWNED SYNC</p>
+        <p className="eyebrow">{onRun ? "DESKTOP SYNC" : "CLI-OWNED SYNC"}</p>
         <h2><RefreshCw size={20} /> Sync status</h2>
       </div>
     </header>
 
+    {!status || !status.enrolled ? <section className="sync-controls" aria-label="Sync enrollment">
+      <p>Initialize this device as the sync owner, or create an enrollment request for approval on an owner device.</p>
+      <label>Device name<input value={deviceName} onChange={(event) => setDeviceName(event.target.value)} /></label>
+      <label>Vault passphrase<input type="password" value={passphrase} onChange={(event) => setPassphrase(event.target.value)} /></label>
+      {onRun && <div><button disabled={!!busy} onClick={() => void run("init")}>Initialize owner</button><button disabled={!!busy} onClick={() => void run("request")}>Create enrollment request</button></div>}
+      {error && <p className="sync-error">{error}</p>}
+    </section> : <>
     {!status.readable ? <p className="sync-unreadable">
       <AlertTriangle size={14} /> This vault uses a newer format this build cannot display.
     </p> : <>
@@ -76,11 +135,41 @@ export function SyncStatus({ status, registryVerified = null }: SyncStatusProps)
       </section>
     </>}
 
+    {onRun && <section className="sync-controls" aria-label="Sync controls">
+      <h3>Manual sync</h3>
+      <p>Credentials are sent once through the native helper's private input and are not stored.</p>
+      <label>Vault passphrase<input type="password" value={passphrase} onChange={(event) => setPassphrase(event.target.value)} /></label>
+      <label>Relay URL<input value={relayUrl} onChange={(event) => setRelayUrl(event.target.value)} placeholder="https://relay.example" /></label>
+      <label>Relay token<input type="password" value={relayToken} onChange={(event) => setRelayToken(event.target.value)} /></label>
+      <div><button disabled={!!busy} onClick={() => void run("push")}>Push</button><button disabled={!!busy} onClick={() => void run("pull")}>Pull</button><button disabled={!!busy || !lastOperation} onClick={() => lastOperation && void run(lastOperation)}>Retry</button>{busy && onCancel && <button onClick={() => void cancel()}>Cancel</button>}</div>
+      {busy && <p className="sync-progress" role="status">{busy} in progress…</p>}
+      <label>Device ID (for approval or revocation)<input value={deviceId} onChange={(event) => setDeviceId(event.target.value)} /></label>
+      <label>Enrollment request JSON<textarea value={requestText} onChange={(event) => setRequestText(event.target.value)} /></label>
+      <div><button disabled={!!busy} onClick={() => void run("approve")}>Approve request</button><button disabled={!!busy} onClick={() => void run("revoke")}>Revoke device</button></div>
+      <section className="sync-conflicts" aria-label="Conflict resolution">
+        <h3>Conflicts</h3>
+        <button disabled={!!busy} onClick={() => void run("conflicts")}>Refresh conflicts</button>
+        {conflicts.length === 0 ? <p>No unresolved conflicts reported.</p> : <ul>
+          {conflicts.map((conflict) => <li key={`${conflict.objectType}:${conflict.objectId}`}>
+            <button type="button" onClick={() => { setObjectType(conflict.objectType); setObjectId(conflict.objectId); setSelectedHeadId(conflict.heads[0] ?? ""); }}>
+              {conflict.objectType}:{conflict.objectId} ({conflict.heads.length} heads)
+            </button>
+          </li>)}
+        </ul>}
+        <label>Object type<input value={objectType} onChange={(event) => setObjectType(event.target.value)} /></label>
+        <label>Object ID<input value={objectId} onChange={(event) => setObjectId(event.target.value)} /></label>
+        <label>Selected head ID<input value={selectedHeadId} onChange={(event) => setSelectedHeadId(event.target.value)} /></label>
+        <div><button disabled={!!busy} onClick={() => void run("apply")}>Apply resolved</button><button disabled={!!busy} onClick={() => void run("resolve")}>Resolve conflict</button></div>
+      </section>
+      {error && <p className="sync-error">{error}</p>}
+    </section>}
+    </>}
+
     {/* Guidance, not interpreted vault data: it stays true, and stays useful,
         even when the registry itself is from a format this build cannot read. */}
     <footer className="sync-footer">
-      <p>Sync is read-only in the desktop app. Run mutations from the CLI:</p>
-      <code>vbrain --experimental-trusted-sync sync devices list</code>
+      <p>{onRun ? "Sync uses the native helper on explicit user request; it never starts in the background." : "Sync is read-only in this host. Run mutations from the CLI:"}</p>
+      {!onRun && <code>vbrain --experimental-trusted-sync sync devices list</code>}
     </footer>
   </section>;
 }

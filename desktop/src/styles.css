@@ -845,6 +845,10 @@ kbd { font: 9px var(--font-mono); color: var(--on-shell-dim); border: 1px solid 
 .sync-footer { margin: 18px 26px 26px; padding: 14px 16px; background: rgba(226,231,205,.5); border-left: 2px solid var(--acid-deep); }
 .sync-footer p { margin: 0 0 8px; color: #5f6157; font-size: 11px; line-height: 1.5; }
 .sync-footer code { display: block; background: #faf8f1; border: 1px solid var(--paper-line); padding: 8px 10px; color: #4c4e45; font: 11px var(--font-mono); overflow-wrap: break-word; }
+.sync-controls { margin: 18px 26px 0; max-width: 640px; display: grid; gap: 9px; padding: 14px; border: 1px solid var(--paper-line); background: rgba(226,231,205,.36); }
+.sync-controls h3, .sync-controls p { margin: 0; }.sync-controls p { color: var(--on-paper-3); font-size: 11px; line-height: 1.5; }
+.sync-controls label { display: grid; gap: 4px; color: var(--on-paper-3); font-size: 11px; }.sync-controls input, .sync-controls textarea { padding: 7px; border: 1px solid var(--paper-line); background: var(--paper); color: var(--ink); font: 11px var(--font-mono); }.sync-controls textarea { min-height: 80px; }
+.sync-controls div { display: flex; flex-wrap: wrap; gap: 8px; }.sync-controls button { padding: 7px 10px; border: 1px solid var(--paper-line); background: var(--paper); cursor: pointer; }.sync-controls button:disabled { opacity: .55; cursor: wait; }.sync-progress { color: var(--acid-deep) !important; font: 10px var(--font-mono); text-transform: uppercase; letter-spacing: .04em; }.sync-error { color: var(--rust) !important; }
 .sync-empty { margin: auto; padding: 30px; text-align: center; color: #817f74; }
 .sync-empty svg { color: var(--acid-deep); }
 .sync-empty h3 { font: 26px var(--font-editor); margin: 12px 0 6px; color: #4c4e45; }

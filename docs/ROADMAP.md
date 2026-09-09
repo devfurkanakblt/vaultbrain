@@ -74,16 +74,14 @@ Sync is desktop-to-desktop. Vault Brain stays local-first: the passphrase — th
 vault's only real security boundary — never leaves a machine the owner controls,
 and no hosted service is ever required.
 
-- [ ] Immutable encrypted change protocol and conflict resolution
+- [x] Immutable encrypted change protocol and conflict resolution
   - [x] Content-addressed encrypted envelopes, device chains, causal DAG validation and deterministic conflict inspection
   - [x] Emit changes automatically from note/canvas/attachment transactions and apply resolved remote changes to live storage
   - [x] Capture plugin package and plugin-policy transactions
-  - [ ] Portable workspace state. The Phase 6 plan defines portable state as
-        notes, canvases, attachments, plugin packages, `plugin-policy`,
-        `saved-views` and `workspace` including bookmarks. Only `plugin-policy` is
-        captured. Saved views, bookmarks and layouts live solely in the Rust core's
-        `workspace.enc`, which the TypeScript core — the one that owns sync —
-        cannot read at all, so a second device silently loses them.
+  - [x] Portable workspace state. Notes, canvases, attachments, plugin packages,
+        `plugin-policy`, `saved-views` and `workspace` including bookmarks are
+        captured through the shared TypeScript/Rust encrypted state contract.
+        Device paths, credentials and transient window state remain local.
 - [x] Owner-signed device enrollment and sequence-bounded removal
   - [x] Ed25519 proof-of-possession requests, signed certificates and encrypted registry exchange
   - [x] Per-change device signatures, authority pinning, rollback rejection and revocation cutoffs
@@ -93,9 +91,10 @@ and no hosted service is ever required.
   - [x] Forward-only: a revoked device retains pre-rotation read access
 - [x] Owner-signed freshness checkpoints with explicit first-pin verification
 - [x] Authenticated opaque relay server and self-hosted option
-- [ ] Desktop multi-device release
-  - [x] Read-only desktop sync status; mutation remains CLI-only
-  - [ ] Desktop-driven enrollment, revocation and relay exchange
+- [x] Desktop multi-device release
+  - [x] Native-packaged TypeScript sync helper with private, bounded IPC
+  - [x] Desktop-driven enrollment, revocation, conflict resolution and relay exchange
+  - [x] Manual push/pull flushes pending editor writes and keeps local work available offline
 - [x] Resumable chunked transport for large attachment blobs
   - [x] Version 3 change bodies carry an attachment manifest; the bytes
         travel as content-addressed, AEAD-sealed 1 MiB blobs
@@ -148,27 +147,23 @@ can be raised per vault. Design contract:
         touch key material append nothing, so "when did this vault's passphrase last
         change" has no answer. The `audit` key is permanent, so entries written before
         and after a change verify in the same chain.
-- [ ] 7.6 What the re-key leaves behind
-  - [ ] Attachment identity migration, closing the confirmation oracle a re-key
-        leaves. Rotating `attachmentId` renames every attachment directory and
-        rewrites every canvas object, canvas history revision and index
-        reference that names one, and every peer must run it at the same time
-        or their attachment IDs diverge. `syncChange` has to move with it — a
-        change ID is referenced as a `parent` by every descendant, so rotating
-        one rewrites the rest of the DAG — and the oracle stays open until both
-        do.
-  - [ ] A deliberate lock-break path. Nothing in the CLI can reclaim a vault
-        lock on purpose; a crashed `vbrain rekey` holds it for up to 15 minutes
-        (`REKEY_STALE_MS`), and until it expires or a person deletes
-        `.sbrain.lock` by hand, every command that touches the vault refuses to
-        run. `lock` and `keychain-status` are unaffected; neither takes the lock.
+- [x] 7.6 What the re-key leaves behind
+  - [x] Optional `vbrain rekey --rotate-identities --backup <file>` verifies an
+        encrypted backup first, rotates attachment and sync identities, rewrites
+        attachment references through parsed formats, starts a new owner epoch,
+        and requires peers to enroll again. Old backups and relay copies remain
+        untouched.
+  - [x] `vbrain vault-lock status` and `vbrain vault-lock recover` provide a
+        token-checked, same-host dead-process recovery path. Live, unknown,
+        remote and malformed locks fail closed; re-key journals and staging are
+        left alone.
 
-- [ ] 7.7 Re-key interoperability and recovery corrections
-  - [ ] Classify retention policies during re-key (Task 0).
-  - [ ] Preserve `legacyChangeIdentity` through Rust keyset re-wrapping (Task 1).
-  - [ ] Record authenticated re-key audit events (Task 2).
-  - [ ] Correct unsupported-keyset errors and recovery documentation (Task 3).
-  - [ ] Verify recovery kits against current and retiring keys (Task 4).
+- [x] 7.7 Re-key interoperability and recovery corrections
+  - [x] Retention policies are classified and preserved during re-key (Task 0).
+  - [x] Rust keyset re-wrapping preserves `legacyChangeIdentity` (Task 1).
+  - [x] Authenticated pending, allowed and denied re-key audit events are tested (Task 2).
+  - [x] Unsupported keysets fail with the documented recovery path (Task 3).
+  - [x] Recovery kits verify against current and retiring keys (Task 4).
 
 Follow-up work outside the five corrections:
 
@@ -180,12 +175,10 @@ Follow-up work outside the five corrections:
 
 ## Phase 8 — Key management the desktop can reach
 
-Every command that decides whether a vault survives — create a recovery kit,
-look at what the keyring holds, change the passphrase, re-key after a leak —
-exists only in the CLI. The desktop application is the product's primary
-surface, so for the people who use it "I forgot my passphrase" still means the
-permanent loss of every note, even though 7.5 shipped the answer. This phase
-absorbs the desktop passphrase-change and re-key interface Phase 7 listed.
+Keyring status, passphrase change and recovery-kit creation are already
+available in the desktop core. Restore and re-key remain CLI operations because
+they must validate or replace the whole vault; this phase tracks whether those
+remaining recovery paths should gain a desktop surface.
 
 **The decision, recorded.** The work is split by how much audited surface it
 adds, not by convenience. `src-tauri/src/keyring.rs` already carries the whole
@@ -200,13 +193,11 @@ is to name the exact command. Restore in particular runs when `keyring.json`
 is already damaged — the moment the application cannot open the vault at all —
 so a graphical path to it would mostly be unreachable when it is needed.
 
-- [x] The audit chain in the Rust core. Phase 7.5 requires every key-material
-      command to append to the passphrase-authenticated chain, and the
-      application has no way to. This is the larger bug underneath: `audit.log`
-      is written only by `src/cli.ts`, so every note, canvas, attachment and
-      plugin change made in the application today is absent from the chain
-      entirely. A committed cross-core vector pins the entry and head
-      constructions, the way `keyring-vector.json` pins the keyset.
+- [x] The audit chain in the Rust core. Key-material commands and desktop note,
+      canvas, attachment and plugin writes append to the same
+      passphrase-authenticated chain. A committed cross-core vector pins the
+      entry and head constructions, the way `keyring-vector.json` pins the
+      keyset.
 - [x] `keyring status` in the application: every slot with its id, label,
       creation time and key-derivation cost, so a user can see a slot they did
       not add and can learn their vault still sits at the old work factor.

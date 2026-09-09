@@ -40,10 +40,20 @@ about:
 | `src/grants.ts` | 432 | Per-agent grant policy and redaction. |
 | `src/plugin-signatures.ts` | 131 | Plugin manifest/package signature verification. |
 
-Rust desktop core: `src-tauri/src/lib.rs`, 7,245 lines. A second, independent
-implementation of vault unlock, document read/write, and (as of this branch)
-read-only sync status (`sync_status`, `sync_verify_registry`) against the same
-on-disk format as the TypeScript core.
+Rust desktop core: `src-tauri/src/lib.rs`, plus the native helper boundary in
+`src-tauri/src/desktop_sync.rs`. The Rust core owns vault unlock, document
+read/write, writer locking and sync status. Desktop sync mutation is delegated
+to the packaged TypeScript helper through a bounded private stdin/stdout
+protocol; the reviewer should verify that the webview cannot turn that command
+into arbitrary shell or filesystem execution.
+
+The desktop sync surface also includes `src/desktop-sync-helper.ts`,
+`src/desktop-sync-protocol.ts`, `scripts/build-desktop-sync-helper.mjs` and
+`test/desktop-sync-helper.test.mjs`. It covers owner initialization,
+enrollment requests and approval, revocation, conflict apply/resolve, relay
+push/pull and portable workspace capture. Credentials are passed only through
+the native helper request and are bounded and excluded from argv, environment
+and logs.
 
 The relay: `src/sync-relay.ts` (client and server share this file) plus
 `docs/SYNC-RELAY.md` for the deployment/operations side.
@@ -68,13 +78,24 @@ re-wraps the keyset and rewrites nothing else, and the scrypt cost is a
 per-vault slot value rather than a constant compiled into the build. Two
 properties deserve the reviewer's attention specifically: that attachment
 content IDs and sync change IDs, which are keyed HMACs and are permanent
-identities, survive a passphrase change byte-for-byte; and that a build
+identities during an ordinary re-key, survive a passphrase change byte-for-byte;
+and that a build
 predating the keyring fails closed on the manifest version tombstone instead
 of misreading a migrated vault. `test/fixtures/keyring-v2/` is the committed
 evidence and `test/fixtures/keyring-vector.json` is a deterministic cross-core
 test vector that pins the TypeScript and Rust readers to the same wire format.
-`vbrain rekey` — fresh data keys after a passphrase leak — is designed but not
-built; see `docs/ROADMAP.md` Phase 7.4.
+`vbrain rekey` — fresh data keys after a passphrase leak — is staged and
+journaled in `src/keyring-rekey.ts`. The optional
+`--rotate-identities --backup <file>` path is a separate migration: it rewrites
+parsed attachment references, drops the old sync authority and starts a new
+owner epoch. Old backups and relay copies are deliberately outside its delete
+set.
+
+The cross-core portable workspace vector in
+`test/fixtures/portable-workspace-vector.json` pins the encrypted `workspace`
+and `saved-views` artifacts listed in `src/format-version.ts`. The auditor
+should check that paths, credentials and transient window state are not allowed
+into those artifacts.
 
 **One position in the frozen format the reviewer should test rather than
 accept.** `docs/FORMAT-1.0.md` and `FORMAT_COMPATIBILITY`
@@ -109,6 +130,10 @@ maintainer would rather hear it now than defend it later.
 - **Enrolled devices are trusted.** Enrollment is owner-signed; once a device
   holds the vault's content keys it is trusted with the plaintext those keys
   decrypt, subject to the forward-only rotation behavior in §5.
+- **Writer locks are advisory but fail closed.** `.sbrain.lock` is coordinated
+  by the TypeScript and Rust writers through `.sbrain.lock.transition`.
+  `vbrain vault-lock recover` removes only a same-host lock whose PID is proven
+  dead; live, unknown, remote and malformed records are never auto-removed.
 - **Plugins run sandboxed under declared, signed capabilities**
   (`src/plugin-signatures.ts`); they are not granted ambient vault access.
 - **Agents reach the vault only through MCP tools**, not direct filesystem
@@ -140,6 +165,9 @@ The review should evaluate the design and code against these adversaries:
    registry fed to either implementation (TypeScript or Rust) should fail
    closed rather than being accepted, and should not cause disproportionate
    resource consumption before validation.
+7. **A malicious desktop/webview caller** — should be unable to pass an
+   arbitrary executable, environment variable or vault path to the packaged
+   sync helper, and should not receive a passphrase in a result or diagnostic.
 
 ## 5. Accepted known risks
 
@@ -225,6 +253,9 @@ The material for checking the two against each other:
   `test/fixtures/sync-epoch-v2/` for the rotated epoch-sealed format this
   branch added. These exist specifically so both implementations can be run
   against the same on-disk bytes and checked for agreement.
+- `test/fixtures/portable-workspace-vector.json` and
+  `test/portable-sync.test.mjs` — the shared encrypted workspace and saved-view
+  fixture, including the portable-state schema limits and native disk capture.
 - `node --test test/format-conformance.test.mjs` exercises the TypeScript
   side against the fixtures; `cargo test --manifest-path src-tauri/Cargo.toml
   --lib` exercises the Rust side. Neither currently runs the other
@@ -274,10 +305,17 @@ rhetorical:
    list) cause unbounded work in either implementation before validation
    rejects it?
 4. Do the TypeScript and Rust implementations agree on every conformance
-   fixture in `test/fixtures/`, including `sync-epoch-v2/`? Where they
-   diverge, is the divergence a bug in one implementation or an
-   underspecification in `docs/FORMAT-1.0.md`?
-5. Is there any path by which the grant layer (`src/grants.ts`) can be made
+   fixture in `test/fixtures/`, including `sync-epoch-v2/` and
+   `portable-workspace-vector.json`? Where they diverge, is the divergence a
+   bug in one implementation or an underspecification in
+   `docs/FORMAT-1.0.md`?
+5. Can a webview or malformed native request escape the fixed helper resource
+   path, exceed the request/response bounds, or expose a passphrase through
+   argv, environment, logs or the result object?
+6. Can a live, remote or malformed `.sbrain.lock` be removed by either writer
+   or by `vault-lock recover`, and can a replacement lock race with cleanup
+   after a dead-process recovery?
+7. Is there any path by which the grant layer (`src/grants.ts`) can be made
    to leak an unredacted value to an agent without the agent (or whoever
    starts its MCP process under that `--agent` name) already holding the
    passphrase?
@@ -298,12 +336,13 @@ It is weighted by where this project believes its own risk actually sits:
 
 | Area | Weight |
 |---|---:|
-| §6 two-implementation divergence, including differential execution over `test/fixtures/` | ~35% |
-| Sync protocol: envelopes, registry, revocation cutoffs, epoch rotation (§8 Q1, Q2) | ~30% |
-| Hostile-input handling and resource bounds in both implementations (§8 Q3) | ~15% |
+| §6 two-implementation divergence, including differential execution over `test/fixtures/` | ~30% |
+| Sync protocol: envelopes, registry, revocation cutoffs, epoch rotation (§8 Q1, Q2) | ~25% |
+| Desktop helper IPC, packaged runtime boundary and lock recovery (§8 Q5, Q6) | ~15% |
+| Hostile-input handling and resource bounds in both implementations (§8 Q3) | ~10% |
 | Vault envelope and key derivation: `src/crypto.ts`, `src/document-crypto.ts` | ~10% |
 | Attachment blob transport: blob identity, the relay `blobs` collection, fail-closed apply | ~5% |
-| Grant layer and plugin signature verification (§8 Q5) | ~5% |
+| Grant layer and plugin signature verification (§8 Q7) | ~5% |
 
 **Deliverables.**
 
@@ -343,16 +382,10 @@ findings once fixes have shipped.
 - **The relay's hosting environment.** TLS termination, network placement,
   and host OS hardening for a self-hosted relay deployment are the
   self-hoster's responsibility per `docs/SYNC-RELAY.md`, not this codebase's.
-- **Desktop-driven sync mutation.** The desktop app in this branch exposes
-  only read-only sync status (`sync_status`, `sync_verify_registry`); it has
-  no enrollment, revocation, import, apply, or relay push/pull surface to
-  review, because none exists yet. Worth knowing while reading §6: the Rust
-  core links `ed25519-dalek` for verification only — no `SigningKey` use — and
-  carries no X25519 dependency at all, so building desktop-side mutation
-  would mean a second independent *signing* and key-wrapping implementation
-  and would roughly double the §6 surface. A reviewer opinion on whether
-  that is wise, or whether desktop mutation should delegate to the
-  TypeScript core, is explicitly welcome.
+- **Production signing and installer provenance.** The Tauri release signing
+  service, certificate custody and platform-specific installer policy remain
+  release-environment acceptance gates. This scope reviews the helper resource
+  boundary and IPC contract present in the source tree.
 
 ## 11. Reproducing the build and running the evidence
 
@@ -363,6 +396,8 @@ npm run quality:rust
 npm run benchmark
 npm run recovery:drill
 node --test test/format-conformance.test.mjs
+node --test test/portable-sync.test.mjs test/vault-lock.test.mjs \
+  test/desktop-sync-helper.test.mjs
 ```
 
 `npm run quality` runs lint, format check, typecheck, the Node test suite

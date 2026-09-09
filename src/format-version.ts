@@ -27,6 +27,8 @@ export interface FormatArtifact {
 export type FormatCompatibility = Readonly<Record<string, FormatArtifact>>;
 
 export const FORMAT_COMPATIBILITY: FormatCompatibility = {
+  portableWorkspace: { path: "documents/workspace.enc", reads: [1], writes: [1] },
+  savedViews: { path: "documents/views.enc", reads: [1], writes: [1] },
   vaultKeyring: { path: "keyring.json", reads: [2], writes: [2] },
   vaultKeyset: { path: "keyring.json (wrapped)", reads: [1, 2], writes: [1, 2] },
   encryptedEnvelope: { path: "*.kv.enc", reads: [0, 1], writes: [1] },
@@ -47,6 +49,8 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
  * artifacts whose AAD includes an identifier.
  */
 export const AAD = {
+  workspace: "secondbrain-vault:workspace:v1",
+  savedViews: "secondbrain-vault:saved-views:v1",
   keyringSlot: "secondbrain-vault:keyring-slot:v1",
   documentKeyCheck: "secondbrain-vault:document-key:v1",
   documentIndex: "secondbrain-vault:document-index:v1",
