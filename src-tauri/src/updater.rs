@@ -328,7 +328,7 @@ pub(crate) async fn download_update(
                         let value = snapshot(&controller);
                         emit_snapshot(&progress_app, &value);
                     }
-                }
+                };
             },
             || {},
         ),
