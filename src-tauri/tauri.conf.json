@@ -31,6 +31,7 @@
     }
   },
   "bundle": {
+    "resources": ["resources/desktop-sync/**/*"],
     "active": true,
     "category": "Productivity",
     "shortDescription": "Local-first encrypted knowledge workspace",

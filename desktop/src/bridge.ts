@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { DesktopSyncOperation } from "../../src/desktop-sync-protocol.js";
 import type { AttachmentContent, AttachmentInfo, Backlink, Bookmark, CanvasDocument, CanvasInput, CanvasSummary, DailyNote, DeletedNote, KeyringStatusData, KnowledgeGraph, PassphraseChangeReport, RecoveryKitReport, NoteDocument, NoteSummary, PluginCallContext, PluginPackage, PluginSecurityPolicy, PluginSummary, PropertyRow, RevisionInfo, SavedView, SearchHit, SyncStatusData, UnlinkedMention, VaultInfo, WorkspaceState } from "./types";
 
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -709,10 +710,8 @@ export const vaultBridge = {
     return structuredClone(entry.info);
   },
   /**
-   * Read-only visibility into the CLI-owned sync store. There is no mutating
-   * counterpart here by design -- enroll, revoke, import, apply and relay
-   * stay CLI-only so the sync protocol keeps exactly one authoritative
-   * implementation.
+   * Status is read natively; explicit mutations are delegated to the
+   * packaged TypeScript helper through the private Rust IPC command below.
    */
   async syncStatus(): Promise<SyncStatusData> {
     if (isTauri) return call<SyncStatusData>("sync_status");
@@ -721,6 +720,13 @@ export const vaultBridge = {
   async syncVerifyRegistry(): Promise<boolean> {
     if (isTauri) return call<boolean>("sync_verify_registry");
     return demoSyncStatus.enrolled;
+  },
+  async desktopSync(request: { operation: DesktopSyncOperation; vaultPath: string; passphrase: string; deviceName?: string; deviceId?: string; enrollmentRequest?: unknown; objectType?: string; objectId?: string; selectedHeadId?: string; relayUrl?: string; relayToken?: string; authorityFingerprint?: string }): Promise<unknown> {
+    if (!isTauri) throw new Error("Desktop sync controls require the native app.");
+    return call<unknown>("desktop_sync_execute", { request: { version: 1, ...request } });
+  },
+  async desktopSyncCancel(): Promise<void> {
+    if (isTauri) await call<void>("desktop_sync_cancel");
   },
   /**
    * Slot headers only. Creating a recovery kit, changing the passphrase and

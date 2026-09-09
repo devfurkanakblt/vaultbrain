@@ -37,6 +37,7 @@ use zeroize::Zeroizing;
 
 type HmacSha256 = Hmac<Sha256>;
 mod audit;
+mod desktop_sync;
 mod keyring;
 mod updater;
 const INDEX_AAD: &str = "secondbrain-vault:document-index:v1";
@@ -95,6 +96,7 @@ const PLUGIN_CAPABILITIES: [&str; 11] = [
     "storage",
 ];
 const VAULT_LOCK_FILENAME: &str = ".sbrain.lock";
+const VAULT_TRANSITION_FILENAME: &str = ".sbrain.lock.transition";
 const VAULT_LOCK_STALE_SECONDS: i64 = 30;
 const VAULT_LOCK_WAIT: Duration = Duration::from_secs(2);
 const VAULT_LOCK_POLL: Duration = Duration::from_millis(40);
@@ -103,6 +105,7 @@ const VAULT_LOCK_POLL: Duration = Duration::from_millis(40);
 struct AppState {
     session: Mutex<Option<VaultSession>>,
     plugin_instances: Mutex<HashMap<String, PluginInstanceGrant>>,
+    desktop_sync_cancel: AtomicBool,
 }
 
 #[derive(Debug, Clone)]
@@ -155,11 +158,37 @@ struct VaultLockRecord {
     pid: u32,
     host: String,
     acquired_at: String,
+    /// Milliseconds the holder has declared for this operation. Older lock
+    /// records omit it and retain the historical 30-second default.
+    #[serde(default)]
+    stale_ms: Option<u64>,
 }
 
 struct VaultWriteGuard {
     path: PathBuf,
     token: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultTransitionRecord {
+    token: String,
+    pid: u32,
+    host: String,
+    acquired_at: String,
+}
+
+struct VaultTransitionGuard {
+    path: PathBuf,
+    token: String,
+}
+
+impl Drop for VaultTransitionGuard {
+    fn drop(&mut self) {
+        if read_transition_record(&self.path).is_some_and(|record| record.token == self.token) {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -706,6 +735,10 @@ fn read_lock_record(path: &Path) -> Option<VaultLockRecord> {
     serde_json::from_slice(&read_limited(path, 64 * 1024, "vault lock").ok()?).ok()
 }
 
+fn read_transition_record(path: &Path) -> Option<VaultTransitionRecord> {
+    serde_json::from_slice(&read_limited(path, 64 * 1024, "vault lock transition").ok()?).ok()
+}
+
 #[cfg(windows)]
 fn process_is_alive(pid: u32) -> bool {
     use windows_sys::Win32::{
@@ -743,10 +776,14 @@ fn lock_is_reclaimable(record: Option<&VaultLockRecord>) -> bool {
     let Ok(acquired) = chrono::DateTime::parse_from_rfc3339(&record.acquired_at) else {
         return false;
     };
-    let old_enough = Utc::now()
+    let age_ms = Utc::now()
         .signed_duration_since(acquired.with_timezone(&Utc))
-        .num_seconds()
-        > VAULT_LOCK_STALE_SECONDS;
+        .num_milliseconds();
+    let stale_ms = record
+        .stale_ms
+        .and_then(|value| i64::try_from(value).ok())
+        .unwrap_or(VAULT_LOCK_STALE_SECONDS * 1_000);
+    let old_enough = age_ms > stale_ms;
     old_enough && !process_is_alive(record.pid)
 }
 
@@ -759,54 +796,67 @@ impl VaultWriteGuard {
             pid: std::process::id(),
             host: lock_host(),
             acquired_at: now(),
+            stale_ms: Some((VAULT_LOCK_STALE_SECONDS * 1_000) as u64),
         };
         let encoded = serde_json::to_vec(&record).map_err(|error| error.to_string())?;
         let deadline = Instant::now() + VAULT_LOCK_WAIT;
 
         loop {
-            reject_symlink(&path)?;
-            match OpenOptions::new().create_new(true).write(true).open(&path) {
-                Ok(mut file) => {
-                    if let Err(error) = file.write_all(&encoded).and_then(|_| file.sync_all()) {
-                        let _ = fs::remove_file(&path);
-                        return Err(error.to_string());
-                    }
-                    return Ok(Self { path, token });
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let holder = read_lock_record(&path);
-                    if lock_is_reclaimable(holder.as_ref()) {
-                        match fs::remove_file(&path) {
-                            Ok(()) => continue,
-                            Err(remove_error)
-                                if remove_error.kind() == std::io::ErrorKind::NotFound =>
-                            {
-                                continue
-                            }
-                            Err(_) => {}
+            let attempt = with_lock_transition(vault_dir, || {
+                reject_symlink(&path)?;
+                match OpenOptions::new().create_new(true).write(true).open(&path) {
+                    Ok(mut file) => {
+                        if let Err(error) = file.write_all(&encoded).and_then(|_| file.sync_all()) {
+                            let _ = fs::remove_file(&path);
+                            return Err(error.to_string());
                         }
+                        Ok(Some(Self {
+                            path: path.clone(),
+                            token: token.clone(),
+                        }))
                     }
-                    if Instant::now() >= deadline {
-                        return Err(match holder {
-                            Some(holder) => format!(
-                                "vault is being written by process {} on {} since {}",
-                                holder.pid, holder.host, holder.acquired_at
-                            ),
-                            None => "vault is locked by another process".into(),
-                        });
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        let holder = read_lock_record(&path);
+                        if lock_is_reclaimable(holder.as_ref())
+                            && read_lock_record(&path).as_ref().map(|value| &value.token)
+                                == holder.as_ref().map(|value| &value.token)
+                        {
+                            let _ = fs::remove_file(&path);
+                        }
+                        Ok(None)
                     }
-                    thread::sleep(VAULT_LOCK_POLL);
+                    Err(error) => Err(error.to_string()),
                 }
-                Err(error) => return Err(error.to_string()),
+            })?;
+            if let Some(guard) = attempt {
+                return Ok(guard);
             }
+            if Instant::now() >= deadline {
+                let holder = read_lock_record(&path);
+                return Err(match holder {
+                    Some(holder) => format!(
+                        "vault is being written by process {} on {} since {}",
+                        holder.pid, holder.host, holder.acquired_at
+                    ),
+                    None => "vault is locked by another process".into(),
+                });
+            }
+            thread::sleep(VAULT_LOCK_POLL);
         }
     }
 }
 
 impl Drop for VaultWriteGuard {
     fn drop(&mut self) {
-        if read_lock_record(&self.path).is_some_and(|record| record.token == self.token) {
-            let _ = fs::remove_file(&self.path);
+        let path = self.path.clone();
+        let token = self.token.clone();
+        if let Some(vault_dir) = path.parent() {
+            let _ = with_lock_transition(vault_dir, || {
+                if read_lock_record(&path).is_some_and(|record| record.token == token) {
+                    let _ = fs::remove_file(&path);
+                }
+                Ok(())
+            });
         }
     }
 }
@@ -5828,6 +5878,105 @@ fn sync_verify_registry(state: State<'_, AppState>) -> Result<bool, String> {
     verify_registry_signature(&registry)
 }
 
+fn transition_is_reclaimable(record: Option<&VaultTransitionRecord>) -> bool {
+    let Some(record) = record else { return false };
+    record.host.eq_ignore_ascii_case(&lock_host())
+        && !process_is_alive(record.pid)
+        && DateTime::parse_from_rfc3339(&record.acquired_at).is_ok()
+}
+
+fn with_lock_transition<T>(
+    vault_dir: &Path,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    fs::create_dir_all(vault_dir).map_err(|error| error.to_string())?;
+    let path = vault_dir.join(VAULT_TRANSITION_FILENAME);
+    let token = Uuid::new_v4().to_string();
+    let record = VaultTransitionRecord {
+        token: token.clone(),
+        pid: std::process::id(),
+        host: lock_host(),
+        acquired_at: now(),
+    };
+    let encoded = serde_json::to_vec(&record).map_err(|error| error.to_string())?;
+    let deadline = Instant::now() + VAULT_LOCK_WAIT;
+    loop {
+        match OpenOptions::new().create_new(true).write(true).open(&path) {
+            Ok(mut file) => {
+                if let Err(error) = file.write_all(&encoded).and_then(|_| file.sync_all()) {
+                    let _ = fs::remove_file(&path);
+                    return Err(error.to_string());
+                }
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let holder = read_transition_record(&path);
+                if transition_is_reclaimable(holder.as_ref())
+                    && read_transition_record(&path)
+                        .as_ref()
+                        .map(|value| &value.token)
+                        == holder.as_ref().map(|value| &value.token)
+                {
+                    let _ = fs::remove_file(&path);
+                    continue;
+                }
+                if Instant::now() >= deadline {
+                    return Err(
+                        "vault lock transition is busy; refusing an unsafe operation".into(),
+                    );
+                }
+                thread::sleep(VAULT_LOCK_POLL);
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    let _guard = VaultTransitionGuard { path, token };
+    operation()
+}
+
+/// Desktop sync is serialized with every native vault write by retaining the
+/// session mutex throughout the private helper process. The helper takes the
+/// same on-disk lock the TypeScript engine already uses; the Rust mutex avoids
+/// concurrent desktop saves without creating a second incompatible lock.
+#[tauri::command(async)]
+fn desktop_sync_execute(
+    request: desktop_sync::DesktopSyncRequest,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    let mut guard = state
+        .session
+        .lock()
+        .map_err(|_| "vault session lock poisoned")?;
+    let session = guard.as_mut().ok_or("vault is locked")?;
+    if Path::new(&request.vault_path) != session.vault_dir {
+        return Err("Desktop sync request does not target the unlocked vault.".into());
+    }
+    let result = desktop_sync::execute(&app, request, &state.desktop_sync_cancel);
+    // The helper writes through the same encrypted files while this native
+    // session remains open. Refresh the in-memory index under the ordinary
+    // writer lock before returning so subsequent native reads see the helper's
+    // note/canvas/plugin changes. A failed helper can still leave a durable
+    // transaction journal, so run the same recovery pass on both outcomes.
+    let refreshed = with_vault_write(session, |_| Ok(()));
+    match result {
+        Ok(value) => {
+            refreshed?;
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = refreshed;
+            Err(error)
+        }
+    }
+}
+
+#[tauri::command(async)]
+fn desktop_sync_cancel(state: State<'_, AppState>) -> Result<(), String> {
+    state.desktop_sync_cancel.store(true, Ordering::Release);
+    Ok(())
+}
+
 /// Opens the operating system's folder chooser and reports back only the path
 /// the person selected, or `None` when they dismissed it.
 #[tauri::command(async)]
@@ -5935,6 +6084,8 @@ pub fn run() {
             keyring_status,
             sync_status,
             sync_verify_registry,
+            desktop_sync_execute,
+            desktop_sync_cancel,
             updater::update_status,
             updater::check_for_update,
             updater::download_update,
@@ -5948,6 +6099,20 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_portable_workspace_vector_opens_in_native_core() {
+        let vector: Value = serde_json::from_str(include_str!(
+            "../../test/fixtures/portable-workspace-vector.json"
+        ))
+        .unwrap();
+        let key = BASE64.decode(vector["key"].as_str().unwrap()).unwrap();
+        let payload: EncryptedPayload = serde_json::from_value(vector["payload"].clone()).unwrap();
+        let plain = decrypt(&payload, &key, WORKSPACE_AAD).unwrap();
+        let state: WorkspaceState = serde_json::from_slice(&plain).unwrap();
+        assert_eq!(serde_json::to_value(state).unwrap(), vector["value"]);
+        assert!(decrypt(&payload, &key, SAVED_VIEWS_AAD).is_err());
+    }
 
     fn temporary_vault(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("vault-brain-{label}-{}", Uuid::new_v4()))
@@ -6093,6 +6258,15 @@ mod tests {
         let path = fs::canonicalize(path).unwrap();
         let lock_path = path.join(VAULT_LOCK_FILENAME);
 
+        let long_window = VaultLockRecord {
+            token: Uuid::new_v4().to_string(),
+            pid: 999_999,
+            host: lock_host(),
+            acquired_at: (Utc::now() - chrono::Duration::seconds(60)).to_rfc3339(),
+            stale_ms: Some(15 * 60 * 1_000),
+        };
+        assert!(!lock_is_reclaimable(Some(&long_window)));
+
         let held = VaultWriteGuard::acquire(&path).unwrap();
         assert!(lock_path.is_file());
         let error = match VaultWriteGuard::acquire(&path) {
@@ -6108,6 +6282,7 @@ mod tests {
             pid: 999_999,
             host: lock_host(),
             acquired_at: "1970-01-01T00:00:00.000Z".into(),
+            stale_ms: None,
         };
         fs::write(&lock_path, serde_json::to_vec(&stale).unwrap()).unwrap();
         let reclaimed = VaultWriteGuard::acquire(&path).unwrap();
@@ -6119,6 +6294,7 @@ mod tests {
             pid: std::process::id(),
             host: lock_host(),
             acquired_at: "1970-01-01T00:00:00.000Z".into(),
+            stale_ms: None,
         };
         fs::write(&lock_path, serde_json::to_vec(&live_but_old).unwrap()).unwrap();
         assert!(VaultWriteGuard::acquire(&path).is_err());
@@ -6129,6 +6305,7 @@ mod tests {
             pid: 999_999,
             host: "remote-host".into(),
             acquired_at: "1970-01-01T00:00:00.000Z".into(),
+            stale_ms: None,
         };
         fs::write(&lock_path, serde_json::to_vec(&remote).unwrap()).unwrap();
         assert!(VaultWriteGuard::acquire(&path).is_err());

@@ -306,6 +306,44 @@ test("vbrain backup and restore carry a vault to a new directory, and refuse a b
   fs.rmSync(outside, { recursive: true, force: true });
 });
 
+test("vbrain rekey identity rotation verifies a backup and starts a new sync owner", () => {
+  const vaultDir = tempVault("identity-rotation");
+  const outside = tempVault("identity-rotation-out");
+  const sourcePassphrase = "cli-identity-source-passphrase";
+  const nextPassphrase = "cli-identity-next-passphrase";
+  const sourceEnv = { VBRAIN_PASSPHRASE: sourcePassphrase };
+  const nextEnv = { VBRAIN_PASSPHRASE: sourcePassphrase, VBRAIN_NEW_PASSPHRASE: nextPassphrase };
+  const flags = ["--vault", vaultDir, "--experimental-trusted-sync"];
+  const { file, body } = tempFile("identity-rotation", 4097);
+  const backup = path.join(outside, "before-identity-rotation.vbrainbackup");
+  const restored = path.join(outside, "restored-before-identity-rotation");
+  try {
+    runCli([...flags, "sync", "devices", "init", "Owner laptop", "--device-id", DEVICE_A], sourceEnv);
+    const oldAttachmentId = attachmentIdOf(runCli([...flags, "--sync-device", DEVICE_A, "docs", "attach", file], sourceEnv));
+
+    const rotated = runCli([...flags, "rekey", "--rotate-identities", "--backup", backup], nextEnv);
+    assert.match(rotated, /Verified encrypted backup/u);
+    assert.match(rotated, /Identity rotation reset sync authority/u);
+    assert.ok(fs.existsSync(backup), "identity rotation must leave the verified backup available");
+
+    const newAttachmentIds = fs.readdirSync(path.join(vaultDir, "documents", "attachments"));
+    assert.equal(newAttachmentIds.length, 1);
+    assert.notEqual(newAttachmentIds[0], oldAttachmentId, "attachment identity must rotate");
+    const current = path.join(outside, "after-identity-rotation.bin");
+    runCli([...flags, "docs", "attachment-get", newAttachmentIds[0], current], { ...sourceEnv, VBRAIN_PASSPHRASE: nextPassphrase });
+    assert.deepEqual(fs.readFileSync(current), body);
+
+    assert.throws(
+      () => runCli([...flags, "docs", "list"], sourceEnv),
+      /Unable to unlock/u,
+      "the old passphrase must not open the rotated vault",
+    );
+    assert.match(runCli(["restore", backup, restored], sourceEnv), /Restored \d+ files/u);
+  } finally {
+    for (const scrap of [vaultDir, outside, file]) fs.rmSync(scrap, { recursive: true, force: true });
+  }
+});
+
 test("vbrain purge previews first, then removes the object and its history", () => {
   const vaultDir = tempVault("purge");
   const outside = tempVault("purge-out");

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 
 import {
   AAD,
@@ -18,6 +19,7 @@ import {
 import { decryptWithKey, encryptWithKey, type KeyedEncryptedPayload } from "./crypto.js";
 import {
   decryptDocumentBytes,
+  decryptDocument,
   encryptDocument,
   encryptDocumentBytes,
   type DocumentPayload,
@@ -52,7 +54,14 @@ import {
   type RekeyRecoveryInput,
 } from "./keyring-recovery.js";
 import { resolveInside } from "./safety.js";
-import { canonicalSyncJson, openSyncChange, type SyncChangeKeys, type SyncJson } from "./sync.js";
+import {
+  canonicalSyncJson,
+  openSyncChange,
+  SyncDeviceManager,
+  SyncedDocumentVault,
+  type SyncChangeKeys,
+  type SyncJson,
+} from "./sync.js";
 import { CHANGE_AAD_PREFIX, changeEncryptionKey } from "./sync/protocol.js";
 import { APPLY_RECEIPT_AAD, LOCAL_TRANSACTION_AAD } from "./sync/transaction.js";
 import { withVaultLock } from "./vault-lock.js";
@@ -486,6 +495,8 @@ export interface RekeyJournal {
   slotId: string;
   /** Vault-relative POSIX paths still to install. */
   files: string[];
+  /** Old identities removed only after every replacement is installed. */
+  deletes?: string[];
 }
 
 export function journalPath(vaultDir: string): string {
@@ -521,7 +532,14 @@ function readJournal(vaultDir: string): RekeyJournal | null {
   ) {
     throw new Error(MALFORMED_JOURNAL_MESSAGE);
   }
-  return { version: 1, slotId: parsed.slotId, files: parsed.files };
+  const validDelete = (entry: unknown): entry is string =>
+    typeof entry === "string" &&
+    (/^documents\/sync\/[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*$/u.test(entry) ||
+      /^documents\/attachments\/[a-f0-9]{64}\/(?:manifest\.enc|(?:0|[1-9]\d*)\.chunk\.enc)$/u.test(entry));
+  if (parsed.deletes !== undefined && (!Array.isArray(parsed.deletes) || parsed.deletes.some((entry) => !validDelete(entry)))) {
+    throw new Error(MALFORMED_JOURNAL_MESSAGE);
+  }
+  return { version: 1, slotId: parsed.slotId, files: parsed.files, deletes: parsed.deletes ?? [] };
 }
 
 /**
@@ -538,6 +556,151 @@ export function installStaged(vaultDir: string, journal: RekeyJournal): void {
     const live = resolveInside(vaultDir, relative);
     fs.mkdirSync(path.dirname(live), { recursive: true, mode: 0o700 });
     replaceFileAtomic(staged, live);
+  }
+  // Deletions deliberately happen last. A journal replay repeats the same
+  // order, so a crash never leaves an old identity removed before its new
+  // replacement has been installed.
+  for (const relative of journal.deletes ?? []) {
+    const live = resolveInside(vaultDir, relative);
+    if (fs.existsSync(live)) fs.rmSync(live, { force: true });
+    // Attachment IDs are visible directory names. Remove an old attachment
+    // directory once its staged files are gone; leaving an empty directory
+    // would preserve the very confirmation oracle identity rotation is meant
+    // to close. `journal.deletes` is path-validated before this point, so the
+    // parent is contained and is exactly one attachment directory here.
+    const parts = relative.split("/");
+    if (parts[0] === "documents" && parts[1] === "attachments" && parts.length === 4) {
+      const attachmentDir = resolveInside(vaultDir, parts.slice(0, 3).join("/"));
+      try {
+        if (fs.existsSync(attachmentDir) && fs.readdirSync(attachmentDir).length === 0) fs.rmdirSync(attachmentDir);
+      } catch {
+        // A non-empty or concurrently replaced directory is handled by the
+        // next journal replay; never remove it recursively here.
+      }
+    }
+  }
+}
+
+export interface IdentityRotationOptions {
+  ownerLabel: string;
+  ownerDeviceId: string;
+}
+
+function walkRegularFiles(root: string, prefix = ""): string[] {
+  if (!fs.existsSync(root)) return [];
+  const files: string[] = [];
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+    const absolute = path.join(root, entry.name);
+    if (entry.isDirectory()) files.push(...walkRegularFiles(absolute, relative));
+    else if (entry.isFile()) files.push(relative);
+    else throw new Error(`Refusing identity rotation: ${relative} is not a regular file.`);
+  }
+  return files.sort();
+}
+
+function rewriteAttachmentIdentities(tree: string, keys: KeySet): void {
+  const attachments = path.join(tree, "documents", "attachments");
+  if (!fs.existsSync(attachments)) return;
+  const replacements = new Map<string, string>();
+  const oldIds = fs.readdirSync(attachments).sort();
+  const oldIdSet = new Set(oldIds);
+  const newIdSet = new Set<string>();
+  for (const oldId of oldIds) {
+    if (!CONTENT_ID.test(oldId)) throw new Error(`Refusing identity rotation: invalid attachment directory ${oldId}.`);
+    const oldDir = path.join(attachments, oldId);
+    if (!fs.statSync(oldDir).isDirectory()) throw new Error(`Refusing identity rotation: attachment ${oldId} is not a directory.`);
+    const manifestPath = path.join(oldDir, "manifest.enc");
+    const manifest = JSON.parse(decryptDocument(JSON.parse(fs.readFileSync(manifestPath, "utf8")) as DocumentPayload, keys.documents, attachmentManifestAad(oldId))) as { id?: unknown; chunks?: unknown; size?: unknown };
+    if (manifest.id !== oldId || !Number.isSafeInteger(manifest.chunks) || (manifest.chunks as number) < 1 || !Number.isSafeInteger(manifest.size) || (manifest.size as number) < 1 || (manifest.size as number) > 250 * 1024 * 1024) {
+      throw new Error(`Refusing identity rotation: attachment ${oldId} has an invalid manifest.`);
+    }
+    const chunkCount = manifest.chunks as number;
+    const chunks: Buffer[] = [];
+    for (let index = 0; index < chunkCount; index += 1) {
+      const payload = JSON.parse(fs.readFileSync(path.join(oldDir, `${index}.chunk.enc`), "utf8")) as DocumentPayload;
+      chunks.push(decryptDocumentBytes(payload, keys.documents, attachmentChunkAad(oldId, index)));
+    }
+    const data = Buffer.concat(chunks);
+    if (data.length !== manifest.size) throw new Error(`Refusing identity rotation: attachment ${oldId} size does not match its chunks.`);
+    const newId = crypto.createHmac("sha256", keys.attachmentId).update(AAD.attachmentId, "utf8").update(data).digest("hex");
+    data.fill(0);
+    for (const chunk of chunks) chunk.fill(0);
+    if (newId === oldId || oldIdSet.has(newId) || newIdSet.has(newId)) {
+      throw new Error(`Refusing identity rotation: attachment identity collision for ${oldId}.`);
+    }
+    replacements.set(oldId, newId);
+    newIdSet.add(newId);
+    const newDir = path.join(attachments, newId);
+    fs.mkdirSync(newDir, { recursive: true, mode: 0o700 });
+    for (let index = 0; index < chunkCount; index += 1) {
+      const plain = decryptDocumentBytes(JSON.parse(fs.readFileSync(path.join(oldDir, `${index}.chunk.enc`), "utf8")) as DocumentPayload, keys.documents, attachmentChunkAad(oldId, index));
+      writeFileAtomic(path.join(newDir, `${index}.chunk.enc`), JSON.stringify(encryptDocumentBytes(plain, keys.documents, attachmentChunkAad(newId, index))), { mode: 0o600 });
+      plain.fill(0);
+    }
+    const rewritten = { ...manifest, id: newId };
+    writeFileAtomic(path.join(newDir, "manifest.enc"), JSON.stringify(encryptDocument(JSON.stringify(rewritten), keys.documents, attachmentManifestAad(newId))), { mode: 0o600 });
+  }
+  const replaceMarkdownAttachmentLinks = (body: string): string => body.replace(
+    /(!?\[\[)([a-f0-9]{64})(?=[\]|#])/gu,
+    (_match, opener: string, id: string) => `${opener}${replacements.get(id) ?? id}`,
+  );
+  for (const item of walkRegularFiles(path.join(tree, "documents"), "documents")) {
+    const relative = item.slice("documents/".length);
+    const classified = classifyDocument(relative);
+    if (!classified || classified.kind !== "document" || relative.startsWith("attachments/")) continue;
+    const filePath = path.join(tree, ...item.split("/"));
+    const plain = decryptItem(classified, keys, fs.readFileSync(filePath));
+    const value = JSON.parse(plain.toString("utf8")) as Record<string, unknown>;
+    if (relative === "index.enc") {
+      const canvases = value.canvases as Record<string, { attachmentRefs?: unknown }> | undefined;
+      if (canvases) for (const canvas of Object.values(canvases)) {
+        if (Array.isArray(canvas.attachmentRefs)) canvas.attachmentRefs = canvas.attachmentRefs.map((id) => typeof id === "string" ? replacements.get(id) ?? id : id);
+      }
+      const refs = value.canvasAttachmentRefs as Record<string, unknown> | undefined;
+      if (refs) for (const [id, owners] of Object.entries(refs)) {
+        const next = replacements.get(id);
+        if (next) { delete refs[id]; refs[next] = owners; }
+      }
+    } else if (relative.endsWith(".canvas.enc")) {
+      const nodes = value.nodes;
+      if (Array.isArray(nodes)) for (const node of nodes) {
+        if (node && typeof node === "object" && typeof (node as { attachmentId?: unknown }).attachmentId === "string") {
+          const typed = node as { attachmentId: string };
+          typed.attachmentId = replacements.get(typed.attachmentId) ?? typed.attachmentId;
+        }
+      }
+    } else if (relative.endsWith(".note.enc") && typeof value.body === "string") {
+      value.body = replaceMarkdownAttachmentLinks(value.body);
+    } else {
+      plain.fill(0);
+      continue;
+    }
+    const rewritten = Buffer.from(JSON.stringify(value), "utf8");
+    writeFileAtomic(filePath, encryptItem(classified, keys, rewritten), { mode: 0o600 });
+    plain.fill(0);
+    rewritten.fill(0);
+  }
+  for (const oldId of replacements.keys()) fs.rmSync(path.join(attachments, oldId), { recursive: true, force: true });
+}
+
+function stageIdentitySyncReset(tree: string, passphrase: string, keys: KeySet, options: IdentityRotationOptions): void {
+  const sync = path.join(tree, "documents", "sync");
+  fs.rmSync(sync, { recursive: true, force: true });
+  // The staged root is a self-contained temporary vault solely while the
+  // sync owner and bootstrap changes are generated. It is removed before the
+  // journal is written; the live keyring remains the commit authority.
+  writeKeyring(tree, { version: KEYRING_VERSION, slots: [wrapKeySet(keys, passphrase)] });
+  try {
+    const manager = new SyncDeviceManager(tree, passphrase);
+    manager.initializeOwner(options.ownerLabel, options.ownerDeviceId as `${string}-${string}-${string}-${string}-${string}`);
+    manager.close();
+    const vault = new SyncedDocumentVault(tree, passphrase, options.ownerDeviceId as `${string}-${string}-${string}-${string}-${string}`);
+    (vault as SyncedDocumentVault & { captureDesktopChanges(): void }).captureDesktopChanges();
+    vault.lock();
+  } finally {
+    fs.rmSync(path.join(tree, "keyring.json"), { force: true });
+    forgetVaultKeys(tree);
   }
 }
 
@@ -742,12 +905,15 @@ export function rekeyVault(
   options: {
     keepPassphrase?: boolean;
     allowSamePassphrase?: boolean;
+    /** Replace attachment and sync identities; peers must enroll again afterwards. */
+    rotateIdentities?: IdentityRotationOptions;
     /** The offline kit and code for the recovery slot this vault carries, if any. */
     recovery?: RekeyRecoveryInput;
   } = {},
 ): RekeyReport {
   if (!currentPassphrase) throw new Error("A non-empty vault passphrase is required.");
   const keepPassphrase = Boolean(options.keepPassphrase);
+  const identityRotation = options.rotateIdentities;
   if (!keepPassphrase && newPassphrase.length < MIN_PASSPHRASE_LENGTH) {
     throw new Error(`The new passphrase must be at least ${MIN_PASSPHRASE_LENGTH} characters.`);
   }
@@ -851,13 +1017,32 @@ export function rekeyVault(
 
         newKeys = randomKeySet();
         for (const { name } of PINNED_KEYS) {
+          if (identityRotation && name !== "audit") continue;
           newKeys[name].fill(0);
           newKeys[name] = Buffer.from(oldKeys[name]);
         }
 
-        const items = planRekey(vaultDir);
+        const plannedItems = planRekey(vaultDir);
+        // A rotating sync identity intentionally drops the old signed DAG,
+        // registry, checkpoint and blob store. Those envelopes cannot be
+        // re-sealed under a new change-id key without preserving their old
+        // identities, which is precisely what this operation revokes.
+        const items = identityRotation
+          ? plannedItems.filter((item) => !item.path.startsWith("documents/sync/"))
+          : plannedItems;
         stageRekey(vaultDir, oldKeys, newKeys, items);
-        assertPlanUnchanged(vaultDir, items);
+        if (identityRotation) {
+          rewriteAttachmentIdentities(stagedTree(vaultDir), newKeys);
+          stageIdentitySyncReset(stagedTree(vaultDir), wrapPassphrase, newKeys, identityRotation);
+          const current = planRekey(vaultDir).filter((item) => !item.path.startsWith("documents/sync/"));
+          const expected = new Set(items.map((item) => item.path));
+          const actual = new Set(current.map((item) => item.path));
+          if (expected.size !== actual.size || [...expected].some((entry) => !actual.has(entry))) {
+            throw new Error("Refusing to commit the re-key: the vault changed while identity rotation was being staged.");
+          }
+        } else {
+          assertPlanUnchanged(vaultDir, items);
+        }
 
         // The keyring published at the commit point carries the outgoing
         // rotatable keys. `keyring.json` is replaced before the staged files
@@ -881,7 +1066,13 @@ export function rekeyVault(
         // rather than fixing this call site; left as is.
         let slot: KeyringSlot;
         try {
-          slot = wrapKeySet(newKeys, wrapPassphrase, DEFAULT_SCRYPT_N, retiring, oldKeys.documents);
+          slot = wrapKeySet(
+            newKeys,
+            wrapPassphrase,
+            DEFAULT_SCRYPT_N,
+            retiring,
+            identityRotation ? undefined : oldKeys.documents,
+          );
         } finally {
           zeroRetiringKeys(retiring);
         }
@@ -910,9 +1101,19 @@ export function rekeyVault(
         // safe to clean up or deny: commitRekey may already have crossed its
         // keyring replacement point and then removed the journal on success.
         commitAttempted = true;
+        const stagedFiles = walkRegularFiles(stagedTree(vaultDir));
+        const oldSyncFiles = walkRegularFiles(path.join(vaultDir, "documents", "sync"), "documents/sync");
+        const oldAttachmentFiles = walkRegularFiles(
+          path.join(vaultDir, "documents", "attachments"),
+          "documents/attachments",
+        );
+        const stagedPaths = new Set(stagedFiles);
+        const deletes = identityRotation
+          ? [...oldSyncFiles, ...oldAttachmentFiles].filter((entry) => !stagedPaths.has(entry))
+          : [];
         commitRekey(
           vaultDir,
-          { version: 1, slotId: slot.id, files: items.map((item) => item.path) },
+          { version: 1, slotId: slot.id, files: identityRotation ? stagedFiles : items.map((item) => item.path), deletes },
           { version: KEYRING_VERSION, slots: committedSlots },
         );
 
@@ -936,7 +1137,13 @@ export function rekeyVault(
         // carried across unchanged rather than re-wrapped a second time.
         let settled = true;
         try {
-          const settledSlot = wrapKeySet(newKeys, wrapPassphrase, DEFAULT_SCRYPT_N, null, oldKeys.documents);
+          const settledSlot = wrapKeySet(
+            newKeys,
+            wrapPassphrase,
+            DEFAULT_SCRYPT_N,
+            null,
+            identityRotation ? undefined : oldKeys.documents,
+          );
           writeKeyring(vaultDir, {
             version: KEYRING_VERSION,
             slots: recoverySlot ? [settledSlot, recoverySlot] : [settledSlot],
@@ -967,8 +1174,8 @@ export function rekeyVault(
         appendKeyringAuditWithKey(vaultDir, oldKeys.audit, auditOperation, "allowed");
 
         return {
-          rotated: [...ROTATED_KEYS],
-          pinned: PINNED_KEYS.map((entry) => ({ ...entry })),
+          rotated: identityRotation ? [...ROTATED_KEYS, "attachmentId", "syncChange"] : [...ROTATED_KEYS],
+          pinned: (identityRotation ? PINNED_KEYS.filter((entry) => entry.name === "audit") : PINNED_KEYS).map((entry) => ({ ...entry })),
           reencrypted: {
             documents: items.filter((item) => item.kind === "document").length,
             kv: items.filter((item) => item.kind === "kv").length,

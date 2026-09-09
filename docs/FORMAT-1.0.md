@@ -94,10 +94,12 @@ fail to decrypt every object the interrupted run had not reached. Run `vbrain re
 again: it detects the journal and finishes or rolls back the interrupted run
 without requesting a passphrase or rotating another set of keys.
 
-There is no manual, periodic, or automatic rotation schedule for anything in
-this document. The one place content keys change — sync epoch rotation — is
-described in Section 6 and happens only as the direct consequence of revoking
-a device.
+There is no periodic or automatic rotation schedule for anything in this
+document. The one place content keys change during ordinary sync operation —
+sync epoch rotation — is described in Section 6 and happens only as the direct
+consequence of revoking a device. A user may also explicitly request the
+identity migration in Section 5 with `vbrain rekey --rotate-identities`; that
+manual migration is the documented exception and is never performed implicitly.
 
 ## 3. Encodings
 
@@ -261,6 +263,25 @@ One subsection per entry in `FORMAT_COMPATIBILITY` (`src/format-version.ts`),
 in the order that constant declares them. `reads` is every version this build
 accepts; `writes` is every version this build newly produces (Section 2).
 
+### `portableWorkspace` — `documents/workspace.enc`
+
+`reads: [1]`, `writes: [1]`. The TypeScript and Rust desktop cores encrypt the
+same JSON shape under `AAD.workspace = "secondbrain-vault:workspace:v1"` using
+the document key. The plaintext is an object with `version: 1`, `bookmarks`
+and `layouts`; each collection has bounded string identities and fields, and
+unknown fields are rejected. Bookmarks and named layouts are portable vault
+state. Device-specific filesystem paths, credentials and transient window
+state are not members of this artifact. The shared bytes are pinned by
+`test/fixtures/portable-workspace-vector.json`.
+
+### `savedViews` — `documents/views.enc`
+
+`reads: [1]`, `writes: [1]`. This uses the same encrypted document envelope and
+the document key with `AAD.savedViews = "secondbrain-vault:saved-views:v1"`.
+Its plaintext is `{ version: 1, views: [...] }`, with bounded names, filters,
+tags, sort direction and column lists. A remote view is stored as data; it
+does not replace the device's currently open workspace automatically.
+
 ### `vaultKeyring` — `keyring.json`
 
 `reads: [2]`, `writes: [2]`. Defined in `src/keyring.ts`. The root of the key
@@ -337,14 +358,25 @@ an owner of the superseded passphrase did not already hold. It is absent on a
 vault that has never been re-keyed.
 
 `retiring` holds exactly `ROTATABLE_KEY_NAMES` — the three keys `vbrain rekey`
-replaces — and nothing else. `attachmentId`, `syncChange` and `audit` never
-appear there because they are never rotated: every content address, change id
-and audit link already in the vault is computed under them. A reader tries the
-key in force and falls back to the retiring one only on an authentication
-failure, which is safe because each object's AAD already binds its identity, so
-a fallback cannot succeed against the wrong object. When the last object has
-been rewritten the field is dropped and the keyset returns to version 1. A
-version 1 keyset carrying a `retiring` field is refused rather than ignored.
+replaces in its ordinary mode — and nothing else. `attachmentId`, `syncChange`
+and `audit` do not appear there in that mode because every content address,
+change id and audit link already in the vault is computed under them. A reader
+tries the key in force and falls back to the retiring one only on an
+authentication failure, which is safe because each object's AAD already binds
+its identity. When the last object has been rewritten the field is dropped and
+the keyset returns to version 1. A version 1 keyset carrying a `retiring` field
+is refused rather than ignored.
+
+The explicit `vbrain rekey --rotate-identities --backup <file>` migration is
+different. After the backup is verified, it replaces `attachmentId` and
+`syncChange` as well as the three rotatable keys, rewrites attachment manifests
+and parsed references, discards the old local sync registry/history/checkpoint/
+blob staging, and creates a new owner authority and initial changes. The old
+signed sync DAG is never re-signed under new IDs. The migration does not erase
+older backups or relay copies, and old devices must enroll into the new owner
+epoch before they can write again. The old `legacyChangeIdentity` is not
+carried into the identity-rotated keyset because the retired sync history is
+not accepted by the new authority.
 
 A vault created before the keyring has no `keyring.json` at all; see
 `documentManifest` below and Section 4.
@@ -488,8 +520,8 @@ const id = crypto
 i.e. `id = HMAC-SHA256(attachmentIdKey, AAD.attachmentId || data)`,
 hex-encoded.
 
-**The key is not the document key.** `attachmentIdKey` is a separate,
-never-rotated entry in the vault keyring (`attachmentId` in `KEY_NAMES`,
+**The key is not the document key.** `attachmentIdKey` is a separate entry in
+the vault keyring (`attachmentId` in `KEY_NAMES`,
 `src/keyring.ts`), surfaced as `session.attachmentIdKey` by
 `src/document-crypto.ts`. It equals the document key *only* on legacy
 manifest vaults, where every subkey comes from the same derivation; on
@@ -680,10 +712,13 @@ The rules, all enforced before any byte is transferred:
 not under the rotatable `documents` key. A blob id is the SHA-256 of the sealed
 bytes and the nonce is random, so a blob can never be reproduced under its own
 id: the staged bytes are the only copy that satisfies the manifest inside the
-version 3 change body that names them. Deriving from a key `vbrain rekey` never
-rotates is what keeps that manifest valid for the life of the vault. A reader
-also accepts the `documents` key, which is what a blob staged before this
-derivation existed was sealed under.
+version 3 change body that names them. In the ordinary re-key mode, deriving
+from the permanent `syncChange` key keeps that manifest valid for the life of
+the vault. Identity rotation deliberately discards the old sync blob staging
+and republishes current content as new initial changes under the new identity
+key; it does not try to rename old blob IDs. A reader also accepts the
+`documents` key, which is what a blob staged before this derivation existed was
+sealed under.
 
 **Blob identity.** A blob is one plaintext 1 MiB chunk sealed as a
 `DocumentPayload` under the vault's document key with AAD

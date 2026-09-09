@@ -409,8 +409,10 @@ and deletion remain outside the confidentiality/integrity boundary, while signed
 registries, per-device changes and pinned checkpoints provide client-side trust.
 Operational details and recovery limits are in `docs/SYNC-RELAY.md`.
 
-Independently witnessed freshness, desktop-driven sync mutation and external
-cryptographic review remain later Phase 6 work. Sync is desktop-to-desktop.
+The native desktop shell now delegates explicit sync mutations to the packaged
+TypeScript helper over a bounded private channel; it does not start sync in the
+background. Independent freshness witnesses beyond the owner-signed checkpoints
+and external cryptographic review remain future work. Sync is desktop-to-desktop.
 The original format contract and threat analysis are recorded in
 `docs/superpowers/specs/2026-08-31-encrypted-sync-change-protocol-design.md`.
 

@@ -17,6 +17,29 @@ Versioning once the encrypted storage format reaches 1.0.
   version or application-identity drift and any vault identity/content change. Real
   production-signed native installation remains a release-environment acceptance gate.
 
+- Desktop sync now runs the existing TypeScript engine through a bundled Node
+  helper on the native side. Its versioned, size-bounded stdin/stdout protocol
+  keeps credentials out of argv, environment and logs; manual enrollment,
+  approval, revocation, conflict resolution and relay push/pull are exposed in
+  the sync panel.
+- A running helper can be cancelled through a native cancellation command; the
+  process is terminated, its transaction recovery remains available, and the
+  panel can retry the operation explicitly.
+- `workspace.enc` and `views.enc` are portable encrypted sync artifacts. The
+  shared Rust/TypeScript fixture covers bookmarks, saved views and layouts;
+  device paths, credentials and transient window state stay local. Desktop
+  capture flushes note/canvas edits before a sync transaction and reloads the
+  native cache after apply.
+- `vbrain vault-lock status` reports the lock without opening the vault, and
+  `vbrain vault-lock recover` removes only a same-host lock whose owner PID is
+  proven dead. Live, unknown, remote and malformed locks fail closed, and the
+  CLI and Rust writer share a transition gate so a replacement lock cannot be
+  deleted accidentally.
+- `vbrain rekey --rotate-identities --backup <file>` verifies an encrypted
+  backup before rotating attachment and sync identities. It rewrites parsed
+  attachment references, creates a fresh sync owner/history, and requires old
+  peers to enroll again; old backups and relay copies are not erased.
+
 - Re-key now includes the encrypted retention policy and preserves its values.
 - The Rust core preserves the optional `legacyChangeIdentity` key when
   re-wrapping a keyset. A second cross-core vector covers this format field.
@@ -79,9 +102,9 @@ Versioning once the encrypted storage format reaches 1.0.
   for when a passphrase has leaked and re-wrapping the same keys is not
   enough. Staged beside the live vault, verified, then committed through a
   journal, so an interrupted run either rolls back or is finished by the next
-  one. `documents`, `kv` and `syncEnvelope` rotate; `attachmentId`,
-  `syncChange` and `audit` are pinned, so attachment identities, sync change
-  IDs and the audit chain survive.
+  one. The default mode rotates `documents`, `kv` and `syncEnvelope` while
+  pinning `attachmentId`, `syncChange` and `audit`; the explicit identity mode
+  is documented above and requires a verified backup.
 - The desktop application can now manage the keys that decide whether a vault
   survives. It shows what the keyring holds — every slot with its label,
   creation time and key-derivation cost — changes the passphrase, and writes a
@@ -147,8 +170,8 @@ Versioning once the encrypted storage format reaches 1.0.
 - Bound each per-change device signature to the change body version, so a
   version 3 body cannot be replayed as a version 2 one.
 - The desktop sync panel now reports whether the device registry carries a
-  valid owner signature, and keeps its "mutation is CLI-only" guidance visible
-  even for a vault whose format the build cannot display.
+  valid owner signature; hosts without the packaged helper retain the CLI handoff
+  while the native desktop build exposes explicit sync controls.
 - A failed agreement-key write during sync enrollment no longer leaves a
   half-written device behind: the identity key is rolled back, so simply
   asking again works instead of tripping the pending-key guard.
@@ -164,9 +187,10 @@ Versioning once the encrypted storage format reaches 1.0.
 - Froze the on-disk format at 1.0, documented it artifact by artifact in
   `docs/FORMAT-1.0.md`, added `vbrain format` for the version matrix, and
   committed conformance fixtures that both cores read.
-- Added a read-only sync status panel to the desktop app: authority
-  fingerprint, active epoch, registry revision, device list, pinned checkpoint
-  and change counts. Sync mutation stays in the CLI.
+- Added the sync status panel to the desktop app: authority fingerprint, active
+  epoch, registry revision, device list, pinned checkpoint and change counts.
+  Native desktop builds can now perform explicit sync operations through the
+  packaged helper; older hosts keep the read-only CLI handoff.
 - Added epoch-based content-key rotation: each epoch gets a random content key
   wrapped to every active device's X25519 key, revoking an owner-signed device
   rotates automatically, and rotation is forward-only — a revoked device keeps

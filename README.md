@@ -844,11 +844,11 @@ live note/canvas/attachment/plugin capture and application, owner-signed device
 enrollment and removal with automatic epoch content-key rotation on revocation,
 owner-signed freshness checkpoints, an authenticated opaque self-hosted relay,
 an automated recovery drill, a frozen 1.0 on-disk format with committed
-conformance fixtures, read-only desktop sync status, and resumable
-content-addressed transport for attachment blobs of any size the vault
-accepts. Desktop-driven sync mutation (enrollment, revocation, relay
-push/pull from the app) and the independent security audit remain open — see
-[`docs/AUDIT-SCOPE.md`](docs/AUDIT-SCOPE.md) for the audit readiness package.
+conformance fixtures, a native-packaged desktop sync helper with manual pairing,
+revocation, relay push/pull and conflict resolution, and resumable
+content-addressed transport for attachment blobs of any size the vault accepts.
+The independent security audit remains open — see [`docs/AUDIT-SCOPE.md`](docs/AUDIT-SCOPE.md)
+for the audit readiness package.
 Sync is desktop-to-desktop: Vault Brain stays local-first with optional
 self-hosted sync, so the passphrase never leaves a machine the owner controls
 and no hosted service is ever required.
@@ -856,9 +856,9 @@ and no hosted service is ever required.
 Phase 7 replaced the passphrase-derived content key with a wrapped keyring, so
 `vbrain passphrase change` re-wraps the keyset without re-encrypting a single
 object, both cores read the new format, and the key-derivation cost can be
-raised per vault. `vbrain rekey` — the answer to a leaked passphrase — the
-recovery-key slot and a desktop passphrase-change interface are the remaining
-Phase 7 work. The maintained checklist is in
+raised per vault. It also ships resumable re-key, recovery kits, controlled
+lock recovery and the explicit `vbrain rekey --rotate-identities` migration.
+Desktop passphrase and key-management controls remain Phase 8 work. The maintained checklist is in
 [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## License

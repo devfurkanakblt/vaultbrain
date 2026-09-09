@@ -10,6 +10,8 @@ fn main() {
         "get_backlinks",
         "get_knowledge_graph",
         "list_property_rows",
+        "desktop_sync_execute",
+        "desktop_sync_cancel",
     ];
     tauri_build::try_build(
         tauri_build::Attributes::new()
