@@ -56,6 +56,11 @@ jobs:
       - run: npm run desktop:test
 
   rust:
+    permissions:
+      contents: read
+      # rustsec/audit-check publishes its report as a check run on push events,
+      # which the workflow-wide read-only token cannot create.
+      checks: write
     strategy:
       fail-fast: false
       matrix:
