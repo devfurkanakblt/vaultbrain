@@ -539,7 +539,12 @@ export class DocumentVault {
   private indexCache?: DocumentIndex;
   private notesCache?: IndexedNote[];
   private retentionCache?: RetentionPolicy;
-  private readonly searchCache = new Map<string, SearchFields>();
+  // Search fields belong to the in-memory note object for this session. A
+  // WeakMap avoids hashing a UUID on every candidate while still releasing
+  // normalized bodies when the index is dropped or replaced.
+  private searchCache = new WeakMap<IndexedNote, SearchFields>();
+  // At most four terms, one byte per indexed note. No body text is copied.
+  private readonly bodyOccurrenceCache = new Map<string, Uint8Array>();
   private readonly semanticIndexes = new Map<EmbeddingAdapter, SemanticNoteIndex>();
   private sessionGeneration = 0;
   private locked = false;
@@ -578,7 +583,8 @@ export class DocumentVault {
     this.indexCache = undefined;
     this.notesCache = undefined;
     this.retentionCache = undefined;
-    this.searchCache.clear();
+    this.searchCache = new WeakMap();
+    this.clearBodyOccurrenceCache();
     this.locked = true;
   }
 
@@ -763,7 +769,7 @@ export class DocumentVault {
         const note = this.loadById(id);
         const analysis = analyzeMarkdown(note.body);
         const indexed: IndexedNote = { ...note, links: analysis.links, headings: analysis.headings };
-        this.searchCache.delete(id);
+        if (stale) this.searchCache.delete(stale);
         if (stale) this.removeOwnerLabels(index, stale);
         index.notes[id] = indexed;
         this.addOwnerLabels(index, indexed);
@@ -815,10 +821,10 @@ export class DocumentVault {
   }
 
   private searchFieldsFor(note: IndexedNote): SearchFields {
-    const cached = this.searchCache.get(note.id);
+    const cached = this.searchCache.get(note);
     if (cached && cached.revision === note.revision) return cached;
     const fields = searchFields(note);
-    this.searchCache.set(note.id, fields);
+    this.searchCache.set(note, fields);
     return fields;
   }
 
@@ -829,9 +835,51 @@ export class DocumentVault {
     return this.notesCache;
   }
 
+  private clearBodyOccurrenceCache(): void {
+    for (const counts of this.bodyOccurrenceCache.values()) counts.fill(0);
+    this.bodyOccurrenceCache.clear();
+  }
+
+  private occurrenceCounts(terms: readonly string[], noteCount: number): Map<string, Uint8Array> {
+    // Keep discovery bounded as well as storage bounded. A broad query falls
+    // back to direct scoring before touching the session cache, so a query
+    // with thousands of terms cannot allocate a matching-sized Set/array.
+    const eligible = new Array<string>(4);
+    let eligibleCount = 0;
+    for (const term of terms) {
+      if (term.length > 256) continue;
+      let seen = false;
+      for (let index = 0; index < eligibleCount; index++) {
+        if (eligible[index] === term) {
+          seen = true;
+          break;
+        }
+      }
+      if (seen) continue;
+      if (eligibleCount === eligible.length) return new Map();
+      eligible[eligibleCount++] = term;
+    }
+    for (let index = 0; index < eligibleCount; index++) {
+      const term = eligible[index];
+      let counts = this.bodyOccurrenceCache.get(term);
+      if (counts) this.bodyOccurrenceCache.delete(term);
+      else {
+        if (this.bodyOccurrenceCache.size === 4) {
+          const oldest = this.bodyOccurrenceCache.keys().next().value!;
+          this.bodyOccurrenceCache.get(oldest)!.fill(0);
+          this.bodyOccurrenceCache.delete(oldest);
+        }
+        counts = new Uint8Array(noteCount).fill(255);
+      }
+      this.bodyOccurrenceCache.set(term, counts);
+    }
+    return this.bodyOccurrenceCache;
+  }
+
   private saveIndex(index: DocumentIndex): void {
     this.assertUnlocked();
     this.notesCache = undefined;
+    this.clearBodyOccurrenceCache();
     index.generatedAt = new Date().toISOString();
     const payload = encryptDocument(JSON.stringify(index), this.session.key, AAD.documentIndex);
     writeFileAtomic(this.indexPath(), JSON.stringify(payload), { mode: 0o600 });
@@ -2080,7 +2128,7 @@ export class DocumentVault {
       mode: 0o600,
     });
     const indexed: IndexedNote = { ...note, links: analysis.links, headings: analysis.headings };
-    this.searchCache.delete(id);
+    if (existing) this.searchCache.delete(existing);
     if (existing) this.removeOwnerLabels(index, existing);
     index.notes[id] = indexed;
     this.addOwnerLabels(index, indexed);
@@ -2181,24 +2229,93 @@ export class DocumentVault {
     // The filter loop runs once per note in the vault, so it allocates
     // nothing: no per-note closures, and the clauses a query does not use are
     // skipped outright rather than iterated over an empty list.
-    candidates: for (const note of this.indexedNotes()) {
+    const notes = this.indexedNotes();
+    const occurrenceCache = this.occurrenceCounts(required, notes.length);
+    // Keep the per-query lookup table bounded too. Queries with more than
+    // four terms use direct counting and do not allocate a term-sized array.
+    const termCounts = required.length <= 4 ? new Array<Uint8Array | undefined>(required.length) : undefined;
+    if (termCounts) {
+      for (let termIndex = 0; termIndex < required.length; termIndex++) {
+        termCounts[termIndex] = occurrenceCache.get(required[termIndex]);
+      }
+    }
+    candidates: for (let noteIndex = 0; noteIndex < notes.length; noteIndex++) {
+      const note = notes[noteIndex];
       const fields = this.searchFieldsFor(note);
       const head = fields.head;
       const body = fields.body;
-      for (const tag of tags) if (!fields.tags.includes(tag)) continue candidates;
-      for (const part of paths) if (!fields.path.includes(part)) continue candidates;
-      for (const term of excluded) if (head.includes(term) || body.includes(term)) continue candidates;
-      for (const term of required) if (!head.includes(term) && !body.includes(term)) continue candidates;
+      if (tags.length > 0) {
+        for (let tagIndex = 0; tagIndex < tags.length; tagIndex++) {
+          if (!fields.tags.includes(tags[tagIndex])) continue candidates;
+        }
+      }
+      if (paths.length > 0) {
+        for (let pathIndex = 0; pathIndex < paths.length; pathIndex++) {
+          if (!fields.path.includes(paths[pathIndex])) continue candidates;
+        }
+      }
+      if (excluded.length > 0) {
+        for (let termIndex = 0; termIndex < excluded.length; termIndex++) {
+          const term = excluded[termIndex];
+          if (head.includes(term) || body.includes(term)) continue candidates;
+        }
+      }
+      if (required.length > 0) {
+        for (let termIndex = 0; termIndex < required.length; termIndex++) {
+          const term = required[termIndex];
+          if (!head.includes(term) && !body.includes(term)) continue candidates;
+        }
+      }
 
       let score = 0;
-      for (const term of required) {
+      for (let termIndex = 0; termIndex < required.length; termIndex++) {
+        const term = required[termIndex];
         if (fields.title === term) score += 40;
         else if (fields.title.includes(term)) score += 20;
-        if (fields.aliases.some((alias) => alias.includes(term))) score += 14;
-        if (fields.tags.some((tag) => tag.includes(term))) score += 10;
+        if (fields.aliases.length > 0) {
+          for (let aliasIndex = 0; aliasIndex < fields.aliases.length; aliasIndex++) {
+            if (fields.aliases[aliasIndex].includes(term)) {
+              score += 14;
+              break;
+            }
+          }
+        }
+        if (fields.tags.length > 0) {
+          for (let tagIndex = 0; tagIndex < fields.tags.length; tagIndex++) {
+            if (fields.tags[tagIndex].includes(term)) {
+              score += 10;
+              break;
+            }
+          }
+        }
         if (fields.path.includes(term)) score += 8;
-        score += Math.min(10, countOccurrences(fields.body, term));
         if (fields.properties.includes(term)) score += 4;
+      }
+
+      // Body frequency contributes at most ten points per required term. Once
+      // the bounded result set is full, a candidate whose maximum possible
+      // score cannot displace its weakest member needs no body scan. This is
+      // an exact pruning rule: ties still use the existing updatedAt order.
+      if (required.length > 0 && matches.length === wanted) {
+        const weakest = matches[matches.length - 1];
+        const maximumScore = score + required.length * 10;
+        if (
+          maximumScore < weakest.score ||
+          (maximumScore === weakest.score && note.updatedAt <= weakest.note.updatedAt)
+        ) {
+          continue candidates;
+        }
+      }
+
+      for (let termIndex = 0; termIndex < required.length; termIndex++) {
+        const term = required[termIndex];
+        const counts = termCounts?.[termIndex];
+        let occurrences = counts?.[noteIndex] ?? 255;
+        if (occurrences === 255) {
+          occurrences = Math.min(10, countOccurrences(fields.body, term));
+          if (counts) counts[noteIndex] = occurrences;
+        }
+        score += occurrences;
       }
       if (required.length === 0) score = 1;
 
@@ -2207,6 +2324,14 @@ export class DocumentVault {
         if (score < weakest.score) continue;
         if (score === weakest.score && note.updatedAt <= weakest.note.updatedAt) continue;
       }
+      // Once the bounded result is full, recycle its former weakest entry
+      // instead of allocating a short-lived object for every candidate that
+      // displaces it. Broad title queries can otherwise create hundreds of
+      // thousands of garbage objects during one search.
+      const candidate =
+        matches.length === wanted ? matches.pop()! : { note, score };
+      candidate.note = note;
+      candidate.score = score;
       let low = 0;
       let high = matches.length;
       while (low < high) {
@@ -2216,8 +2341,7 @@ export class DocumentVault {
         if (ahead) low = middle + 1;
         else high = middle;
       }
-      matches.splice(low, 0, { note, score });
-      if (matches.length > wanted) matches.pop();
+      matches.splice(low, 0, candidate);
     }
 
     const terms = required.join(" ");
