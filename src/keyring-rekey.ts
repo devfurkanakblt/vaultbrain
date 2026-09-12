@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 
 import {
   AAD,
+  artifactForPath,
   attachmentChunkAad,
   attachmentManifestAad,
   canvasAad,
@@ -107,7 +108,7 @@ const CONTENT_ID = /^[a-f0-9]{64}$/u;
 
 /**
  * `writeFileAtomic` (src/fs-safe.ts) and `SyncChangeLog.storeEnvelope`
- * (src/sync/change-log.ts) both stage writes as a dot-prefixed sibling named
+ * (src/sync.ts) both stage writes as a dot-prefixed sibling named
  * `.<final-name>.<pid>.<uuid>.tmp` and remove it once the write lands. A hard
  * crash between the write and the cleanup can leave one behind. Every reader
  * in this codebase already ignores these — they filter directory listings by
@@ -147,16 +148,17 @@ const SYNC_EPOCH_KEY_FILE = /^(0|[1-9]\d*)\.key\.enc$/u;
  */
 function classifyDocument(relative: string): RekeyItem | null {
   const segments = relative.split("/");
-  const item = (kind: RekeyItemKind, identity: string): RekeyItem => ({
-    path: `documents/${relative}`,
-    kind,
-    identity,
-  });
+  const item = (kind: RekeyItemKind, identity: string): RekeyItem => {
+    artifactForPath(`documents/${relative}`);
+    return { path: `documents/${relative}`, kind, identity };
+  };
 
   if (WRITER_TEMP_FILE.test(segments[segments.length - 1])) return null;
 
   if (segments.length === 1) {
     if (DOCUMENT_PLAINTEXT.has(segments[0])) return null;
+    if (segments[0] === "workspace.enc") return item("document", AAD.workspace);
+    if (segments[0] === "views.enc") return item("document", AAD.savedViews);
     if (segments[0] === "index.enc") return item("document", AAD.documentIndex);
     if (segments[0] === "plugin-policy.enc") return item("document", AAD.pluginPolicy);
     if (segments[0] === "retention.enc") return item("document", AAD.retentionPolicy);
@@ -208,6 +210,7 @@ function classifyDocument(relative: string): RekeyItem | null {
   // at it. There is nothing to rotate here, so the walk enumerates it and
   // then leaves it alone rather than throwing on it as unclassifiable.
   if (segments.length === 3 && segments[0] === "sync" && segments[1] === "blobs" && CONTENT_ID.test(segments[2])) {
+    artifactForPath(`documents/${relative}`);
     return null;
   }
 
@@ -260,6 +263,7 @@ export function planRekey(vaultDir: string): RekeyItem[] {
     if (ROOT_PLAINTEXT.has(entry.name)) continue;
     if (WRITER_TEMP_FILE.test(entry.name)) continue;
     if (entry.name.endsWith(".kv.enc")) {
+      artifactForPath(entry.name);
       const base = entry.name.slice(0, -".kv.enc".length);
       // `base` is the filename `saveVaultFile` (src/store.ts) chose, and it
       // already ran the user's input through `normalizeVaultName` before
@@ -273,6 +277,7 @@ export function planRekey(vaultDir: string): RekeyItem[] {
       continue;
     }
     if (entry.name === "grants.enc") {
+      artifactForPath(entry.name);
       items.push({ path: entry.name, kind: "kv", identity: "grants" });
       continue;
     }
@@ -328,18 +333,8 @@ export function decryptItem(item: RekeyItem, keys: KeySet, raw: Buffer): Buffer 
     return Buffer.from(decryptWithKey(parsed as KeyedEncryptedPayload, keys.kv, item.identity), "utf8");
   }
 
-  // sync-change: delegated to `openSyncChange` (src/sync.ts), the format's
-  // real, epoch-aware implementation — not the partially-extracted duplicate
-  // in src/sync/protocol.ts, which hard-rejects any envelope but version 1
-  // and, worse, would derive the body key with the epoch-1 formula against
-  // whatever version it was handed if that rejection were ever loosened.
-  // `resealSyncChange` (src/sync.ts) is what a re-key applies to the change
-  // log, and it refuses epoch 2 and above by design: their bodies are sealed
-  // under an epoch key a re-key never rotates — only the file holding that
-  // key is rewritten (classified above as `sync/identity/epochs/<n>.key.enc`)
-  // — so there is nothing for a re-key to re-seal here. This mirrors that
-  // same refusal, in its own words, before spending a decrypt attempt on a
-  // key formula that could not have matched a later epoch anyway.
+  // The canonical wire implementation preserves epoch-1 identities. Later
+  // epochs remain an explicit fail-closed re-key limitation.
   const envelope = parsed as { version?: unknown };
   if (envelope.version !== 1) {
     throw new Error("Only an epoch 1 sync change is re-sealed; later epochs keep their epoch key.");

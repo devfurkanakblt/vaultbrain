@@ -67,7 +67,8 @@ Concretely:
   array, never shrinks it. `writes` — the version(s) newly produced — may be a
   strict subset of `reads`, which is how a version is retired from _new_
   writes without breaking _old_ readers (see the `encryptedEnvelope` entry,
-  which still reads version `0` but only ever writes version `1`).
+  which reads versions `0`, `1`, and `2`, and writes `1` for legacy vaults or
+  `2` for keyring-backed vaults).
 
 **Two carve-outs, stated rather than assumed.** `documentManifest` version 2 is
 in this format at 1.0, even though the policy above reserves artifact version
@@ -383,7 +384,9 @@ A vault created before the keyring has no `keyring.json` at all; see
 
 ### `encryptedEnvelope` — `*.kv.enc`
 
-`reads: [0, 1]`, `writes: [1]`. Defined in `src/crypto.ts`.
+`reads: [0, 1, 2]`, `writes: [1, 2]`. Defined in `src/crypto.ts`.
+Version 2 uses the keyring key and the exact AAD `secondbrain-vault:kv:v2`
+(`AAD.keyedEnvelope`). The version 0 and 1 forms below remain readable.
 
 Version 1 (`EncryptedPayload`):
 
@@ -560,17 +563,19 @@ the same bytes and produce a vault this build cannot open, and this build's
 attachments will fail this same check in the other direction.
 
 Two further single-purpose files also use this `DocumentPayload` shape under
-a fixed (non-id-keyed) AAD, but live outside `documents/objects/` and are not
-separate entries in `FORMAT_COMPATIBILITY`: the document index
+a fixed (non-id-keyed) AAD and live outside `documents/objects/`. Both have
+separate version-1 read/write entries in `FORMAT_COMPATIBILITY`: the document index
 (`AAD.documentIndex = "secondbrain-vault:document-index:v1"`) and the plugin
 security policy (`AAD.pluginPolicy = "secondbrain-vault:plugin-policy:v1"`),
-both in `src/documents.ts`. They are out of scope for this specification's
-version guarantees.
+both in `src/documents.ts`. They are covered by this specification's
+version guarantees and explicit normal/identity-rotation re-key metadata.
 
 ### `syncChangeEnvelope` — `documents/sync/changes/*.change.enc`
 
-`reads: [1, 2, 3]`, `writes: [1, 2, 3]`. Defined in `src/sync.ts`. This
-entry covers two nested version numbers that are **not** the same number:
+`reads: [1, 2]`, `writes: [1, 2]`. The canonical wire implementation is
+`src/sync/protocol.ts`, re-exported by the public `src/sync.ts` API. The separate
+`syncChangeBody` catalogue entry reads and writes `[1, 2, 3]`. These are two
+nested version numbers that are **not** the same number:
 the envelope's own `version`, which is still only `1` or `2` and selects the
 epoch sealing rule below, and the `version` of the `SyncChangeBody` sealed
 inside it, which is where `3` appears.

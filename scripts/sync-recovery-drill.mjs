@@ -6,6 +6,7 @@ import path from "node:path";
 import { createBackup, restoreBackup } from "../dist/backup.js";
 import { startSyncRelay, SyncRelayClient } from "../dist/sync-relay.js";
 import { SyncChangeLog, SyncDeviceManager } from "../dist/sync.js";
+import { runPortableRecoveryDrill } from "./portable-recovery-drill.mjs";
 
 const passphrase = process.env.VBRAIN_DRILL_PASSPHRASE ?? process.env.SBRAIN_DRILL_PASSPHRASE ?? "throwaway-sync-recovery-drill-passphrase";
 const token = process.env.VBRAIN_RELAY_TOKEN ?? process.env.SBRAIN_RELAY_TOKEN ?? "throwaway-sync-recovery-drill-relay-token";
@@ -90,6 +91,7 @@ try {
         relayCatchup: imported,
         verifiedCheckpoint: verified.id,
         verifiedChanges: verified.body.changeCount,
+        portableRecovery: await runPortableRecoveryDrill(),
       },
       null,
       2,

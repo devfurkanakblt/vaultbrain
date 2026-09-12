@@ -4,6 +4,12 @@ This document defines what an independent security engagement is being asked
 to review, and states plainly what this project already knows is weak,
 unfinished, or out of scope. It is written for the auditor, not as marketing.
 
+Closure status: this is a prepared scope package; no independent audit has been
+completed. Phase 14 reconciles implemented sync and re-key surfaces and maps the
+still-open Phase 13 consolidation work to Phase 14.3. Personal memory is
+experimental and disabled by default, with productization planned separately in
+Phase 15.
+
 ## 1. Purpose
 
 Vault Brain is pre-1.0 software. Per `SECURITY.md` and `docs/PRODUCT.md`, the
@@ -218,18 +224,15 @@ weaknesses is worse than no scope document:
   This bullet is also a pointer: the blob path is new attack surface, and
   §2 and §9 below allocate review effort to it explicitly.
 
-- **A known gap in the format catalogue.** `documents/index.enc`
+- **Catalogue coverage added in Phase 14.** `documents/index.enc`
   (`AAD.documentIndex`) and `documents/plugin-policy.enc`
   (`AAD.pluginPolicy`) use the same `DocumentPayload` envelope shape as
-  artifacts under `documents/objects/`, but neither is a separate entry in
-  `FORMAT_COMPATIBILITY` (`src/format-version.ts`). They are therefore
-  outside the format's versioned read/write compatibility guarantees
-  described in `docs/FORMAT-1.0.md` — that document already flags this at
-  the point it describes `DocumentPayload`. An auditor should treat these two
-  files as present on disk, encrypted with the project's real AEAD
-  construction, but *not* covered by the format's stated 1.x compatibility
-  policy, and should examine them as a gap in the map rather than assume the
-  gap means they are unused or low-value.
+  artifacts under `documents/objects/`. Both now have separate version-1
+  read/write entries, domain references and re-key behavior in
+  `FORMAT_COMPATIBILITY` (`src/format-version.ts`), covered by the 1.x policy.
+  Real writer tests check them against the re-key plan. Exhaustive artifact
+  and temporary-transition coverage remains a separate gate in
+  [the Phase 14 verification record](PHASE-14-VERIFICATION.md).
 
 ## 6. The two-implementation problem
 
@@ -388,6 +391,14 @@ findings once fixes have shipped.
   boundary and IPC contract present in the source tree.
 
 ## 11. Reproducing the build and running the evidence
+
+### Evidence record template
+
+For each command or platform drill, record the reviewed commit, exact command,
+host/OS, tool versions, start and finish time, result (`PASS`, `FAIL`, or
+`NOT RUN`), retained artifact path, and reviewer. `NOT RUN` is an evidence gap, not
+a pass. Synthetic CI package-transition evidence does not close the real native
+installation gate, and this document never marks an independent audit complete.
 
 ```bash
 npm ci

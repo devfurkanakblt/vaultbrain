@@ -26,7 +26,7 @@ import { addGrant, emptyGrantFile, loadGrants, saveGrants } from "../dist/grants
 import { appendAudit, verifyAudit } from "../dist/audit.js";
 import { openDocumentKey } from "../dist/document-crypto.js";
 import { DocumentVault } from "../dist/documents.js";
-import { SyncChangeLog } from "../dist/sync/change-log.js";
+import { SyncChangeLog } from "../dist/sync.js";
 import { openSyncChange, sealSyncChange } from "../dist/sync/protocol.js";
 import { SyncLocalTransaction, SyncApplyReceiptStore } from "../dist/sync/transaction.js";
 

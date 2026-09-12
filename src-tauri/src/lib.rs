@@ -3556,6 +3556,7 @@ fn unlock_vault(
 
 #[tauri::command(async)]
 fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
+    state.desktop_sync_cancel.store(true, Ordering::Release);
     *state
         .session
         .lock()

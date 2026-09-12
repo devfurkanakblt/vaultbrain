@@ -2,6 +2,9 @@
 
 Vault Brain releases use public GitHub-hosted runners and a draft-first workflow.
 The workflow prepares a release; a maintainer reviews and publishes it separately.
+Documentation and CI evidence do not constitute a production release. Production
+signing, real native installation acceptance and publication remain explicit
+maintainer-owned gates.
 
 ## One-time signing setup
 
@@ -50,6 +53,11 @@ x64 hosts. On each host, use a synthetic encrypted vault and record that:
 The CI package-transition harness is a pre-release regression gate, not a substitute
 for this production-signed updater drill. SmartScreen/Gatekeeper prompts and Linux
 authentication behavior must be recorded rather than described as bypassed.
+
+Retain an evidence record for each host with the exact reviewed commit, package
+checksums, signing-key configuration provenance, command transcript, platform and
+tool versions, result, and artifact location. Missing signing material, a missing
+host drill, or an unreviewed result keeps the release gate open.
 
 ## Publish or recover
 

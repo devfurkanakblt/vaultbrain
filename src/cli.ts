@@ -2612,7 +2612,7 @@ program
   .description("print the on-disk format version and the artifact version matrix")
   .action(() => {
     console.log(
-      JSON.stringify({ formatVersion: VAULT_FORMAT_VERSION, artifacts: FORMAT_COMPATIBILITY }, null, 2),
+      JSON.stringify({ formatVersion: VAULT_FORMAT_VERSION, artifacts: Object.fromEntries(Object.entries(FORMAT_COMPATIBILITY).map(([name, { path, reads, writes }]) => [name, { path, reads, writes }])) }, null, 2),
     );
   });
 

@@ -6,7 +6,7 @@ use std::{
     process::{Command, Stdio},
     sync::atomic::{AtomicBool, Ordering},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Manager};
 
@@ -14,7 +14,7 @@ const PROTOCOL_VERSION: u8 = 1;
 const MAX_REQUEST_BYTES: usize = 256 * 1024;
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DesktopSyncRequest {
     version: u8,
@@ -106,6 +106,31 @@ fn helper_runtime(app: &AppHandle) -> Result<(PathBuf, PathBuf), String> {
     Ok((runtime, helper))
 }
 
+fn read_response_limited(reader: &mut impl Read) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    reader
+        .take((MAX_RESPONSE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Desktop sync helper output could not be read.".to_string())?;
+    if bytes.len() > MAX_RESPONSE_BYTES {
+        return Err("Desktop sync helper returned an oversized response.".into());
+    }
+    Ok(bytes)
+}
+
+fn validate_response(response: &Value, operation: &str) -> Result<Value, String> {
+    if response.get("version").and_then(Value::as_u64) != Some(PROTOCOL_VERSION.into())
+        || response.get("operation").and_then(Value::as_str) != Some(operation)
+        || response.get("state").and_then(Value::as_str) != Some("complete")
+    {
+        return Err("Desktop sync helper returned an invalid response.".into());
+    }
+    response
+        .get("result")
+        .cloned()
+        .ok_or("Desktop sync helper returned no result.".into())
+}
+
 /// Runs only the app-packaged runtime at a fixed resource path. The helper's
 /// single request is written to its private stdin; no credential reaches argv,
 /// an environment variable, stdout diagnostics, or the frontend.
@@ -130,7 +155,13 @@ pub fn execute(
     }
     cancel.store(false, Ordering::Release);
     let (runtime, helper) = helper_runtime(app)?;
-    let mut child = Command::new(runtime)
+    let mut command = Command::new(runtime);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let mut child = command
         .arg(helper)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -145,25 +176,41 @@ pub fn execute(
         .stdout
         .take()
         .ok_or("Could not open the helper's private output.")?;
-    let reader = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let result = stdout.read_to_end(&mut bytes);
-        (result, bytes)
+    let mut reader = Some(thread::spawn(move || read_response_limited(&mut stdout)));
+    let mut output = None;
+    // Writing may block if the helper stops consuming stdin. Keep cancellation
+    // and the deadline live while the private writer is blocked.
+    let writer = thread::spawn(move || {
+        use zeroize::Zeroize;
+        let mut body = body;
+        let result = stdin.write_all(&body);
+        body.zeroize();
+        result
     });
-    if let Err(error) = stdin.write_all(&body) {
-        let _ = child.kill();
-        let _ = child.wait();
-        let _ = reader.join();
-        return Err(format!("Could not send the desktop sync request: {error}"));
-    }
-    drop(stdin);
-
+    let started = Instant::now();
     let status = loop {
-        if cancel.load(Ordering::Acquire) {
+        if cancel.load(Ordering::Acquire) || started.elapsed() > Duration::from_secs(120) {
             let _ = child.kill();
             let _ = child.wait();
-            let _ = reader.join();
-            return Err("Desktop sync operation cancelled.".into());
+            if let Some(reader) = reader.take() {
+                let _ = reader.join();
+            }
+            let _ = writer.join();
+            return Err("Desktop sync operation cancelled or timed out.".into());
+        }
+        if reader.as_ref().is_some_and(|reader| reader.is_finished()) {
+            match reader.take().unwrap().join() {
+                Ok(Ok(bytes)) => output = Some(bytes),
+                result => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = writer.join();
+                    return Err(match result {
+                        Ok(Err(error)) => error,
+                        _ => "Desktop sync helper output reader failed.".into(),
+                    });
+                }
+            }
         }
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -171,26 +218,54 @@ pub fn execute(
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = reader.join();
+                if let Some(reader) = reader.take() {
+                    let _ = reader.join();
+                }
+                let _ = writer.join();
                 return Err(format!("Desktop sync helper did not finish: {error}"));
             }
         }
     };
-    let (read_result, stdout) = reader
+    let stdout = match output {
+        Some(bytes) => bytes,
+        None => reader
+            .take()
+            .unwrap()
+            .join()
+            .map_err(|_| "Desktop sync helper output reader failed.")??,
+    };
+    writer
         .join()
-        .map_err(|_| "Desktop sync helper output reader failed.")?;
-    read_result.map_err(|_| "Desktop sync helper output could not be read.")?;
-    if stdout.len() > MAX_RESPONSE_BYTES {
-        return Err("Desktop sync helper returned an oversized response.".into());
-    }
+        .map_err(|_| "Desktop sync helper input writer failed.")?
+        .map_err(|_| "Could not send the desktop sync request.")?;
     let response: Value = serde_json::from_slice(&stdout)
         .map_err(|_| "Desktop sync helper returned an invalid response.")?;
     if !status.success() {
         return Err("Desktop sync helper rejected the operation.".into());
     }
-    let result = response
-        .get("result")
-        .cloned()
-        .ok_or("Desktop sync helper returned no result.")?;
-    Ok(result)
+    validate_response(&response, &request.operation)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_helper_responses_for_a_different_operation() {
+        let response = serde_json::json!({
+            "version": PROTOCOL_VERSION,
+            "operation": "pull",
+            "state": "complete",
+            "result": { "changes": 1 }
+        });
+
+        assert!(validate_response(&response, "push").is_err());
+    }
+
+    #[test]
+    fn stops_reading_when_helper_output_exceeds_the_protocol_limit() {
+        let mut input = std::io::Cursor::new(vec![0_u8; MAX_RESPONSE_BYTES + 1]);
+
+        assert!(read_response_limited(&mut input).is_err());
+    }
 }

@@ -1,5 +1,58 @@
+import {
+  MAX_PARENTS,
+  MAX_CHANGE_BYTES,
+  MAX_ENVELOPE_BYTES,
+  CHANGE_ID,
+  DEVICE_ID,
+  canonicalSyncJson,
+  validateSyncChangeBody,
+  sealSyncChange,
+  openSyncChange,
+  validateEnvelope,
+  validateJson,
+  integer,
+  changeBodyVersion,
+  changeAuthorizationPayload,
+  type SyncObjectType,
+  type SyncOperation,
+  type SyncJson,
+  type SyncMutation,
+  type SyncChangeBody,
+  type EncryptedSyncChange,
+  type SyncChangeKeys,
+  type SyncChangeKeyMaterial,
+  type SyncEpochKeyResolver,
+  type SyncChange,
+} from "./sync/protocol.js";
+export {
+  canonicalSyncJson,
+  validateSyncChangeBody,
+  sealSyncChange,
+  openSyncChange,
+  resealSyncChange,
+  validateRelayEnvelope,
+} from "./sync/protocol.js";
+export type {
+  SyncObjectType,
+  SyncOperation,
+  SyncJson,
+  SyncMutation,
+  SyncChangeBody,
+  SyncChangeAuthorization,
+  EncryptedSyncChange,
+  SyncChangeKeys,
+  SyncChangeKeyMaterial,
+  SyncEpochKeyResolver,
+  SyncChange,
+} from "./sync/protocol.js";
 import crypto from "node:crypto";
-import { isPortableStateId, parsePortableState, readPortableState, writePortableState, type PortableStateId } from "./portable-state.js";
+import {
+  isPortableStateId,
+  parsePortableState,
+  readPortableState,
+  writePortableState,
+  type PortableStateId,
+} from "./portable-state.js";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -10,12 +63,7 @@ import {
   type DocumentPayload,
   type DocumentReadKey,
 } from "./document-crypto.js";
-import {
-  assertNoSymlinkComponents,
-  assertNotSymlink,
-  readTextFileLimited,
-  writeFileAtomic,
-} from "./fs-safe.js";
+import { assertNoSymlinkComponents, assertNotSymlink, readTextFileLimited, writeFileAtomic } from "./fs-safe.js";
 import { resolveInside } from "./safety.js";
 import { withVaultLock } from "./vault-lock.js";
 import {
@@ -32,13 +80,7 @@ import {
   type PluginSecurityPolicy,
   type PluginSummary,
 } from "./documents.js";
-import {
-  AAD,
-  canonicalBase64,
-  syncAgreementKeyAad,
-  syncChangeAad,
-  syncDeviceKeyAad,
-} from "./format-version.js";
+import { AAD, canonicalBase64, syncAgreementKeyAad, syncDeviceKeyAad } from "./format-version.js";
 import {
   agreementPrivateKeyFromBase64,
   agreementPublicKeyFromBase64,
@@ -65,83 +107,9 @@ import {
   type SyncTransactionOptions,
 } from "./sync/transaction.js";
 
-const MAX_CHANGE_BYTES = 8 * 1024 * 1024;
-const MAX_ENVELOPE_BYTES = 12 * 1024 * 1024;
 const MAX_DEVICE_REGISTRY_BYTES = 8 * 1024 * 1024;
 const MAX_CHANGE_COUNT = 50_000;
 const MAX_CHANGE_STORE_BYTES = 512 * 1024 * 1024;
-const MAX_PARENTS = 256;
-const MAX_JSON_DEPTH = 32;
-const MAX_JSON_NODES = 100_000;
-const CHANGE_ID = /^[a-f0-9]{64}$/u;
-const DEVICE_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
-const OBJECT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u;
-
-export type SyncObjectType = "note" | "canvas" | "attachment" | "plugin" | "vault";
-export type SyncOperation = "put" | "delete";
-export type SyncJson = null | boolean | number | string | SyncJson[] | { [key: string]: SyncJson };
-
-export interface SyncMutation {
-  objectType: SyncObjectType;
-  objectId: string;
-  operation: SyncOperation;
-  baseRevision: number | null;
-  revision: number;
-  value: SyncJson;
-}
-
-export interface SyncChangeBody {
-  version: 1 | 2 | 3;
-  deviceId: string;
-  sequence: number;
-  previousDeviceChange: string | null;
-  parents: string[];
-  createdAt: string;
-  mutation: SyncMutation;
-  authorization?: SyncChangeAuthorization;
-}
-
-export interface SyncChangeAuthorization {
-  certificateSerial: number;
-  signature: string;
-}
-
-export interface EncryptedSyncChange {
-  version: 1 | 2;
-  id: string;
-  /** Present on version 2 envelopes only; always 2 or greater. */
-  epoch?: number;
-  payload: DocumentPayload;
-}
-
-export interface SyncChangeKeys {
-  /** Permanent identity key: rotating envelope encryption must not rewrite DAG IDs. */
-  syncChangeKey: Buffer;
-  /** Rotatable key used only to derive the per-change encryption key. */
-  syncEnvelopeKey: Buffer;
-  /**
-   * The outgoing envelope key of a re-key that has not finished re-sealing
-   * every change body. Read-only, like `legacyKey`.
-   */
-  retiringSyncEnvelopeKey?: Buffer;
-  /** Optional pre-keyring key used only while reading already-written changes. */
-  legacyKey?: Buffer;
-  /**
-   * Recomputes the id of a change written before the identity key was
-   * separated from the documents key. Never decrypts anything; it exists only
-   * so a re-key can re-seal such a change's body without renaming it.
-   */
-  legacyIdentityKey?: Buffer;
-}
-
-export type SyncChangeKeyMaterial = Buffer | SyncChangeKeys;
-
-/** Resolves an epoch number to its identity/envelope key material. */
-export type SyncEpochKeyResolver = (epoch: number) => SyncChangeKeyMaterial;
-
-export interface SyncChange extends SyncChangeBody {
-  id: string;
-}
 
 export interface SyncEnrollmentRequest {
   version: 1 | 2;
@@ -342,320 +310,6 @@ function noteSummary(note: NoteDocument): NoteSummary {
   };
 }
 
-function assertUnicode(value: string, label: string): void {
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code >= 0xd800 && code <= 0xdbff) {
-      const next = value.charCodeAt(index + 1);
-      if (!(next >= 0xdc00 && next <= 0xdfff)) throw new Error(`${label} contains an unpaired surrogate.`);
-      index += 1;
-    } else if (code >= 0xdc00 && code <= 0xdfff) {
-      throw new Error(`${label} contains an unpaired surrogate.`);
-    }
-  }
-}
-
-function validateJson(value: unknown, depth = 0, counter = { nodes: 0 }): asserts value is SyncJson {
-  counter.nodes += 1;
-  if (counter.nodes > MAX_JSON_NODES) throw new Error("Sync change JSON is too complex.");
-  if (depth > MAX_JSON_DEPTH) throw new Error("Sync change JSON is nested too deeply.");
-  if (value === null || typeof value === "boolean") return;
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new Error("Sync change JSON contains a non-finite number.");
-    return;
-  }
-  if (typeof value === "string") {
-    assertUnicode(value, "Sync change JSON");
-    return;
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) validateJson(item, depth + 1, counter);
-    return;
-  }
-  if (typeof value !== "object") throw new Error("Sync changes may contain JSON values only.");
-  const prototype = Object.getPrototypeOf(value);
-  if (prototype !== Object.prototype && prototype !== null) {
-    throw new Error("Sync change JSON must use plain objects.");
-  }
-  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-    assertUnicode(key, "Sync change key");
-    if (key === "__proto__" || key === "prototype" || key === "constructor") {
-      throw new Error(`Unsafe sync change key: ${key}`);
-    }
-    validateJson(item, depth + 1, counter);
-  }
-}
-
-/** RFC 8785-compatible canonical JSON for the JSON subset accepted above. */
-export function canonicalSyncJson(value: SyncJson): string {
-  validateJson(value);
-  return canonicalJsonUnchecked(value);
-}
-
-function canonicalJsonUnchecked(value: SyncJson): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalJsonUnchecked).join(",")}]`;
-  const entries = Object.keys(value)
-    .sort()
-    .map((key) => `${JSON.stringify(key)}:${canonicalJsonUnchecked(value[key])}`);
-  return `{${entries.join(",")}}`;
-}
-
-function integer(value: unknown, minimum: number, label: string): number {
-  if (!Number.isSafeInteger(value) || (value as number) < minimum) {
-    throw new Error(`${label} must be a safe integer of at least ${minimum}.`);
-  }
-  return value as number;
-}
-
-function validateMutation(value: unknown): SyncMutation {
-  const mutation = value as SyncMutation | undefined;
-  if (!mutation || typeof mutation !== "object" || Array.isArray(mutation)) {
-    throw new Error("Sync change mutation must be an object.");
-  }
-  if (!["note", "canvas", "attachment", "plugin", "vault"].includes(mutation.objectType)) {
-    throw new Error("Unsupported sync object type.");
-  }
-  if (typeof mutation.objectId !== "string" || !OBJECT_ID.test(mutation.objectId)) {
-    throw new Error("Invalid sync object ID.");
-  }
-  if (mutation.operation !== "put" && mutation.operation !== "delete") {
-    throw new Error("Unsupported sync operation.");
-  }
-  const revision = integer(mutation.revision, 1, "Sync revision");
-  const baseRevision = mutation.baseRevision === null ? null : integer(mutation.baseRevision, 0, "Sync base revision");
-  if ((baseRevision === null && revision !== 1) || (baseRevision !== null && revision !== baseRevision + 1)) {
-    throw new Error("A sync revision must advance exactly one step from its base revision.");
-  }
-  validateJson(mutation.value);
-  if (mutation.operation === "delete" && mutation.value !== null) {
-    throw new Error("A delete sync change cannot carry a value.");
-  }
-  if (mutation.operation === "put" && mutation.value === null) {
-    throw new Error("A put sync change must carry a value.");
-  }
-  return {
-    objectType: mutation.objectType,
-    objectId: mutation.objectId,
-    operation: mutation.operation,
-    baseRevision,
-    revision,
-    value: structuredClone(mutation.value),
-  };
-}
-
-function validateChangeAuthorization(value: unknown): SyncChangeAuthorization {
-  const authorization = value as SyncChangeAuthorization | undefined;
-  if (!authorization || typeof authorization !== "object" || Array.isArray(authorization)) {
-    throw new Error("A version 2 sync change requires device authorization.");
-  }
-  return {
-    certificateSerial: integer(authorization.certificateSerial, 1, "Sync certificate serial"),
-    signature: canonicalBase64(authorization.signature, 64, "device signature"),
-  };
-}
-
-/**
- * The branch `parseAttachmentSnapshot` takes: a put whose attachment snapshot
- * references blobs instead of carrying inline base64. Deliberately structural
- * and non-throwing, because body validation has always deferred snapshot
- * well-formedness to the reader that actually needs the bytes.
- */
-function carriesBlobAttachmentSnapshot(mutation: SyncMutation): boolean {
-  if (mutation.objectType !== "attachment" || mutation.operation !== "put") return false;
-  const value = mutation.value;
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const raw = value as Record<string, SyncJson>;
-  return raw.data === undefined && raw.blobs !== undefined;
-}
-
-/**
- * Version 3 exists so that a client which only understands the inline
- * attachment form refuses a blob manifest at the version check, instead of
- * accepting the version and then choking on a snapshot shape it has never seen.
- * It is an *authorized* version: a device with no registry has no signature to
- * offer, so its manifest stays on the version 1 ladder, which has no version 3
- * counterpart.
- */
-function changeBodyVersion(mutation: SyncMutation, authorized: boolean): 1 | 2 | 3 {
-  if (!authorized) return 1;
-  return carriesBlobAttachmentSnapshot(mutation) ? 3 : 2;
-}
-
-export function validateSyncChangeBody(value: unknown): SyncChangeBody {
-  const body = value as SyncChangeBody | undefined;
-  if (
-    !body ||
-    typeof body !== "object" ||
-    Array.isArray(body) ||
-    (body.version !== 1 && body.version !== 2 && body.version !== 3)
-  ) {
-    throw new Error("Unsupported or invalid sync change.");
-  }
-  if (typeof body.deviceId !== "string" || !DEVICE_ID.test(body.deviceId)) {
-    throw new Error("Sync device ID must be a lowercase UUID.");
-  }
-  const sequence = integer(body.sequence, 1, "Sync device sequence");
-  const previousDeviceChange = body.previousDeviceChange;
-  if (
-    previousDeviceChange !== null &&
-    (typeof previousDeviceChange !== "string" || !CHANGE_ID.test(previousDeviceChange))
-  ) {
-    throw new Error("Invalid previous device change ID.");
-  }
-  if (!Array.isArray(body.parents) || body.parents.length > MAX_PARENTS) {
-    throw new Error(`A sync change may have at most ${MAX_PARENTS} parents.`);
-  }
-  const parents = [...new Set(body.parents)];
-  if (parents.length !== body.parents.length || parents.some((id) => typeof id !== "string" || !CHANGE_ID.test(id))) {
-    throw new Error("Sync parents must be unique change IDs.");
-  }
-  parents.sort();
-  if ((sequence === 1) !== (previousDeviceChange === null)) {
-    throw new Error("Only the first device change may omit its previous device change.");
-  }
-  if (previousDeviceChange && !parents.includes(previousDeviceChange)) {
-    throw new Error("The previous device change must also be a causal parent.");
-  }
-  const timestamp = typeof body.createdAt === "string" ? Date.parse(body.createdAt) : Number.NaN;
-  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString() !== body.createdAt) {
-    throw new Error("Sync change timestamp must be a canonical ISO timestamp.");
-  }
-  const normalized: SyncChangeBody = {
-    version: body.version,
-    deviceId: body.deviceId,
-    sequence,
-    previousDeviceChange,
-    parents,
-    createdAt: body.createdAt,
-    mutation: validateMutation(body.mutation),
-  };
-  if (body.version === 1) {
-    if (body.authorization !== undefined) {
-      throw new Error("A legacy sync change cannot carry device authorization.");
-    }
-  } else {
-    normalized.authorization = validateChangeAuthorization(body.authorization);
-  }
-  const blobForm = carriesBlobAttachmentSnapshot(normalized.mutation);
-  if (normalized.version === 3 && !blobForm) {
-    throw new Error("A version 3 sync change must carry an attachment blob manifest.");
-  }
-  if (normalized.version === 2 && blobForm) {
-    throw new Error("An attachment blob manifest requires a version 3 sync change.");
-  }
-  const bytes = Buffer.byteLength(canonicalSyncJson(normalized as unknown as SyncJson), "utf8");
-  if (bytes > MAX_CHANGE_BYTES) throw new Error("Sync change exceeds 8 MiB.");
-  return normalized;
-}
-
-function changeAuthorizationPayload(body: SyncChangeBody): Buffer {
-  if (body.version === 1 || !body.authorization) {
-    throw new Error("Only authorized sync changes have a device signature payload.");
-  }
-  const payload = {
-    // The real version, so the signature binds the generation of the format the
-    // body claims to be. Pinning a literal here would leave a 2<->3 relabelling
-    // signature-valid, resting the whole guarantee on the change id alone.
-    version: body.version,
-    deviceId: body.deviceId,
-    sequence: body.sequence,
-    previousDeviceChange: body.previousDeviceChange,
-    parents: body.parents,
-    createdAt: body.createdAt,
-    mutation: body.mutation,
-    authorization: { certificateSerial: body.authorization.certificateSerial },
-  };
-  return Buffer.from(canonicalSyncJson(payload as unknown as SyncJson), "utf8");
-}
-
-function changeId(body: SyncChangeBody, key: Buffer, epoch: number): string {
-  return crypto
-    .createHmac("sha256", key)
-    .update(AAD.syncChangeId)
-    .update("\0")
-    .update(epoch === 1 ? "" : `${epoch}\0`)
-    .update(canonicalSyncJson(body as unknown as SyncJson))
-    .digest("hex");
-}
-
-function changeEncryptionKey(key: Buffer, id: string, epoch: number): Buffer {
-  return crypto
-    .createHmac("sha256", key)
-    .update(epoch === 1 ? AAD.syncChangeKey : AAD.syncChangeKeyV2)
-    .update("\0")
-    .update(id)
-    .digest();
-}
-
-function splitSyncKeys(keys: SyncChangeKeyMaterial): SyncChangeKeys {
-  return Buffer.isBuffer(keys)
-    ? { syncChangeKey: keys, syncEnvelopeKey: keys }
-    : keys;
-}
-
-export function sealSyncChange(
-  body: SyncChangeBody,
-  keys: SyncChangeKeyMaterial,
-  epoch = 1,
-): EncryptedSyncChange {
-  if (!Number.isSafeInteger(epoch) || epoch < 1) throw new Error("A sync epoch must be a positive integer.");
-  const normalized = validateSyncChangeBody(body);
-  const canonical = canonicalSyncJson(normalized as unknown as SyncJson);
-  const { syncChangeKey, syncEnvelopeKey } = splitSyncKeys(keys);
-  // A structured key pair is the keyring-native form: its identity key is
-  // intentionally epoch-independent. A bare Buffer remains the legacy API,
-  // including the old epoch-bound IDs needed to open existing fixtures.
-  const id = changeId(normalized, syncChangeKey, Buffer.isBuffer(keys) ? epoch : 1);
-  const envelopeKey = changeEncryptionKey(syncEnvelopeKey, id, epoch);
-  try {
-    const payload = encryptDocument(canonical, envelopeKey, syncChangeAad(id));
-    return epoch === 1 ? { version: 1, id, payload } : { version: 2, id, epoch, payload };
-  } finally {
-    envelopeKey.fill(0);
-  }
-}
-
-function validateEnvelope(value: unknown): EncryptedSyncChange {
-  const envelope = value as EncryptedSyncChange | undefined;
-  if (
-    !envelope ||
-    typeof envelope !== "object" ||
-    Array.isArray(envelope) ||
-    (envelope.version !== 1 && envelope.version !== 2)
-  ) {
-    throw new Error("Unsupported or invalid encrypted sync envelope.");
-  }
-  if (envelope.version === 2) {
-    if (!Number.isSafeInteger(envelope.epoch) || (envelope.epoch as number) < 2) {
-      throw new Error("A version 2 sync envelope must declare an epoch of 2 or above.");
-    }
-  } else if (envelope.epoch !== undefined) {
-    throw new Error("A version 1 sync envelope cannot declare an epoch.");
-  }
-  if (typeof envelope.id !== "string" || !CHANGE_ID.test(envelope.id)) {
-    throw new Error("Invalid encrypted sync change ID.");
-  }
-  const payload = envelope.payload as DocumentPayload | undefined;
-  if (
-    !payload ||
-    payload.version !== 1 ||
-    typeof payload.ciphertext !== "string" ||
-    payload.ciphertext.length > Math.ceil((MAX_CHANGE_BYTES * 4) / 3) + 16
-  ) {
-    throw new Error("Invalid encrypted sync payload.");
-  }
-  canonicalBase64(payload.iv, 12, "nonce");
-  canonicalBase64(payload.authTag, 16, "authentication tag");
-  canonicalBase64(payload.ciphertext, undefined, "ciphertext");
-  return structuredClone(envelope);
-}
-
-/** Structural validation available to an opaque relay that does not hold vault keys. */
-export function validateRelayEnvelope(value: unknown): EncryptedSyncChange {
-  return validateEnvelope(value);
-}
-
 /** Structural validation for encrypted control artifacts whose plaintext remains relay-opaque. */
 export function validateRelayArtifactEnvelope(
   value: unknown,
@@ -688,7 +342,13 @@ function canonicalTimestamp(value: unknown, label: string): string {
 }
 
 function deviceName(value: unknown): string {
-  if (typeof value !== "string" || value.trim() !== value || value.length < 1 || value.length > 80 || /[\r\n]/u.test(value)) {
+  if (
+    typeof value !== "string" ||
+    value.trim() !== value ||
+    value.length < 1 ||
+    value.length > 80 ||
+    /[\r\n]/u.test(value)
+  ) {
     throw new Error("Sync device name must be a single line of 1-80 characters.");
   }
   return value;
@@ -846,10 +506,14 @@ function validateSignedDeviceRegistry(value: unknown): SignedSyncDeviceRegistry 
     throw new Error("Sync device registry lists are invalid.");
   }
   const legacyChangeIds = raw.legacyChangeIds.map((id) => {
-    if (typeof id !== "string" || !CHANGE_ID.test(id)) throw new Error("Registry contains an invalid legacy change ID.");
+    if (typeof id !== "string" || !CHANGE_ID.test(id))
+      throw new Error("Registry contains an invalid legacy change ID.");
     return id;
   });
-  if (new Set(legacyChangeIds).size !== legacyChangeIds.length || [...legacyChangeIds].sort().some((id, i) => id !== legacyChangeIds[i])) {
+  if (
+    new Set(legacyChangeIds).size !== legacyChangeIds.length ||
+    [...legacyChangeIds].sort().some((id, i) => id !== legacyChangeIds[i])
+  ) {
     throw new Error("Registry legacy change IDs must be unique and sorted.");
   }
   const devices = raw.devices.map((value) => {
@@ -894,7 +558,7 @@ function validateSignedDeviceRegistry(value: unknown): SignedSyncDeviceRegistry 
   // wrapped epoch keys, and epoch 1 is sealed with the vault key. Checking the
   // pair here, before the keys themselves, keeps an epoch-1 version-2 registry
   // to one message whether or not it carried epoch keys.
-  if ((raw.version === 2) !== (body.epoch >= 2)) {
+  if ((raw.version === 2) !== body.epoch >= 2) {
     throw new Error(
       "A device registry is version 2 exactly when its epoch is 2 or above: epoch 1 is sealed with the vault key.",
     );
@@ -944,7 +608,12 @@ function validateSignedDeviceRegistry(value: unknown): SignedSyncDeviceRegistry 
     }
   }
 
-  const signature = verifyCanonical(registryBodyPayload(body), registry.signature, authorityKey, "Device registry signature");
+  const signature = verifyCanonical(
+    registryBodyPayload(body),
+    registry.signature,
+    authorityKey,
+    "Device registry signature",
+  );
   return { body, signature };
 }
 
@@ -980,21 +649,14 @@ function readAgreementKey(rootDir: string, vaultKey: DocumentReadKey, deviceId: 
     throw new Error(`This device has no sync key agreement key; re-enroll device ${deviceId}.`);
   }
   assertNotSymlink(filePath);
-  const payload = JSON.parse(
-    readTextFileLimited(filePath, 64 * 1024, "Sync device agreement key"),
-  ) as DocumentPayload;
+  const payload = JSON.parse(readTextFileLimited(filePath, 64 * 1024, "Sync device agreement key")) as DocumentPayload;
   return agreementPrivateKeyFromBase64(
     decryptDocument(payload, vaultKey, syncAgreementKeyAad(deviceId)),
     "Sync device agreement key",
   );
 }
 
-function saveAgreementKey(
-  rootDir: string,
-  vaultKey: Buffer,
-  deviceId: string,
-  key: crypto.KeyObject,
-): void {
+function saveAgreementKey(rootDir: string, vaultKey: Buffer, deviceId: string, key: crypto.KeyObject): void {
   writeFileAtomic(
     agreementKeyPath(rootDir, deviceId),
     JSON.stringify(
@@ -1059,13 +721,17 @@ function signRegistryBody(body: SyncDeviceRegistryBody, authorityKey: crypto.Key
   });
 }
 
-function validateAuthorizedChanges(changes: readonly SyncChange[], registry: SignedSyncDeviceRegistry | undefined): void {
+function validateAuthorizedChanges(
+  changes: readonly SyncChange[],
+  registry: SignedSyncDeviceRegistry | undefined,
+): void {
   if (!registry) return;
   const legacy = new Set(registry.body.legacyChangeIds);
   const devices = new Map(registry.body.devices.map((record) => [record.certificate.deviceId, record]));
   for (const change of changes) {
     if (change.version === 1) {
-      if (!legacy.has(change.id)) throw new Error(`Legacy sync change ${change.id} is not authorized by the device registry.`);
+      if (!legacy.has(change.id))
+        throw new Error(`Legacy sync change ${change.id} is not authorized by the device registry.`);
       continue;
     }
     const record = devices.get(change.deviceId);
@@ -1168,10 +834,7 @@ function checkpointId(body: SyncFreshnessCheckpointBody, signature: string): str
     .digest("hex");
 }
 
-function validateSignedCheckpoint(
-  value: unknown,
-  registry: SignedSyncDeviceRegistry,
-): SignedSyncFreshnessCheckpoint {
+function validateSignedCheckpoint(value: unknown, registry: SignedSyncDeviceRegistry): SignedSyncFreshnessCheckpoint {
   const checkpoint = value as SignedSyncFreshnessCheckpoint | undefined;
   const raw = checkpoint?.body;
   if (!checkpoint || typeof checkpoint !== "object" || Array.isArray(checkpoint) || !raw || raw.version !== 1) {
@@ -1275,10 +938,7 @@ function saveCheckpoint(
   writeFileAtomic(checkpointPath(rootDir), JSON.stringify(encryptedCheckpoint(normalized, vaultKey)), { mode: 0o600 });
 }
 
-function assertCheckpointHistory(
-  checkpoint: SignedSyncFreshnessCheckpoint,
-  changes: readonly SyncChange[],
-): void {
+function assertCheckpointHistory(checkpoint: SignedSyncFreshnessCheckpoint, changes: readonly SyncChange[]): void {
   const verification = validateChangeSet(changes);
   const byId = new Map(changes.map((change) => [change.id, change]));
   for (const head of checkpoint.body.heads) {
@@ -1317,7 +977,7 @@ export class SyncDeviceManager {
 
   close(): void {
     if (this.closed) return;
-    this.session.key.fill(0);
+    zeroBlobSession(this.session);
     this.closed = true;
   }
 
@@ -1670,10 +1330,7 @@ export class SyncDeviceManager {
     });
   }
 
-  createCheckpoint(
-    changes: readonly SyncChange[],
-    now = new Date().toISOString(),
-  ): SignedSyncFreshnessCheckpoint {
+  createCheckpoint(changes: readonly SyncChange[], now = new Date().toISOString()): SignedSyncFreshnessCheckpoint {
     return withVaultLock(this.vaultDir, () => {
       const registry = readDeviceRegistry(this.session.rootDir, this.readKeys());
       if (!registry) throw new Error("Sync device enrollment is not initialized.");
@@ -1694,15 +1351,15 @@ export class SyncDeviceManager {
         registryRevision: registry.body.revision,
         epoch: registry.body.epoch,
         changeCount: changes.length,
-        heads: changes.map((change) => change.id).filter((id) => !parentIds.has(id)).sort(),
+        heads: changes
+          .map((change) => change.id)
+          .filter((id) => !parentIds.has(id))
+          .sort(),
         createdAt: canonicalTimestamp(now, "Checkpoint creation time"),
         previousCheckpoint: current?.id ?? null,
       };
       const signature = signCanonical(checkpointBodyPayload(body), authorityKey);
-      const checkpoint = validateSignedCheckpoint(
-        { id: checkpointId(body, signature), body, signature },
-        registry,
-      );
+      const checkpoint = validateSignedCheckpoint({ id: checkpointId(body, signature), body, signature }, registry);
       assertCheckpointHistory(checkpoint, changes);
       saveCheckpoint(this.session.rootDir, this.key(), registry, checkpoint);
       return structuredClone(checkpoint);
@@ -1791,104 +1448,6 @@ export class SyncDeviceManager {
   }
 }
 
-export function openSyncChange(
-  value: unknown,
-  key: SyncChangeKeyMaterial | SyncEpochKeyResolver,
-): SyncChange {
-  const envelope = validateEnvelope(value);
-  const epoch = envelope.version === 2 ? envelope.epoch! : 1;
-  let material: SyncChangeKeyMaterial;
-  if (typeof key === "function") {
-    material = key(epoch);
-  } else {
-    if (epoch !== 1) {
-      throw new Error(`Opening an epoch ${epoch} sync change requires an epoch key resolver.`);
-    }
-    material = key;
-  }
-  const { syncChangeKey, syncEnvelopeKey, retiringSyncEnvelopeKey, legacyKey, legacyIdentityKey } =
-    splitSyncKeys(material);
-  // Ordered: the key in force, then the outgoing key of an unfinished re-key,
-  // then the pre-keyring key that opens changes written before migration. Only
-  // the last of those changes how the change's identity is recomputed.
-  const candidates: { key: Buffer; legacy: boolean }[] = [{ key: syncEnvelopeKey, legacy: false }];
-  if (retiringSyncEnvelopeKey && retiringSyncEnvelopeKey !== syncEnvelopeKey) {
-    candidates.push({ key: retiringSyncEnvelopeKey, legacy: false });
-  }
-  if (legacyKey && legacyKey !== syncEnvelopeKey) candidates.push({ key: legacyKey, legacy: true });
-
-  let encryptionKey = syncEnvelopeKey;
-  let usedLegacyKey = false;
-  let plaintext: string | undefined;
-  let failure: unknown;
-  for (const candidate of candidates) {
-    const envelopeKey = changeEncryptionKey(candidate.key, envelope.id, epoch);
-    try {
-      plaintext = decryptDocument(envelope.payload, envelopeKey, syncChangeAad(envelope.id));
-      encryptionKey = candidate.key;
-      usedLegacyKey = candidate.legacy;
-      failure = undefined;
-      break;
-    } catch (error) {
-      failure = error;
-    } finally {
-      envelopeKey.fill(0);
-    }
-  }
-  if (plaintext === undefined) throw failure;
-  if (Buffer.byteLength(plaintext, "utf8") > MAX_CHANGE_BYTES) throw new Error("Sync change exceeds 8 MiB.");
-  const body = validateSyncChangeBody(JSON.parse(plaintext));
-  const identityKey = usedLegacyKey ? encryptionKey : syncChangeKey;
-  const modernId = changeId(body, identityKey, Buffer.isBuffer(material) || usedLegacyKey ? epoch : 1);
-  // Candidates, in the order they became possible. `legacyIdentityKey` covers
-  // a change a re-key re-sealed under the new envelope key but whose id an
-  // older build had derived from the documents key that re-key replaced.
-  const candidateIds = [modernId];
-  if (epoch > 1 && !Buffer.isBuffer(material)) candidateIds.push(changeId(body, syncEnvelopeKey, epoch));
-  if (legacyIdentityKey && !usedLegacyKey) candidateIds.push(changeId(body, legacyIdentityKey, epoch));
-  const matched = candidateIds.find((candidate) => candidate === envelope.id) ?? modernId;
-  const actual = Buffer.from(matched, "hex");
-  const expected = Buffer.from(envelope.id, "hex");
-  if (!crypto.timingSafeEqual(actual, expected)) throw new Error("Sync change ID does not match its content.");
-  if (plaintext !== canonicalSyncJson(body as unknown as SyncJson)) {
-    throw new Error("Sync change plaintext is not canonically encoded.");
-  }
-  return { id: envelope.id, ...body };
-}
-
-/**
- * Re-encrypts an epoch 1 change body under a new envelope key, leaving its id
- * untouched. This is what `vbrain rekey` applies to the change log.
- *
- * The id is not recomputed, and it must not be: it is what the causal DAG,
- * the applied cursor and every pinned checkpoint reference. Opening first is
- * deliberate — it validates the id against the body and the body against its
- * canonical encoding, so a re-seal cannot launder a tampered change into one
- * that verifies under the new key.
- *
- * Epoch 2 and above are refused. Their bodies are sealed under an epoch key,
- * which a re-key does not rotate; only the file holding that epoch key is
- * rewritten.
- */
-export function resealSyncChange(
-  value: unknown,
-  from: SyncChangeKeyMaterial | SyncEpochKeyResolver,
-  toSyncEnvelopeKey: Buffer,
-): EncryptedSyncChange {
-  const envelope = validateEnvelope(value);
-  if (envelope.version !== 1) {
-    throw new Error("Only an epoch 1 sync change is re-sealed; later epochs keep their epoch key.");
-  }
-  const { id, ...body } = openSyncChange(envelope, from);
-  const canonical = canonicalSyncJson(body as unknown as SyncJson);
-  const envelopeKey = changeEncryptionKey(toSyncEnvelopeKey, id, 1);
-  try {
-    return { version: 1, id, payload: encryptDocument(canonical, envelopeKey, syncChangeAad(id)) };
-  } finally {
-    envelopeKey.fill(0);
-  }
-}
-
 function objectKey(change: SyncChange): string {
   return `${change.mutation.objectType}\0${change.mutation.objectId}`;
 }
@@ -1968,6 +1527,9 @@ function zeroBlobSession(session: DocumentKeySession): void {
   session.attachmentIdKey.fill(0);
   session.syncChangeKey.fill(0);
   session.syncEnvelopeKey.fill(0);
+  for (const key of session.readKeys) key.fill(0);
+  for (const key of session.syncEnvelopeReadKeys) key.fill(0);
+  session.legacyChangeIdentityKey?.fill(0);
 }
 
 /**
@@ -2063,9 +1625,7 @@ function parseCanvasSnapshot(value: SyncJson): CanvasSyncSnapshot {
   });
 }
 
-export function isBlobAttachmentSnapshot(
-  snapshot: AttachmentSyncSnapshot,
-): snapshot is BlobAttachmentSyncSnapshot {
+export function isBlobAttachmentSnapshot(snapshot: AttachmentSyncSnapshot): snapshot is BlobAttachmentSyncSnapshot {
   return "blobs" in snapshot;
 }
 
@@ -2283,6 +1843,7 @@ export class SyncChangeLog {
   private readonly session: DocumentKeySession;
   private readonly changesDir: string;
   private readonly appliedPath: string;
+  private readonly epochKeys = new Map<number, Buffer>();
   private closed = false;
 
   constructor(
@@ -2298,10 +1859,9 @@ export class SyncChangeLog {
 
   close(): void {
     if (this.closed) return;
-    this.session.key.fill(0);
-    this.session.attachmentIdKey.fill(0);
-    this.session.syncChangeKey.fill(0);
-    this.session.syncEnvelopeKey.fill(0);
+    zeroBlobSession(this.session);
+    for (const key of this.epochKeys.values()) key.fill(0);
+    this.epochKeys.clear();
     this.closed = true;
   }
 
@@ -2329,12 +1889,13 @@ export class SyncChangeLog {
           legacyIdentityKey: this.session.legacyChangeIdentityKey ?? undefined,
         };
       }
-      const key = readEpochKey(rootDir, vaultKey, epoch);
+      const key = this.epochKeys.get(epoch) ?? readEpochKey(rootDir, vaultKey, epoch);
       if (!key) {
         throw new Error(
           `This device holds no content key for sync epoch ${epoch}; import the owner-signed registry that rotated to it.`,
         );
       }
+      this.epochKeys.set(epoch, key);
       return key;
     };
   }
@@ -2344,7 +1905,7 @@ export class SyncChangeLog {
     if (!fs.existsSync(this.appliedPath)) return { version: 1, objects: {} };
     assertNotSymlink(this.appliedPath);
     const payload = JSON.parse(
-      readTextFileLimited(this.appliedPath, 64 * 1024 * 1024, "Sync application state")
+      readTextFileLimited(this.appliedPath, 64 * 1024 * 1024, "Sync application state"),
     ) as DocumentPayload;
     const parsed = JSON.parse(decryptDocument(payload, this.readKeys(), AAD.syncApplied)) as SyncAppliedState;
     if (parsed?.version !== 1 || !parsed.objects || typeof parsed.objects !== "object") {
@@ -2419,20 +1980,20 @@ export class SyncChangeLog {
     }
     let totalBytes = 0;
     return names.map((name) => {
-        const id = name.slice(0, -".change.enc".length);
-        if (!CHANGE_ID.test(id)) throw new Error(`Invalid sync change filename: ${name}`);
-        const filePath = resolveInside(this.changesDir, name);
-        assertNotSymlink(filePath);
-        totalBytes += fs.statSync(filePath).size;
-        if (totalBytes > MAX_CHANGE_STORE_BYTES) {
-          throw new Error("The sync change store exceeds its 512 MiB safety limit.");
-        }
-        const envelope = validateEnvelope(
-          JSON.parse(readTextFileLimited(filePath, MAX_ENVELOPE_BYTES, `Sync envelope ${id}`))
-        );
-        if (envelope.id !== id) throw new Error(`Sync change filename does not match its envelope: ${id}`);
-        return envelope;
-      });
+      const id = name.slice(0, -".change.enc".length);
+      if (!CHANGE_ID.test(id)) throw new Error(`Invalid sync change filename: ${name}`);
+      const filePath = resolveInside(this.changesDir, name);
+      assertNotSymlink(filePath);
+      totalBytes += fs.statSync(filePath).size;
+      if (totalBytes > MAX_CHANGE_STORE_BYTES) {
+        throw new Error("The sync change store exceeds its 512 MiB safety limit.");
+      }
+      const envelope = validateEnvelope(
+        JSON.parse(readTextFileLimited(filePath, MAX_ENVELOPE_BYTES, `Sync envelope ${id}`)),
+      );
+      if (envelope.id !== id) throw new Error(`Sync change filename does not match its envelope: ${id}`);
+      return envelope;
+    });
   }
 
   envelopes(): EncryptedSyncChange[] {
@@ -2577,10 +2138,7 @@ export class SyncChangeLog {
       const known = new Set(current.map((change) => change.id));
       const additions = incoming.filter((change) => !known.has(change.id));
       validateChangeSet([...current, ...additions]);
-      validateAuthorizedChanges(
-        [...current, ...additions],
-        readDeviceRegistry(this.session.rootDir, this.readKeys()),
-      );
+      validateAuthorizedChanges([...current, ...additions], readDeviceRegistry(this.session.rootDir, this.readKeys()));
       const incomingEnvelope = new Map(envelopes.map((envelope) => [envelope.id, envelope]));
       const additionIds = new Set(additions.map((change) => change.id));
       const byId = new Map(additions.map((change) => [change.id, change]));
@@ -2623,8 +2181,7 @@ export class SyncChangeLog {
       .map(({ objectType, objectId }) => resolveSyncObject(changes, objectType, objectId))
       .filter((resolution) => resolution.status === "conflict")
       .sort(
-        (left, right) =>
-          left.objectType.localeCompare(right.objectType) || left.objectId.localeCompare(right.objectId),
+        (left, right) => left.objectType.localeCompare(right.objectType) || left.objectId.localeCompare(right.objectId),
       );
   }
 }
@@ -2712,11 +2269,18 @@ export class SyncedDocumentVault extends DocumentVault {
   setPortableState(id: PortableStateId, value: unknown): void {
     const targetValue = parsePortableState(id, value);
     withVaultLock(this.syncVaultDir, () => {
-      this.runLocalTransaction(this.localDeviceId(), [{
-        objectType: "vault", objectId: id, operation: "put", input: targetValue,
-        beforeStorageRevision: null, targetStorageRevision: null,
-        beforeValue: this.getPortableState(id), targetValue,
-      }]);
+      this.runLocalTransaction(this.localDeviceId(), [
+        {
+          objectType: "vault",
+          objectId: id,
+          operation: "put",
+          input: targetValue,
+          beforeStorageRevision: null,
+          targetStorageRevision: null,
+          beforeValue: this.getPortableState(id),
+          targetValue,
+        },
+      ]);
     });
   }
 
@@ -2725,9 +2289,24 @@ export class SyncedDocumentVault extends DocumentVault {
     return withVaultLock(this.syncVaultDir, () => {
       const deviceId = this.localDeviceId();
       const live = new Map<string, SyncLocalStorageOperation>();
-      const add = (objectType: SyncLocalStorageOperation["objectType"], objectId: string, value: unknown, revision: number | null, input: unknown = value): void => {
+      const add = (
+        objectType: SyncLocalStorageOperation["objectType"],
+        objectId: string,
+        value: unknown,
+        revision: number | null,
+        input: unknown = value,
+      ): void => {
         const targetValue = prevalidateLocalCaptureSnapshot(value, "Desktop snapshot");
-        live.set(`${objectType}\0${objectId}`, { objectType, objectId, operation: "put", input: asSyncJson(input), beforeStorageRevision: revision, targetStorageRevision: revision, beforeValue: targetValue, targetValue });
+        live.set(`${objectType}\0${objectId}`, {
+          objectType,
+          objectId,
+          operation: "put",
+          input: asSyncJson(input),
+          beforeStorageRevision: revision,
+          targetStorageRevision: revision,
+          beforeValue: targetValue,
+          targetValue,
+        });
       };
       for (const item of super.list()) {
         const note = super.get(item.id);
@@ -2739,11 +2318,19 @@ export class SyncedDocumentVault extends DocumentVault {
       }
       for (const item of super.listAttachments()) {
         const attachment = super.getAttachment(item.id);
-        add("attachment", item.id, attachmentSnapshot(attachment.data, attachment.info, blobSealKey(this.blobSession), this.blobStore), null);
+        add(
+          "attachment",
+          item.id,
+          attachmentSnapshot(attachment.data, attachment.info, blobSealKey(this.blobSession), this.blobStore),
+          null,
+        );
       }
       for (const item of super.listPlugins()) {
         const plugin = super.getPlugin(item.id);
-        add("plugin", plugin.manifest.id, pluginSnapshot(plugin), plugin.revision, { ...pluginSnapshot(plugin), localEnabled: plugin.enabled });
+        add("plugin", plugin.manifest.id, pluginSnapshot(plugin), plugin.revision, {
+          ...pluginSnapshot(plugin),
+          localEnabled: plugin.enabled,
+        });
       }
       add("vault", PLUGIN_POLICY_OBJECT_ID, super.pluginSecurityPolicy(), null);
       for (const id of ["workspace", "saved-views"] as const) add("vault", id, this.getPortableState(id), null);
@@ -2757,21 +2344,50 @@ export class SyncedDocumentVault extends DocumentVault {
       let captured = 0;
       for (const [key, operation] of live) {
         const applied = known.get(key);
-        if (applied?.mutation.operation === "put" && sameStorageValue(operation.objectType, applied.mutation.value, operation.targetValue)) continue;
-        if (!applied && changes.some(change => `${change.mutation.objectType}\0${change.mutation.objectId}` === key)) {
+        if (
+          applied?.mutation.operation === "put" &&
+          sameStorageValue(operation.objectType, applied.mutation.value, operation.targetValue)
+        )
+          continue;
+        if (
+          !applied &&
+          changes.some((change) => `${change.mutation.objectType}\0${change.mutation.objectId}` === key)
+        ) {
           throw new Error("Apply or resolve existing remote changes before capturing an untracked desktop object.");
         }
         // Current storage already equals target, so transaction recovery only installs the envelope and cursor.
         const resolution = this.changeLog.resolve(operation.objectType, operation.objectId);
-        if (resolution.status === "conflict") throw new Error("Resolve the existing conflict before capturing further desktop edits.");
+        if (resolution.status === "conflict")
+          throw new Error("Resolve the existing conflict before capturing further desktop edits.");
         const baseRevision = resolution.winner?.mutation.revision ?? null;
-        const envelopes = this.changeLog.prepareLocalChanges(deviceId, [{ objectType: operation.objectType, objectId: operation.objectId, operation: "put", baseRevision, revision: (baseRevision ?? 0) + 1, value: operation.targetValue }]);
+        const envelopes = this.changeLog.prepareLocalChanges(deviceId, [
+          {
+            objectType: operation.objectType,
+            objectId: operation.objectId,
+            operation: "put",
+            baseRevision,
+            revision: (baseRevision ?? 0) + 1,
+            value: operation.targetValue,
+          },
+        ]);
         this.localTransaction.run({ deviceId, operations: [operation], changes: envelopes }, this.transactionEffects());
         captured += 1;
       }
       for (const [key, applied] of known) {
-        if (live.has(key) || applied.mutation.operation === "delete" || applied.mutation.objectType === "vault") continue;
-        this.runLocalTransaction(deviceId, [{ objectType: applied.mutation.objectType, objectId: applied.mutation.objectId, operation: "delete", input: null, beforeStorageRevision: null, targetStorageRevision: null, beforeValue: null, targetValue: null }]);
+        if (live.has(key) || applied.mutation.operation === "delete" || applied.mutation.objectType === "vault")
+          continue;
+        this.runLocalTransaction(deviceId, [
+          {
+            objectType: applied.mutation.objectType,
+            objectId: applied.mutation.objectId,
+            operation: "delete",
+            input: null,
+            beforeStorageRevision: null,
+            targetStorageRevision: null,
+            beforeValue: null,
+            targetValue: null,
+          },
+        ]);
         captured += 1;
       }
       return { captured };
@@ -2813,10 +2429,7 @@ export class SyncedDocumentVault extends DocumentVault {
     };
   }
 
-  private planLocalChanges(
-    deviceId: string,
-    operations: readonly SyncLocalStorageOperation[],
-  ): EncryptedSyncChange[] {
+  private planLocalChanges(deviceId: string, operations: readonly SyncLocalStorageOperation[]): EncryptedSyncChange[] {
     const current = this.changeLog.changes();
     const revisions = new Map<string, number | null>();
     const mutations: SyncMutation[] = [];
@@ -2861,10 +2474,7 @@ export class SyncedDocumentVault extends DocumentVault {
     return this.changeLog.prepareLocalChanges(deviceId, mutations);
   }
 
-  private runLocalTransaction(
-    deviceId: string,
-    operations: readonly SyncLocalStorageOperation[],
-  ): void {
+  private runLocalTransaction(deviceId: string, operations: readonly SyncLocalStorageOperation[]): void {
     const changes = this.planLocalChanges(deviceId, operations);
     this.localTransaction.run({ deviceId, operations: [...operations], changes }, this.transactionEffects());
   }
@@ -3034,12 +2644,7 @@ export class SyncedDocumentVault extends DocumentVault {
         this.assertExpectedDocumentState(operation, current?.revision ?? null, currentValue);
         const target = parsePluginSnapshot(operation.targetValue);
         const input = parsePluginLocalStorageInput(operation.input);
-        if (
-          !sameSyncValue(
-            asSyncJson(target),
-            asSyncJson({ manifest: input.manifest, source: input.source }),
-          )
-        ) {
+        if (!sameSyncValue(asSyncJson(target), asSyncJson({ manifest: input.manifest, source: input.source }))) {
           throw new Error("Plugin storage input does not match its portable sync snapshot.");
         }
         const written = super.installPlugin({
@@ -3105,9 +2710,7 @@ export class SyncedDocumentVault extends DocumentVault {
         continue;
       }
       this.assertExpectedDocumentState(operation, null, currentValue);
-      const info = super.putAttachment(
-        ...this.attachmentFromSnapshot(operation.objectId, operation.targetValue),
-      );
+      const info = super.putAttachment(...this.attachmentFromSnapshot(operation.objectId, operation.targetValue));
       if (info.id !== operation.objectId) throw new Error("Attachment sync snapshot does not match its content ID.");
     }
   }
@@ -3266,9 +2869,7 @@ export class SyncedDocumentVault extends DocumentVault {
         input: storageInput,
         beforeStorageRevision: existing?.revision ?? null,
         targetStorageRevision: prepared.revision,
-        beforeValue: existing
-          ? prevalidateLocalCaptureSnapshot(pluginSnapshot(existing), "Plugin snapshot")
-          : null,
+        beforeValue: existing ? prevalidateLocalCaptureSnapshot(pluginSnapshot(existing), "Plugin snapshot") : null,
         targetValue,
       };
       this.runLocalTransaction(deviceId, [operation]);
@@ -3308,16 +2909,18 @@ export class SyncedDocumentVault extends DocumentVault {
     return withVaultLock(this.syncVaultDir, () => {
       const previous = super.pluginSecurityPolicy();
       const policy = { ...previous, restrictedMode };
-      this.runLocalTransaction(deviceId, [{
-        objectType: "vault",
-        objectId: PLUGIN_POLICY_OBJECT_ID,
-        operation: "put",
-        input: asSyncJson(policy),
-        beforeStorageRevision: null,
-        targetStorageRevision: null,
-        beforeValue: asSyncJson(previous),
-        targetValue: asSyncJson(policy),
-      }]);
+      this.runLocalTransaction(deviceId, [
+        {
+          objectType: "vault",
+          objectId: PLUGIN_POLICY_OBJECT_ID,
+          operation: "put",
+          input: asSyncJson(policy),
+          beforeStorageRevision: null,
+          targetStorageRevision: null,
+          beforeValue: asSyncJson(previous),
+          targetValue: asSyncJson(policy),
+        },
+      ]);
       return policy;
     });
   }
@@ -3332,16 +2935,18 @@ export class SyncedDocumentVault extends DocumentVault {
         ...previous,
         revokedSigners: [...new Set([...previous.revokedSigners, plugin.signature.keyId])].sort(),
       };
-      this.runLocalTransaction(deviceId, [{
-        objectType: "vault",
-        objectId: PLUGIN_POLICY_OBJECT_ID,
-        operation: "put",
-        input: asSyncJson(policy),
-        beforeStorageRevision: null,
-        targetStorageRevision: null,
-        beforeValue: asSyncJson(previous),
-        targetValue: asSyncJson(policy),
-      }]);
+      this.runLocalTransaction(deviceId, [
+        {
+          objectType: "vault",
+          objectId: PLUGIN_POLICY_OBJECT_ID,
+          operation: "put",
+          input: asSyncJson(policy),
+          beforeStorageRevision: null,
+          targetStorageRevision: null,
+          beforeValue: asSyncJson(previous),
+          targetValue: asSyncJson(policy),
+        },
+      ]);
       return policy;
     });
   }
@@ -3356,16 +2961,18 @@ export class SyncedDocumentVault extends DocumentVault {
         ...previous,
         revokedSigners: previous.revokedSigners.filter((entry) => entry !== normalized),
       };
-      this.runLocalTransaction(deviceId, [{
-        objectType: "vault",
-        objectId: PLUGIN_POLICY_OBJECT_ID,
-        operation: "put",
-        input: asSyncJson(policy),
-        beforeStorageRevision: null,
-        targetStorageRevision: null,
-        beforeValue: asSyncJson(previous),
-        targetValue: asSyncJson(policy),
-      }]);
+      this.runLocalTransaction(deviceId, [
+        {
+          objectType: "vault",
+          objectId: PLUGIN_POLICY_OBJECT_ID,
+          operation: "put",
+          input: asSyncJson(policy),
+          beforeStorageRevision: null,
+          targetStorageRevision: null,
+          beforeValue: asSyncJson(previous),
+          targetValue: asSyncJson(policy),
+        },
+      ]);
       return policy;
     });
   }
@@ -3540,10 +3147,7 @@ export class SyncedDocumentVault extends DocumentVault {
 
   private applyEffects(): SyncApplyEffects {
     return {
-      // `src/sync/engine.ts` types its change through the extracted
-      // `src/sync/protocol.ts`, whose body version is still `1 | 2`. A version 3
-      // body is structurally identical, so the widening stays at this boundary.
-      findChange: (changeId) => this.changeLog.change(changeId) as ReturnType<SyncApplyEffects["findChange"]>,
+      findChange: (changeId) => this.changeLog.change(changeId),
       expectedLive: (change) => this.expectedRemoteLive(change),
       isMaterialized: (change, receipt) => this.remoteChangeMaterialized(change, receipt),
       writeStorage: (change) => this.applyStorageChange(change),
@@ -3615,11 +3219,7 @@ export class SyncedDocumentVault extends DocumentVault {
    * No other object type receives a guessed winner: note/canvas/attachment and
    * plugin package conflicts require the caller to name one preserved head.
    */
-  resolveConflict(
-    objectType: SyncObjectType,
-    objectId: string,
-    selectedHeadId?: string,
-  ): SyncApplyResult {
+  resolveConflict(objectType: SyncObjectType, objectId: string, selectedHeadId?: string): SyncApplyResult {
     this.localDeviceId();
     return withVaultLock(this.syncVaultDir, () => {
       const resolution = this.changeLog.resolve(objectType, objectId);

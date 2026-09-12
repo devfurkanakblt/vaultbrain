@@ -23,6 +23,24 @@ const base: SyncStatusData = {
 };
 
 describe("SyncStatus", () => {
+  it("omits unused inputs and reads the native unwrapped conflict result", async () => {
+    const onRun = vi.fn().mockResolvedValue({ conflicts: [{ objectType: "note", objectId: "native-note", heads: ["a", "b"] }] });
+    render(<SyncStatus status={base} onRun={onRun} />);
+    fireEvent.change(screen.getByLabelText("Vault passphrase"), { target: { value: "passphrase" } });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh conflicts" }));
+    await waitFor(() => expect(onRun).toHaveBeenCalledOnce());
+    expect(Object.values(onRun.mock.calls[0][1])).not.toContain("");
+    expect(await screen.findByRole("button", { name: /note:native-note/ })).toBeInTheDocument();
+  });
+
+  it("shows the generated enrollment request for transfer to the owner", async () => {
+    const request = { deviceId: "new-device", proof: "signed-proof" };
+    render(<SyncStatus status={null} onRun={vi.fn().mockResolvedValue({ enrollmentRequest: request })} />);
+    fireEvent.change(screen.getByLabelText("Vault passphrase"), { target: { value: "passphrase" } });
+    fireEvent.change(screen.getByLabelText("Device name"), { target: { value: "Laptop" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create enrollment request" }));
+    expect(await screen.findByLabelText("Generated enrollment request")).toHaveValue(JSON.stringify(request, null, 2));
+  });
   it("renders nothing before enrollment", () => {
     const { container } = render(<SyncStatus status={{ ...base, enrolled: false }} />);
     expect(container).toBeEmptyDOMElement();
@@ -106,5 +124,22 @@ describe("SyncStatus", () => {
     fireEvent.click(screen.getByRole("button", { name: "Refresh conflicts" }));
     await waitFor(() => expect(onRun).toHaveBeenCalledWith("conflicts", expect.objectContaining({ passphrase: "passphrase" })));
     expect(screen.getByRole("button", { name: /note:note-1 \(2 heads\)/u })).toBeInTheDocument();
+  });
+
+  it("does not report cancellation until the running operation confirms it", async () => {
+    let settle: (() => void) | undefined;
+    const onRun = vi.fn().mockImplementation(() => new Promise<void>((resolve) => { settle = resolve; }));
+    const onCancel = vi.fn().mockResolvedValue(undefined);
+    render(<SyncStatus status={base} onRun={onRun} onCancel={onCancel} />);
+    fireEvent.change(screen.getByLabelText("Vault passphrase"), { target: { value: "passphrase" } });
+    fireEvent.click(screen.getByRole("button", { name: "Push" }));
+    await waitFor(() => expect(onRun).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(onCancel).toHaveBeenCalledOnce());
+    expect(screen.getByRole("status")).toHaveTextContent("push in progress");
+    expect(screen.queryByText("Sync operation cancelled.")).not.toBeInTheDocument();
+    settle?.();
+    await waitFor(() => expect(screen.queryByRole("status")).not.toBeInTheDocument());
+    expect(screen.queryByText("Sync operation cancelled.")).not.toBeInTheDocument();
   });
 });

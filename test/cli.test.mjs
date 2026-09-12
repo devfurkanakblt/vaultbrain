@@ -78,10 +78,11 @@ test("vbrain format prints the frozen version matrix", () => {
   assert.equal(output.formatVersion, "1.0");
   assert.deepEqual(output.artifacts.encryptedEnvelope, {
     path: "*.kv.enc",
-    reads: [0, 1],
-    writes: [1],
+    reads: [0, 1, 2],
+    writes: [1, 2],
   });
-  assert.deepEqual(output.artifacts.syncChangeEnvelope.reads, [1, 2, 3]);
+  assert.deepEqual(output.artifacts.syncChangeEnvelope.reads, [1, 2]);
+  assert.deepEqual(output.artifacts.syncChangeBody.reads, [1, 2, 3]);
 });
 
 /**
