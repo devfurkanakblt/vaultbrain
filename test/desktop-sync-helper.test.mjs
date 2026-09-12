@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, execFileSync, spawnSync } from "node:child_process";
 import test from "node:test";
 import { DocumentVault } from "../dist/documents.js";
 import { startSyncRelay, SyncRelayClient } from "../dist/sync-relay.js";
@@ -10,6 +10,21 @@ import { startSyncRelay, SyncRelayClient } from "../dist/sync-relay.js";
 const PASS = "desktop-helper-passphrase";
 const TOKEN = "desktop-helper-relay-token-012345678901234567890";
 const HELPER = path.resolve("dist/desktop-sync-helper.js");
+
+test("the packaged helper starts outside the repository without ambient dependencies", () => {
+  execFileSync(process.execPath, ["scripts/build-desktop-sync-helper.mjs"]);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "packaged-sync-isolated-"));
+  try {
+    fs.cpSync("src-tauri/resources/desktop-sync", root, { recursive: true });
+    const result = spawnSync(path.join(root, process.platform === "win32" ? "node.exe" : "node"), [path.join(root, "dist", "desktop-sync-helper.js")], {
+      cwd: root, input: "{}", encoding: "utf8", windowsHide: true,
+      env: { ...process.env, NODE_PATH: "", NODE_OPTIONS: "" },
+    });
+    assert.equal(result.stderr, "");
+    assert.equal(JSON.parse(result.stdout).state, "failed");
+    assert.equal(result.status, 1);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
 
 async function call(request) {
   const child = spawn(process.execPath, [HELPER], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });

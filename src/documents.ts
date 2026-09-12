@@ -573,6 +573,7 @@ export class DocumentVault {
     // retiring keys of an unfinished re-key and must not outlive the session.
     for (const key of this.session.readKeys) key.fill(0);
     for (const key of this.session.syncEnvelopeReadKeys) key.fill(0);
+    this.session.legacyChangeIdentityKey?.fill(0);
     forgetVaultKeys(this.vaultDir);
     this.indexCache = undefined;
     this.notesCache = undefined;
@@ -2383,7 +2384,7 @@ export class DocumentVault {
     }
     const id = crypto
       .createHmac("sha256", this.session.attachmentIdKey)
-      .update("secondbrain-vault:attachment-id:v1\0", "utf8")
+      .update(AAD.attachmentId, "utf8")
       .update(data)
       .digest("hex");
     const existed = fs.existsSync(this.attachmentManifestPath(id));

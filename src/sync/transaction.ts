@@ -8,6 +8,7 @@ import {
   type DocumentPayload,
 } from "../document-crypto.js";
 import { assertNoSymlinkComponents, assertNotSymlink, writeFileAtomic } from "../fs-safe.js";
+import { AAD } from "../format-version.js";
 import { forgetVaultKeys } from "../keyring.js";
 import { resolveInside } from "../safety.js";
 import {
@@ -23,7 +24,7 @@ import {
   type SyncOperation,
 } from "./protocol.js";
 
-export const LOCAL_TRANSACTION_AAD = "secondbrain-vault:sync-local-transaction:v1";
+export const LOCAL_TRANSACTION_AAD = AAD.syncLocalTransaction;
 export const MAX_LOCAL_TRANSACTION_BYTES = 64 * 1024 * 1024;
 const MAX_LOCAL_TRANSACTION_FILE_BYTES = 96 * 1024 * 1024;
 const TRANSACTION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
@@ -42,7 +43,7 @@ export interface SyncTransactionOptions {
   applyFaultInjector?: SyncApplyFaultInjector;
 }
 
-export const APPLY_RECEIPT_AAD = "secondbrain-vault:sync-apply-receipt:v1";
+export const APPLY_RECEIPT_AAD = AAD.syncApplyReceipt;
 export type SyncApplyPhase = "prepared" | "storage-written" | "cursor-written" | "cleared";
 
 export interface SyncApplyFaultPoint {
@@ -277,6 +278,9 @@ export class SyncLocalTransaction {
     this.session.attachmentIdKey.fill(0);
     this.session.syncChangeKey.fill(0);
     this.session.syncEnvelopeKey.fill(0);
+    for (const key of this.session.readKeys) key.fill(0);
+    for (const key of this.session.syncEnvelopeReadKeys) key.fill(0);
+    this.session.legacyChangeIdentityKey?.fill(0);
     forgetVaultKeys(this.vaultDir);
     this.closed = true;
   }
@@ -450,6 +454,9 @@ export class SyncApplyReceiptStore {
     this.session.attachmentIdKey.fill(0);
     this.session.syncChangeKey.fill(0);
     this.session.syncEnvelopeKey.fill(0);
+    for (const key of this.session.readKeys) key.fill(0);
+    for (const key of this.session.syncEnvelopeReadKeys) key.fill(0);
+    this.session.legacyChangeIdentityKey?.fill(0);
     forgetVaultKeys(this.vaultDir);
     this.closed = true;
   }

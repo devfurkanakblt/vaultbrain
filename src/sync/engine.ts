@@ -1,4 +1,4 @@
-import type { SyncAppliedObject } from "./change-log.js";
+import type { SyncAppliedObject } from "../sync.js";
 import { SyncApplyReceiptStore, type SyncApplyLiveIdentity, type SyncApplyReceipt } from "./transaction.js";
 import type { SyncChange, SyncObjectType } from "./protocol.js";
 

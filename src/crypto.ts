@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { AAD } from "./format-version.js";
 import { assertStrongPassphrase } from "./passphrase-policy.js";
 
 const ALGO = "aes-256-gcm";
@@ -159,7 +160,9 @@ export function encrypt(plaintext: string, passphrase: string): EncryptedPayload
 export function decrypt(payload: AnyEncryptedPayload, passphrase: string): string {
   const version = envelopeVersion(payload);
   if (version === KEYED_ENVELOPE_VERSION) {
-    throw new Error("This file is encrypted with the vault keyring; open it with the vault's keyset, not a passphrase.");
+    throw new Error(
+      "This file is encrypted with the vault keyring; open it with the vault's keyset, not a passphrase.",
+    );
   }
   if (version > ENVELOPE_VERSION) {
     throw new Error(
@@ -191,7 +194,7 @@ export function decrypt(payload: AnyEncryptedPayload, passphrase: string): strin
   }
 }
 
-const KEYED_AAD_CONTEXT = "secondbrain-vault:kv:v2";
+const KEYED_AAD_CONTEXT = AAD.keyedEnvelope;
 
 /**
  * The logical file name is authenticated, so an attacker with write access
@@ -249,8 +252,5 @@ function decryptUnderKey(payload: KeyedEncryptedPayload, key: Buffer, name: stri
   const decipher = crypto.createDecipheriv(ALGO, key, base64Bytes(payload.iv, 12, 12, "iv"));
   decipher.setAAD(keyedAad(name));
   decipher.setAuthTag(base64Bytes(payload.authTag, 16, 16, "authentication tag"));
-  return Buffer.concat([
-    decipher.update(Buffer.from(payload.ciphertext, "base64")),
-    decipher.final(),
-  ]).toString("utf8");
+  return Buffer.concat([decipher.update(Buffer.from(payload.ciphertext, "base64")), decipher.final()]).toString("utf8");
 }

@@ -1,3 +1,4 @@
+import { AAD } from "./format-version.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -22,7 +23,7 @@ import { appendKeyringAuditWithKey, newKeyringAuditKey } from "./keyring-audit.j
 
 const LEGACY_SCRYPT_N = 2 ** 15;
 const LEGACY_KEY_LENGTH = 32;
-const LEGACY_KEY_CHECK_CONTEXT = "secondbrain-vault:document-key:v1";
+const LEGACY_KEY_CHECK_CONTEXT = AAD.documentKeyCheck;
 
 export interface KeyringMigrationReport {
   /** True when this run wrote the keyring; false when it resumed or did nothing. */
@@ -148,7 +149,9 @@ export function migrateToKeyring(vaultDir: string, passphrase: string): KeyringM
 
       // Prove every key-value file opens before committing the keyring, so a
       // wrong passphrase cannot leave a vault half-converted.
-      const pending = new Map(listVaultFiles(vaultDir).map((name) => [name, loadVaultFile(vaultDir, name, passphrase)]));
+      const pending = new Map(
+        listVaultFiles(vaultDir).map((name) => [name, loadVaultFile(vaultDir, name, passphrase)]),
+      );
       const grants = loadGrants(vaultDir, passphrase);
       const auditOperation = newKeyringAuditKey("migrate");
       appendKeyringAuditWithKey(vaultDir, keys.audit, auditOperation, "pending");

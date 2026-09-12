@@ -6,6 +6,8 @@ import path from "node:path";
 import test from "node:test";
 
 import { openDocumentKey } from "../dist/document-crypto.js";
+import { SyncChangeLog, SyncDeviceManager } from "../dist/sync.js";
+import { SyncLocalTransaction, SyncApplyReceiptStore } from "../dist/sync/transaction.js";
 import {
   EPOCH_KEY_BYTES,
   agreementPublicKeyFromBase64,
@@ -20,6 +22,42 @@ import {
 
 const DEVICE_A = "11111111-1111-4111-8111-111111111111";
 const DEVICE_B = "22222222-2222-4222-8222-222222222222";
+
+test("closing sync stores wipes retired and legacy key references", () => {
+  for (const Store of [SyncChangeLog, SyncDeviceManager, SyncLocalTransaction, SyncApplyReceiptStore]) {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "sync-key-lifetime-"));
+    const store = new Store(directory, "sync-key-lifetime-passphrase");
+    const session = store.session;
+    const retired = [crypto.randomBytes(32), crypto.randomBytes(32), crypto.randomBytes(32)];
+    session.readKeys = [...session.readKeys, retired[0]];
+    session.syncEnvelopeReadKeys = [...session.syncEnvelopeReadKeys, retired[1]];
+    session.legacyChangeIdentityKey = retired[2];
+    const references = [session.key, session.attachmentIdKey, session.syncChangeKey, session.syncEnvelopeKey, ...retired];
+    try {
+      store.close();
+      store.close();
+      for (const key of references) assert.deepEqual(key, Buffer.alloc(32), Store.name);
+    } finally {
+      store.close();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test("epoch key copies are reused within a sync session and wiped on close", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "sync-epoch-lifetime-"));
+  const log = new SyncChangeLog(directory, "sync-epoch-lifetime-passphrase");
+  try {
+    saveEpochKey(log.session.rootDir, log.session.key, 2, crypto.randomBytes(32));
+    const first = log.epochResolver()(2);
+    assert.strictEqual(log.epochResolver()(2), first);
+    log.close();
+    assert.deepEqual(first, Buffer.alloc(32));
+  } finally {
+    log.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test("an epoch key round-trips to the intended device only", () => {
   const alice = generateAgreementKeyPair();

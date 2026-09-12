@@ -76,6 +76,33 @@ test("remote and malformed locks fail closed", () => {
   }
 });
 
+test("a reused live PID is refused even when its recorded acquisition is ancient", () => {
+  const vaultDir = temporaryVault("pid-reuse");
+  try {
+    writeLock(vaultDir, recordFor(process.pid, { acquiredAt: "2000-01-01T00:00:00.000Z" }));
+    assert.throws(() => recoverVaultLock(vaultDir), /live local process/);
+    assert.equal(inspectVaultLock(vaultDir).holder.pid, process.pid);
+  } finally { fs.rmSync(vaultDir, { recursive: true, force: true }); }
+});
+
+test("concurrent recovery attempts cannot both remove a dead owner lock", async () => {
+  const vaultDir = temporaryVault("concurrent");
+  try {
+    writeLock(vaultDir, recordFor(999_999));
+    const invoke = () => new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, ["--input-type=module", "-e", "import {recoverVaultLock} from './dist/vault-lock.js'; console.log(JSON.stringify(recoverVaultLock(process.argv[1])));", vaultDir], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+      let output = "", error = "";
+      child.stdout.on("data", data => { output += data; });
+      child.stderr.on("data", data => { error += data; });
+      child.on("error", reject);
+      child.on("close", code => code === 0 ? resolve(JSON.parse(output)) : reject(new Error(error)));
+    });
+    const results = await Promise.all([invoke(), invoke()]);
+    assert.equal(results.filter(result => result.recovered).length, 1);
+    assert.equal(inspectVaultLock(vaultDir).state, "unlocked");
+  } finally { fs.rmSync(vaultDir, { recursive: true, force: true }); }
+});
+
 test("vault-lock status and recover work while a rekey journal is present", () => {
   const vaultDir = temporaryVault("cli");
   try {

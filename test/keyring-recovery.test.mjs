@@ -33,6 +33,25 @@ import {
   rewriteRecoveryKitForRekey,
 } from "../dist/keyring-recovery.js";
 import { readKeyringStatus } from "../dist/keyring-status.js";
+import { verifyRecoveryKeySet } from "../dist/keyring-recovery-verify.js";
+import { sealSyncChange } from "../dist/sync.js";
+import { saveEpochKey } from "../dist/sync-epoch.js";
+
+test("recovery verification opens modern epoch changes using recovered epoch keys", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "recovery-epoch-"));
+  const keys = randomKeySet();
+  const epochKey = Buffer.alloc(32, 17);
+  try {
+    saveEpochKey(path.join(root, "documents"), keys.documents, 2, epochKey);
+    const envelope = sealSyncChange({ version: 1, deviceId: "11111111-1111-4111-8111-111111111111", sequence: 1, previousDeviceChange: null, parents: [], createdAt: "2026-09-11T00:00:00.000Z", mutation: { objectType: "note", objectId: "note", operation: "put", baseRevision: null, revision: 1, value: { body: "synthetic" } } }, { syncChangeKey: keys.syncChange, syncEnvelopeKey: epochKey }, 2);
+    const dir = path.join(root, "documents", "sync", "changes");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `${envelope.id}.change.enc`), JSON.stringify(envelope));
+    assert.equal(verifyRecoveryKeySet(root, keys), 1);
+    fs.renameSync(path.join(dir, `${envelope.id}.change.enc`), path.join(dir, `${"b".repeat(64)}.change.enc`));
+    assert.throws(() => verifyRecoveryKeySet(root, keys), /filename/);
+  } finally { zeroKeySet(keys); epochKey.fill(0); fs.rmSync(root, { recursive: true, force: true }); }
+});
 import { changeVaultPassphrase } from "../dist/keyring-passphrase.js";
 import { loadVaultFile, upsertEntry } from "../dist/store.js";
 

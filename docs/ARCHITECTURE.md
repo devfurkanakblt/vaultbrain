@@ -416,6 +416,13 @@ and external cryptographic review remain future work. Sync is desktop-to-desktop
 The original format contract and threat analysis are recorded in
 `docs/superpowers/specs/2026-08-31-encrypted-sync-change-protocol-design.md`.
 
+Identity rotation is a security boundary transition: it starts a new owner epoch,
+does not grant the revoked device a wrap for that epoch, and requires explicit
+re-enrollment of peers before they can write again. The existing implementation is
+the canonical sync owner; closure work records verification evidence rather than
+adding another protocol implementation. Ambiguous writer-lock cases remain
+fail-closed and have no override.
+
 ## Durability and session lifecycle
 
 A note object and the search/link index are separate encrypted files, so a
@@ -643,3 +650,10 @@ the unlock, search and index budgets are still only enforced against the 1,000-
 note benchmark corpus. The 10k/100k index gates and large-graph virtualization
 remain open, and the theme is a per-device preference in `localStorage`, never
 part of the encrypted vault.
+
+Personal memory is not part of the current desktop slice. `src/memory/` remains an
+experimental, disabled-by-default surface with no enabled production import path.
+The planned Phase 15 design requires an owner-paired native broker, an unlocked
+session, a bounded secure queue, isolated local worker, grant-aware MCP/desktop
+controls, and explicit sensitive review/forget. It introduces no live integration
+or new encryption format.

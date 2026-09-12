@@ -8,6 +8,7 @@ import { assertNotSymlink } from "./fs-safe.js";
 import type { KeySet, RetiringKeys } from "./keyring.js";
 import { resolveInside } from "./safety.js";
 import { APPLIED_AAD, openSyncChange } from "./sync/protocol.js";
+import { readEpochKey } from "./sync-epoch.js";
 
 function readPayload<T>(filePath: string): T {
   assertNotSymlink(filePath);
@@ -100,15 +101,32 @@ export function verifyRecoveryKeySet(vaultDir: string, keys: KeySet, retiring: R
     for (const entry of fs.readdirSync(changesDir, { withFileTypes: true })) {
       if (!entry.name.endsWith(".change.enc")) continue;
       if (!entry.isFile()) throw new Error("A sync change path is not a regular file.");
-      openWithFallback(
-        (key) =>
-          openSyncChange(readPayload(resolveInside(vaultDir, path.join("documents", "sync", "changes", entry.name))), {
-            syncChangeKey: keys.syncChange,
-            syncEnvelopeKey: key,
-          }),
-        keys.syncEnvelope,
-        retiring?.syncEnvelope,
-      );
+      const epochKeys: Buffer[] = [];
+      try {
+        const change = openSyncChange(
+          readPayload(resolveInside(vaultDir, path.join("documents", "sync", "changes", entry.name))),
+          (epoch) => {
+            if (epoch === 1)
+              return {
+                syncChangeKey: keys.syncChange,
+                syncEnvelopeKey: keys.syncEnvelope,
+                retiringSyncEnvelopeKey: retiring?.syncEnvelope,
+              };
+            const key = readEpochKey(
+              path.join(vaultDir, "documents"),
+              retiring ? [keys.documents, retiring.documents] : keys.documents,
+              epoch,
+            );
+            if (!key) throw new Error("The recovery keyset cannot open a required sync epoch key.");
+            epochKeys.push(key);
+            return { syncChangeKey: keys.syncChange, syncEnvelopeKey: key };
+          },
+        );
+        if (entry.name !== `${change.id}.change.enc`)
+          throw new Error("Sync change filename does not match its envelope.");
+      } finally {
+        for (const key of epochKeys) key.fill(0);
+      }
       verified += 1;
     }
   }
@@ -118,4 +136,3 @@ export function verifyRecoveryKeySet(vaultDir: string, keys: KeySet, retiring: R
   if (audit.signedEntries > 0) verified += 1;
   return verified;
 }
-

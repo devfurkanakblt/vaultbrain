@@ -858,8 +858,17 @@ Phase 7 replaced the passphrase-derived content key with a wrapped keyring, so
 object, both cores read the new format, and the key-derivation cost can be
 raised per vault. It also ships resumable re-key, recovery kits, controlled
 lock recovery and the explicit `vbrain rekey --rotate-identities` migration.
-Desktop passphrase and key-management controls remain Phase 8 work. The maintained checklist is in
-[`docs/ROADMAP.md`](docs/ROADMAP.md).
+Desktop passphrase and key-management controls are implemented in the current
+desktop slice. The maintained checklist keeps the remaining external release,
+platform and audit evidence open in [`docs/ROADMAP.md`](docs/ROADMAP.md).
+
+Personal-memory modules under `src/memory/` are experimental and disabled by
+default. No production import path enables them. Any future integration must use
+the separately reviewed [Phase 15 plan](docs/superpowers/plans/2026-09-11-phase-15-personal-memory.md):
+native broker, explicit pairing, an unlocked session, bounded secure queue, and
+owner-controlled review/forget. It must preserve the new owner epoch and require
+re-enrollment after identity rotation. No live MCP, desktop or account integration
+is part of the current release.
 
 ## License
 

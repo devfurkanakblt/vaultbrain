@@ -169,9 +169,8 @@ Follow-up work outside the five corrections:
 
 - [ ] Phase 13: enforce encrypted-artifact inventory coverage against the format
       catalogue, so adding a new artifact cannot silently omit re-key support.
-- [ ] Decide the ownership of the personal-memory modules under `src/memory/`:
-      schedule the remaining integration as a phase or remove the unused modules.
-      The current modules alone do not deliver the personal-memory plan.
+- [x] Assign the personal-memory modules under `src/memory/` to Phase 15.
+      The current modules remain experimental; product integration is still open.
 
 ## Phase 8 — Key management the desktop can reach
 
@@ -288,20 +287,49 @@ Every protocol defect this project has found in itself came from two pieces of
 code that were meant to agree and did not. The TypeScript and Rust cores are a
 deliberate, audited pair. These three are not.
 
-- [ ] Retire `src/sync/change-log.ts`. `src/sync.ts` has its own change log and
-      is the one in use; the extracted copy is reached only by tests. The
-      epoch 1 change-identity defect existed precisely because
-      `sync/protocol.ts` sealed under the right key while `sync.ts` did not,
-      and nothing compared them.
-- [ ] Complete the frozen domain-separation inventory.
-      `secondbrain-vault:kv:v2` (`src/crypto.ts`),
-      `secondbrain-vault:sync-local-transaction:v1` and
-      `secondbrain-vault:sync-apply-receipt:v1` (`src/sync/transaction.ts`)
-      live outside `src/format-version.ts`, so
-      `test/format-conformance.test.mjs` does not freeze them and a refactor
-      could change one without failing a test — the exact accident the
-      inventory exists to prevent.
-- [ ] Close the format catalogue gap `docs/AUDIT-SCOPE.md` already records:
-      `documents/index.enc` and `documents/plugin-policy.enc` are real
-      encrypted artifacts with no entry in `FORMAT_COMPATIBILITY`, and so sit
-      outside the 1.x compatibility policy that covers everything beside them.
+- [x] Retire `src/sync/change-log.ts`. The public `src/sync.ts` API now uses
+      the single wire implementation in `sync/protocol.ts`; canonical API and
+      clean-distribution regression tests cover the consolidation (14.3).
+- [x] Freeze the domain-separation inventory, including KV v2, local transaction
+      and apply receipt domains. Explicit expected values and TS/Rust source
+      checks catch omitted or divergent literals (14.3).
+- [ ] Complete encrypted-artifact conformance (14.3). Index and plugin-policy
+      are now catalogued and real writers are checked against re-key plans.
+      Exhaustive family and temporary-transition coverage remains open; see
+      [verification evidence](PHASE-14-VERIFICATION.md).
+
+## Phase 14 — Closure and evidence reconciliation
+
+The closure baseline is `83a1dd1` on `phase-14-closure`. This phase reconciles
+documentation with the existing sync and re-key implementation, records evidence
+ownership, and keeps external gates visible. Phase 13's three items are owned by
+Phase 14.3. Implementation and remaining acceptance evidence are tracked in
+[the verification record](PHASE-14-VERIFICATION.md); an unchecked historical
+task does not imply its implementation is still absent.
+
+- [ ] 14.0 Reconcile stale roadmap, README, architecture and security descriptions
+      with the implemented Phase 7.7, sync, re-key, recovery and desktop surfaces.
+- [ ] 14.1 Verify portable workspace state, explicit enrollment, revocation,
+      forward-only epoch rotation, bounded relay operations and clean peer
+      re-enrollment after identity rotation.
+- [ ] 14.2 Verify resumable identity migration, recovery compatibility and audit
+      evidence. Ambiguous lock state remains fail-closed with no override.
+- [ ] 14.3 Consolidation and domain tests are implemented; finish the complete
+      artifact/transition coverage audit before closing Phase 13.
+- [x] 14.4 Keep personal-memory modules experimental and disabled by default;
+      production-import audit found no imports beyond internal/test surfaces.
+      Productization is deferred to [`Phase 15`](superpowers/plans/2026-09-11-phase-15-personal-memory.md).
+- [ ] 14.5 Independent security audit, real native acceptance and production
+      signing/release evidence remain external gates.
+
+## Phase 15 — Personal-memory integration (planned)
+
+The design and implementation plan is [`docs/superpowers/plans/2026-09-11-phase-15-personal-memory.md`](superpowers/plans/2026-09-11-phase-15-personal-memory.md),
+grounded in the Phase 7.6 contract. It covers the native broker, explicit pairing,
+unlocked sessions, secure queue, MCP/desktop controls, sensitive review/forget and
+rekey restore behavior. No live integration is enabled by this roadmap entry.
+
+- [ ] Native broker and unlocked-session lifecycle
+- [ ] Safe capture and isolated local worker boundary
+- [ ] Owner-controlled MCP, desktop review and forget/relearn lifecycle
+- [ ] Synthetic acceptance evidence and explicit product-owner release decision

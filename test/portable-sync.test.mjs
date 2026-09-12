@@ -7,6 +7,28 @@ import { SyncedDocumentVault } from "../dist/sync.js";
 import { DocumentVault } from "../dist/documents.js";
 import { decryptDocument } from "../dist/document-crypto.js";
 import { parsePortableState } from "../dist/portable-state.js";
+import { runPortableRecoveryDrill } from "../scripts/portable-recovery-drill.mjs";
+import { rekeyVault } from "../dist/keyring-rekey.js";
+
+test("encrypted backup plus relay catch-up restores every portable live object", async () => {
+  assert.equal((await runPortableRecoveryDrill()).ok, true);
+});
+
+test("portable state remains readable after an ordinary content re-key", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "portable-rekey-"));
+  let vault;
+  try {
+    vault = new SyncedDocumentVault(root, "portable-before-passphrase", "11111111-1111-4111-8111-111111111111");
+    const state = { version: 1, bookmarks: [{ id: "note", label: "Keep me", createdAt: "2026-09-11T00:00:00.000Z" }], layouts: [] };
+    vault.setPortableState("workspace", state);
+    vault.setPortableState("saved-views", { version: 1, views: [] });
+    vault.lock();
+    rekeyVault(root, "portable-before-passphrase", "portable-after-passphrase");
+    vault = new SyncedDocumentVault(root, "portable-after-passphrase");
+    assert.deepEqual(vault.getPortableState("workspace"), state);
+    assert.deepEqual(vault.getPortableState("saved-views"), { version: 1, views: [] });
+  } finally { vault?.lock(); fs.rmSync(root, { recursive: true, force: true }); }
+});
 
 test("the shared native workspace vector fixes the ciphertext contract", () => {
   const vector = JSON.parse(fs.readFileSync(new URL("./fixtures/portable-workspace-vector.json", import.meta.url), "utf8"));

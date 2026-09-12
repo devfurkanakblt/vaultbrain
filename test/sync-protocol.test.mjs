@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { canonicalSyncJson, openSyncChange, sealSyncChange, validateSyncChangeBody } from "../dist/sync/protocol.js";
-import { verifySyncChanges } from "../dist/sync/change-log.js";
+import { verifySyncChanges } from "../dist/sync.js";
 import { encryptDocument } from "../dist/document-crypto.js";
 import * as syncCompatibility from "../dist/sync.js";
 
@@ -18,6 +18,13 @@ const key = Buffer.from(golden.keyHex, "hex");
 // same legacy key in both roles is exactly what compatibility requires: it
 // proves output stays byte-identical to what the single-key protocol wrote.
 const keys = { syncChangeKey: key, syncEnvelopeKey: key };
+
+test("the public sync API and internal wire API share one implementation", () => {
+  assert.equal(syncCompatibility.openSyncChange, openSyncChange);
+  assert.equal(syncCompatibility.sealSyncChange, sealSyncChange);
+  assert.equal(syncCompatibility.validateSyncChangeBody, validateSyncChangeBody);
+  assert.equal(syncCompatibility.canonicalSyncJson, canonicalSyncJson);
+});
 
 function change(body = golden.body) {
   return { ...body, mutation: { ...body.mutation, value: structuredClone(body.mutation.value) } };
@@ -186,8 +193,8 @@ test("v1 protocol freezes admission limits and graph errors", () => {
 
 test("a version 3 change body is accepted and authorized like version 2", async () => {
   const { FORMAT_COMPATIBILITY } = await import("../dist/format-version.js");
-  assert.deepEqual(FORMAT_COMPATIBILITY.syncChangeEnvelope.reads, [1, 2, 3]);
-  assert.deepEqual(FORMAT_COMPATIBILITY.syncChangeEnvelope.writes, [1, 2, 3]);
+  assert.deepEqual(FORMAT_COMPATIBILITY.syncChangeBody.reads, [1, 2, 3]);
+  assert.deepEqual(FORMAT_COMPATIBILITY.syncChangeBody.writes, [1, 2, 3]);
 });
 
 test("a version 3 change body without authorization is refused", async () => {

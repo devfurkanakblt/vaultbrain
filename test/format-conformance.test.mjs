@@ -7,6 +7,9 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { AAD, FORMAT_COMPATIBILITY, VAULT_FORMAT_VERSION, canonicalBase64 } from "../dist/format-version.js";
+import { openDocumentKey } from "../dist/document-crypto.js";
+import { planRekey } from "../dist/keyring-rekey.js";
+import { writePortableState } from "../dist/portable-state.js";
 import { SyncBlobStore } from "../dist/sync-blobs.js";
 import {
   SyncChangeLog,
@@ -50,12 +53,13 @@ test("the format version surface is frozen and complete", () => {
       assert.ok(entry.reads.includes(written), `${artifact} must read every version it writes`);
     }
   }
-  assert.deepEqual(FORMAT_COMPATIBILITY.encryptedEnvelope.reads, [0, 1]);
-  assert.deepEqual(FORMAT_COMPATIBILITY.encryptedEnvelope.writes, [1]);
+  assert.deepEqual(FORMAT_COMPATIBILITY.encryptedEnvelope.reads, [0, 1, 2]);
+  assert.deepEqual(FORMAT_COMPATIBILITY.encryptedEnvelope.writes, [1, 2]);
 
-  // Blob transport added change body version 3 to the sync change entry.
-  assert.deepEqual(FORMAT_COMPATIBILITY.syncChangeEnvelope.reads, [1, 2, 3]);
-  assert.deepEqual(FORMAT_COMPATIBILITY.syncChangeEnvelope.writes, [1, 2, 3]);
+  // Envelope and signed-body versions evolve independently. Blob transport
+  // added body version 3 without inventing a third envelope shape.
+  assert.deepEqual(FORMAT_COMPATIBILITY.syncChangeEnvelope.reads, [1, 2]);
+  assert.deepEqual(FORMAT_COMPATIBILITY.syncChangeEnvelope.writes, [1, 2]);
 
   // The keyring is the root of the key hierarchy, so it is in the inventory:
   // a vault whose first file is undeclared is a vault the catalogue cannot
@@ -69,6 +73,21 @@ test("the format version surface is frozen and complete", () => {
   // so a pre-keyring build refuses the vault instead of misreading it.
   assert.deepEqual(FORMAT_COMPATIBILITY.documentManifest.reads, [1, 2]);
   assert.deepEqual(FORMAT_COMPATIBILITY.documentManifest.writes, [1, 2]);
+
+  // Format governance records the actual sealed path, its domain and the two
+  // distinct re-key outcomes. This keeps a newly added writer from becoming
+  // unreadable after a key rotation.
+  assert.deepEqual(FORMAT_COMPATIBILITY.portableWorkspace.domains, ["workspace"]);
+  assert.deepEqual(FORMAT_COMPATIBILITY.portableWorkspace.rekey, {
+    normal: "reencrypt",
+    rotateIdentities: "reencrypt",
+  });
+  assert.deepEqual(FORMAT_COMPATIBILITY.syncBlob.rekey, {
+    normal: "preserve",
+    rotateIdentities: "reset",
+  });
+  assert.deepEqual(FORMAT_COMPATIBILITY.syncChangeEnvelope.reads, [1, 2]);
+  assert.deepEqual(FORMAT_COMPATIBILITY.syncChangeBody.reads, [1, 2, 3]);
 });
 
 test("a keyring vault is on disk exactly as the catalogue describes it", () => {
@@ -97,6 +116,27 @@ test("canonical base64 rejects non-canonical and wrong-length encodings", () => 
   // "QQ==" is canonical; "QQ" is the same bytes without padding and must be refused.
   assert.equal(canonicalBase64("QQ==", 1, "test key"), "QQ==");
   assert.throws(() => canonicalBase64("QQ", 1, "test key"), /malformed test key/u);
+});
+
+test("the portable-state writer produces artifacts the re-key plan can classify", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-format-portable-"));
+  try {
+    const session = openDocumentKey(dir, FIXTURE_PASSPHRASE);
+    writePortableState(session, "workspace", { version: 1, bookmarks: [], layouts: [] });
+    writePortableState(session, "saved-views", { version: 1, views: [] });
+
+    assert.deepEqual(
+      planRekey(dir)
+        .filter((item) => item.path.endsWith("workspace.enc") || item.path.endsWith("views.enc"))
+        .map((item) => [item.path, item.identity]),
+      [
+        ["documents/views.enc", AAD.savedViews],
+        ["documents/workspace.enc", AAD.workspace],
+      ],
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("the committed rotated vault still opens both envelope versions", () => {

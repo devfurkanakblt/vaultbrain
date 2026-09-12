@@ -131,6 +131,18 @@ scope that leaks a value it should mask — through the flow above.
   access. The relay remains an availability service: it stores opaque encrypted
   artifacts and can withhold or delete them.
 
+## Personal-memory status
+
+The modules under `src/memory/` are experimental and disabled by default; the
+current production import audit found no enabled production path beyond internal
+or test surfaces. They must not be treated as a supported MCP or desktop feature.
+The planned Phase 15 integration requires a native broker, explicit owner pairing,
+an unlocked session, a bounded pointer-only locked queue, grant-aware MCP/desktop
+access, and review for sensitive or inferred candidates. Forget removes active
+recall and keeps an encrypted tombstone; it does not erase revisions, backups or
+provider history. Rekey identity rotation starts a new owner epoch, invalidates
+old pairings and requires clean re-enrollment. Ambiguous lock state has no override.
+
 ## Disclosure process
 
 Maintainers will acknowledge a complete report, reproduce it privately, prepare

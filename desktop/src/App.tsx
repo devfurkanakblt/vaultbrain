@@ -333,6 +333,7 @@ export function App() {
   const activeRef = useRef<NoteDocument | undefined>(active);
   const saveStateRef = useRef<SaveState>(saveState);
   const noteGeneration = useRef(0);
+  const sessionGeneration = useRef(0);
   const noteSaveInFlight = useRef<Promise<boolean> | null>(null);
   activeRef.current = active;
   saveStateRef.current = saveState;
@@ -353,7 +354,11 @@ export function App() {
     if (JSON.stringify(theme) === JSON.stringify(DEFAULT_THEME)) clearTheme(); else saveTheme(theme);
   }, [theme]);
 
-  const refreshList = useCallback(async () => setNotes(await vaultBridge.listNotes()), []);
+  const refreshList = useCallback(async () => {
+    const generation = sessionGeneration.current;
+    const items = await vaultBridge.listNotes();
+    if (generation === sessionGeneration.current) setNotes(items);
+  }, []);
 
   /**
    * The host's whole reach into the app. A plugin method that is not spelled
@@ -448,6 +453,7 @@ export function App() {
 
   async function unlock(path: string, passphrase: string) {
     const info = await vaultBridge.unlock(path, passphrase);
+    sessionGeneration.current += 1;
     setVault(info);
     setLockNotice("");
     const listed = await vaultBridge.listNotes();
@@ -541,6 +547,7 @@ export function App() {
   }, [fail, report]);
 
   const lock = useCallback(async (reason: LockReason = "manual", editsAlreadySaved = false) => {
+    sessionGeneration.current += 1;
     if (!editsAlreadySaved && active && (saveState === "dirty" || saveState === "error")) {
       setSaveState("saving");
       try {
@@ -1152,13 +1159,19 @@ export function App() {
       />
       : workspaceView === "sync" ? <SyncStatus status={syncStatus} registryVerified={syncRegistryVerified} onRun={async (operation, input) => {
           if (!vault) throw new Error("Unlock a vault before syncing.");
+          const generation = sessionGeneration.current;
           if (!(await persistActive())) throw new Error("Save the current note before syncing.");
           await canvasBoard.current?.flush();
+          if (generation !== sessionGeneration.current) return;
           const result = await vaultBridge.desktopSync({ operation, vaultPath: vault.path, passphrase: String(input.passphrase ?? ""), ...(input as Omit<Parameters<typeof vaultBridge.desktopSync>[0], "operation" | "vaultPath" | "passphrase">) });
+          if (generation !== sessionGeneration.current) return;
           const next = await vaultBridge.syncStatus();
+          const verified = next.enrolled ? await vaultBridge.syncVerifyRegistry() : null;
+          if (generation !== sessionGeneration.current) return;
           setSyncStatus(next);
-          setSyncRegistryVerified(next.enrolled ? await vaultBridge.syncVerifyRegistry() : null);
+          setSyncRegistryVerified(verified);
           await refreshList();
+          if (generation !== sessionGeneration.current) return;
           report("Sync state refreshed.");
           return result;
         }} onCancel={() => vaultBridge.desktopSyncCancel()} />

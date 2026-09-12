@@ -15,3 +15,5 @@ src-tauri/vault/
 # Local knowledge-graph analysis output: regenerable, ~16 MB, and its
 # .graphify_python records an absolute path from whichever machine ran it.
 graphify-out/
+src-tauri/resources/desktop-sync/*
+!src-tauri/resources/desktop-sync/.gitkeep
