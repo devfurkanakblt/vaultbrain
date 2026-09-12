@@ -1,9 +1,11 @@
 # Phase 14 verification record
 
-Date: 2026-09-12. Host: Windows x64. Branch: `phase-14-closure`.
-Base commit: `83a1dd1190ab7ba7cc77baa70b68029bdb8ab3c8`.
-These results describe the uncommitted working-tree changes, not a published or
-audit-pinned commit. The pre-existing untracked `.serena/` directory was preserved.
+Date: 2026-09-13. Host: Windows x64. Branch: `phase-14-closure`.
+Implementation commit: `bff1d8c2a15fb7a1a4dcd08fac1adf3069d30cea`.
+Parent: `a86662f8840065eee8f066a4379d4aafd032c1c5`.
+The pre-existing `.serena/` directory and ignored measurement logs were preserved.
+Rows marked user-confirmed record the user's completed commands; their raw
+terminal output was not captured in this workspace.
 
 ## Execution evidence
 
@@ -13,18 +15,25 @@ counted as a pass.
 
 | Command / check | Result | Evidence |
 | --- | --- | --- |
-| `npm run quality` | Passed before the final key-lifetime fix; final rerun pending | 424 Node tests, 8 platform-artifact tests, 12 release tests, 4 updater acceptance contract tests, 143 desktop tests; lint, formatting, typecheck and desktop build passed |
-| `npm run quality:rust` | Passed | Clippy with warnings denied; 89 library tests |
-| Key lifetime regression tests | Passed after reproducing both failures | Two tests in `test/sync-epoch.test.mjs`; retiring/legacy buffers cleared and epoch-key copies reused then cleared |
-| `npm run recovery:drill` | Passed | Verified encrypted backup, signed checkpoint and relay catch-up; seven live objects, duplicate apply idempotence, bookmarks/layouts/views retained |
-| `npm run benchmark` | Passed | 1,000 notes; unlock/index 414.23 ms, quick-switch p95 0.39 ms, full-text p95 0.76 ms |
-| `npm run benchmark:10k` | Passed | 10,000 notes; unlock/index 372.68 ms, quick-switch p95 3.60 ms, full-text p95 3.93 ms |
-| `npm run benchmark:100k` | Failed performance gate | 100,000 notes: quick-switch p95 26.23 ms and full-text p95 29.07 ms passed; title-shaped search p95 128.56 ms exceeded the 100 ms tier limit. No threshold was relaxed. |
-| `VBRAIN_REQUIRE_NATIVE_KEYCHAIN=1 node --test test/native-keychain.test.mjs` | Passed | Windows DPAPI: create/read/delete isolated synthetic credential; sandbox initially denied profile write, authorized elevated rerun passed |
-| Isolated packaged sync helper | Passed | Copied sidecar to a temporary directory outside the repository; bundled Node starts without repository dependencies; caught and fixed missing YAML dependency |
-| Native Windows package build | Interrupted during dependency compilation | The unsigned package was not produced; this does not establish production signature or updater acceptance |
-| `npm run package:check` | Pending | Clean build must exclude the retired change-log module |
-| `graphify update .` | Passed; refresh after final fix pending | AST-only update: 3,185 nodes, 8,909 edges, 181 communities |
+| `npm run quality` | User-confirmed pass | Local portion recorded 429 Node, 8 platform-artifact and 12 release tests; user confirmed updater acceptance, desktop tests and desktop build completed successfully |
+| `npm run quality:rust` | User-confirmed pass | Clippy with warnings denied and Rust library tests completed successfully |
+| Key lifetime regression tests | Passed | `test/sync-epoch.test.mjs`; retiring/legacy buffers cleared and epoch-key copies reused then cleared |
+| `npm run recovery:drill` | User-confirmed pass | Backup, signed checkpoint, relay catch-up and idempotent recovery completed successfully |
+| `npm run benchmark` | User-confirmed pass | 1,000-note performance gate passed; local run recorded quick-switch p95 0.90 ms and title-shaped p95 4.87 ms |
+| `npm run benchmark:10k` | User-confirmed pass | 10,000-note performance gate passed; local run recorded quick-switch p95 4.81 ms and title-shaped p95 18.13 ms |
+| `npm run benchmark:100k` | Passed | Final local run: quick-switch p95 26.01 ms, title-shaped p95 71.23 ms, full-text p95 29.36 ms, note-open p95 2.53 ms, backlinks p95 0.028 ms; all gates passed |
+| `VBRAIN_REQUIRE_NATIVE_KEYCHAIN=1 node --test test/native-keychain.test.mjs` | User-confirmed pass | Windows DPAPI create/read/delete check completed successfully |
+| Isolated packaged sync helper | Passed | Sidecar ran from an external temporary directory with bundled Node, YAML and ES-module metadata |
+| Windows release package build | User-confirmed pass | MSI and NSIS artifacts were produced; see hashes below. Packages are unsigned local artifacts. |
+| `npm run package:check` | User-confirmed pass | Package manifest check completed successfully and excluded retired source/tests/local vault data |
+| `graphify update .` | User-confirmed pass | `graphify-out/` refreshed after final code changes; output is ignored generated state |
+
+### Windows package evidence
+
+| Artifact | Size | SHA-256 | Signature |
+| --- | ---: | --- | --- |
+| `src-tauri/target/release/bundle/msi/Vault Brain_0.2.0_x64_en-US.msi` | 43,196,454 bytes | `3B6A87830E95408075BC315131F1E8B74FF23779975D5C04D1466EEDD44792D9` | unsigned local package |
+| `src-tauri/target/release/bundle/nsis/Vault Brain_0.2.0_x64-setup.exe` | 29,295,855 bytes | `A57AEAD1EC54D503B9359CE55788B5E3441F19FC4E721E8D60BF9790CA6D820D` | unsigned local package |
 
 ## Ownership and acceptance
 
@@ -37,9 +46,9 @@ counted as a pass.
 | Phase 7.7 unsupported keysets | 14.2 | TypeScript keyset tests and Rust fail-closed handling | Ordinary re-key still explicitly refuses epoch >=2 sync changes; Rust refuses an unfinished transitional keyset |
 | Phase 7.7 recovery current/retiring keys | 14.2 | `test/keyring-recovery.test.mjs`, including newly covered epoch-2 recovery verification | Exhaustive transition-by-transition coverage mapping remains to be signed off |
 | Phase 7.6 identity rotation and lock recovery | 14.2 | Existing separate rotation/backup tests plus live PID reuse and concurrent recovery regression tests | Same-host dead-process-only policy retained; no forced unlock acceptance |
-| Phase 13 duplicate sync | 14.3 | Deleted `src/sync/change-log.ts`; wire functions owned by `src/sync/protocol.ts` and exported through `src/sync.ts`; type-only engine dependency; clean-dist package regression | Final quality/package checks |
-| Phase 13 crypto domains | 14.3 | Central AAD values, explicit frozen JSON expectations, TS/Rust literal audit and negative omitted-domain test | Review any domain construction beyond the literal scanner's coverage; scanner is a guard, not a cryptographic audit |
-| Phase 13 encrypted inventory | 14.3 | Index, plugin-policy, workspace/views and sync artifact metadata; actual writers checked against re-key plan; unknown/omitted artifact negative tests | Complete temporary journal/staging classification and a real-writer fixture covering every catalogue family; current writer fixture alone does not prove exhaustive coverage |
+| Phase 13 duplicate sync | 14.3 | Deleted `src/sync/change-log.ts`; wire functions owned by `src/sync/protocol.ts` and exported through `src/sync.ts`; type-only engine dependency; clean-dist/package checks passed | Independent review remains a release-governance item |
+| Phase 13 crypto domains | 14.3 | Central AAD values, explicit frozen JSON expectations, TS/Rust literal audit and negative omitted-domain test | Scanner is a guard, not an independent cryptographic audit |
+| Phase 13 encrypted inventory | 14.3 | Persistent/transient/nested/external metadata, all observed writer families, interruption fixture, re-key classification and unknown/omitted artifact negatives | Independent review of the final pinned commit |
 | Phase 7.6 personal memory product integration | 15 | Modules/tests retained; separate Phase 15 design and implementation plan | Native broker, explicit pairing, unlocked session lifecycle, MCP/desktop controls, review/forget, restore/re-key compatibility |
 | Phase 12 release acceptance and security audit | 14.5 | Existing release contract tests and updated audit/release documentation | Independent auditor, pinned final commit, production key/backup/Actions setup, verified draft packages/SBOM/provenance, real signed vN→vN+1 on Windows x64/macOS ARM64/Linux x64 |
 
@@ -57,8 +66,9 @@ ES-module package marker. Generated binaries remain ignored by Git.
 
 ## Release boundary
 
+Phase 13 and the 14.3 conformance work are closed on the implementation commit.
 No production key or secret was generated/changed, no tag/push/publication was
-performed, and no real signed updater transition has been claimed. Passing local
-tests does not close Phase 14 or 1.0 readiness. Phase 13 remains open until its
-remaining conformance coverage is complete. Personal memory remains an open
-Phase 15 product task.
+performed, and no real signed updater transition has been claimed. General 1.0
+readiness still requires the independent security audit, protected production
+signing setup, and real signed vN→vN+1 acceptance on Windows x64, macOS ARM64
+and Linux x64. Personal memory remains an open Phase 15 product task.
