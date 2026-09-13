@@ -28,7 +28,7 @@ export function encodeMemoryRequest(method: string, params: Record<string, unkno
     }
   } catch (error) {
     if (error instanceof Error && error.message === "Invalid memory parameters.") throw error;
-    throw new Error("Invalid memory parameters.");
+    throw new Error("Invalid memory parameters.", { cause: error });
   }
   request += "\n";
   if (Buffer.byteLength(request) > MEMORY_IPC_LIMIT) throw new Error("Memory request exceeds its size limit.");

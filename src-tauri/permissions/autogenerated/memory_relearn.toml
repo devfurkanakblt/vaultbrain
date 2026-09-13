@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-memory-relearn"
+description = "Enables the memory_relearn command without any pre-configured scope."
+commands.allow = ["memory_relearn"]
+
+[[permission]]
+identifier = "deny-memory-relearn"
+description = "Denies the memory_relearn command without any pre-configured scope."
+commands.deny = ["memory_relearn"]

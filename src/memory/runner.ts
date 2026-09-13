@@ -135,14 +135,13 @@ function runBoundedChild(
   return new Promise((resolve, reject) => {
     if (signal?.aborted) { reject(new Error("Memory worker cancelled.")); return; }
     let settled = false;
-    let timer: NodeJS.Timeout | undefined;
     const chunks: Buffer[] = [];
     let size = 0;
     let child: ChildProcessWithoutNullStreams | undefined;
     const finish = (error?: Error, result?: ChildResult): void => {
       if (settled) return;
       settled = true;
-      if (timer) clearTimeout(timer);
+      clearTimeout(timer);
       signal?.removeEventListener("abort", abort);
       if (error) {
         try { child?.kill(); } catch { /* The process may already have exited. */ }
@@ -168,7 +167,7 @@ function runBoundedChild(
       return;
     }
     if (!child) { reject(new Error("Memory worker is unavailable.")); return; }
-    timer = setTimeout(() => finish(new Error("Memory worker timed out.")), timeoutMs);
+    const timer = setTimeout(() => finish(new Error("Memory worker timed out.")), timeoutMs);
     signal?.addEventListener("abort", abort, { once: true });
     const process = child;
     process.on("error", () => finish(new Error("Memory worker is unavailable.")));
@@ -239,8 +238,7 @@ let activeWorker: Promise<MemoryBatch> | undefined;
 export function runCodexSummarizer(input: unknown, options: CodexRunnerOptions = {}): Promise<MemoryBatch> {
   if (activeWorker) return Promise.reject(new Error("Memory worker is already running."));
   const current = runInternal(input, options);
-  let tracked: Promise<MemoryBatch>;
-  tracked = current.finally(() => {
+  const tracked = current.finally(() => {
     if (activeWorker === tracked) activeWorker = undefined;
   });
   activeWorker = tracked;

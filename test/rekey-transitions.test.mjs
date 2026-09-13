@@ -216,29 +216,32 @@ test("a journal write interruption leaves the original vault untouched", () => {
 
 test("a recovery-kit advance interrupted before keyring replacement is reported as a mismatched kit", () => {
   const { dir } = fixture("recovery-kit-boundary");
-  const kit = path.join(dir, "recovery-kit.json");
-  const recoveryCode = generateRecoveryCode();
-  createRecoveryKit(dir, CURRENT, kit, { recoveryCode });
-  const keyringPath = path.join(dir, "keyring.json");
-  const original = fs.renameSync;
-  fs.renameSync = (from, to, ...rest) => {
-    if (path.resolve(to) === path.resolve(keyringPath)) throw new Error("EIO: kit boundary interruption");
-    return original(from, to, ...rest);
-  };
+  const kitDir = fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-rekey-kit-"));
+  const kit = path.join(kitDir, "recovery-kit.json");
   try {
-    assert.throws(
-      () => rekeyVault(dir, CURRENT, NEXT, { recovery: { kitPath: kit, code: recoveryCode } }),
-      /recovery kit was already rewritten|kit boundary interruption/u,
-    );
-  } finally {
-    fs.renameSync = original;
-  }
-  try {
+    const recoveryCode = generateRecoveryCode();
+    createRecoveryKit(dir, CURRENT, kit, { recoveryCode });
+    const keyringPath = path.join(dir, "keyring.json");
+    const original = fs.renameSync;
+    fs.renameSync = (from, to, ...rest) => {
+      if (path.resolve(to) === path.resolve(keyringPath)) throw new Error("EIO: kit boundary interruption");
+      return original(from, to, ...rest);
+    };
+    try {
+      assert.throws(
+        () => rekeyVault(dir, CURRENT, NEXT, { recovery: { kitPath: kit, code: recoveryCode } }),
+        /recovery kit was already rewritten|kit boundary interruption/u,
+      );
+    } finally {
+      fs.renameSync = original;
+    }
+
     assert.equal(fs.existsSync(journalPath(dir)), true);
     assert.equal(readKeyring(dir)?.slots.length, 2);
     assert.equal(resumeRekey(dir), "rolled-back");
     assert.throws(() => openVaultKeys(dir, NEXT), /authenticate|passphrase|unable/iu);
   } finally {
     cleanup(dir);
+    fs.rmSync(kitDir, { recursive: true, force: true });
   }
 });

@@ -1906,7 +1906,8 @@ fn open_session(vault_path: &str, passphrase: &str) -> Result<VaultSession, Stri
     reject_symlink(&root_dir)?;
     fs::create_dir_all(&root_dir).map_err(|error| error.to_string())?;
 
-    let (key, kv_key, attachment_id_key, audit_key) = open_vault_keys(&vault_dir, &root_dir, passphrase)?;
+    let (key, kv_key, attachment_id_key, audit_key) =
+        open_vault_keys(&vault_dir, &root_dir, passphrase)?;
 
     let index_path = root_dir.join("index.enc");
     let index_existed = index_path.exists();
@@ -3586,82 +3587,156 @@ fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command(async)]
 fn memory_status(state: State<'_, AppState>) -> Result<memory::MemoryStatusDto, String> {
-    let guard = state.session.lock().map_err(|_| "vault session lock poisoned")?;
+    let guard = state
+        .session
+        .lock()
+        .map_err(|_| "vault session lock poisoned")?;
     let session = guard.as_ref().ok_or("vault is locked")?;
     memory::get_status(session, state.memory_generation.load(Ordering::Acquire))
 }
 
 #[tauri::command(async)]
 fn memory_pair_begin(state: State<'_, AppState>) -> Result<memory::MemoryPairingDto, String> {
-    let mut guard = state.session.lock().map_err(|_| "vault session lock poisoned")?;
+    let mut guard = state
+        .session
+        .lock()
+        .map_err(|_| "vault session lock poisoned")?;
     with_vault_write(guard.as_mut().ok_or("vault is locked")?, memory::pair_begin)
 }
 
 #[tauri::command(async)]
-fn memory_pair_complete(pairing_id: String, state: State<'_, AppState>) -> Result<memory::MemoryStatusDto, String> {
+fn memory_pair_complete(
+    pairing_id: String,
+    state: State<'_, AppState>,
+) -> Result<memory::MemoryStatusDto, String> {
     let generation = state.memory_generation.load(Ordering::Acquire);
-    let mut guard = state.session.lock().map_err(|_| "vault session lock poisoned")?;
-    with_vault_write(guard.as_mut().ok_or("vault is locked")?, |session| memory::pair_complete(session, &pairing_id, generation))
+    let mut guard = state
+        .session
+        .lock()
+        .map_err(|_| "vault session lock poisoned")?;
+    with_vault_write(guard.as_mut().ok_or("vault is locked")?, |session| {
+        memory::pair_complete(session, &pairing_id, generation)
+    })
 }
 
 #[tauri::command(async)]
 fn memory_pair_cancel(pairing_id: String, state: State<'_, AppState>) -> Result<(), String> {
-    let mut guard = state.session.lock().map_err(|_| "vault session lock poisoned")?;
-    with_vault_write(guard.as_mut().ok_or("vault is locked")?, |session| memory::pair_cancel(session, &pairing_id))
+    let mut guard = state
+        .session
+        .lock()
+        .map_err(|_| "vault session lock poisoned")?;
+    with_vault_write(guard.as_mut().ok_or("vault is locked")?, |session| {
+        memory::pair_cancel(session, &pairing_id)
+    })
 }
 
 #[tauri::command(async)]
 fn memory_disconnect(state: State<'_, AppState>) -> Result<(), String> {
-    let mut guard = state.session.lock().map_err(|_| "vault session lock poisoned")?;
+    let mut guard = state
+        .session
+        .lock()
+        .map_err(|_| "vault session lock poisoned")?;
     with_vault_write(guard.as_mut().ok_or("vault is locked")?, memory::disconnect)
 }
 
 #[tauri::command(async)]
-fn memory_list_review(state: State<'_, AppState>) -> Result<Vec<memory::MemoryCandidateDto>, String> {
-    let guard = state.session.lock().map_err(|_| "vault session lock poisoned")?;
+fn memory_list_review(
+    state: State<'_, AppState>,
+) -> Result<Vec<memory::MemoryCandidateDto>, String> {
+    let guard = state
+        .session
+        .lock()
+        .map_err(|_| "vault session lock poisoned")?;
     memory::list_review(guard.as_ref().ok_or("vault is locked")?)
 }
 
 #[tauri::command(async)]
 fn memory_approve(id: String, state: State<'_, AppState>) -> Result<memory::MemoryNoteDto, String> {
-    let mut guard = state.session.lock().map_err(|_| "vault session lock poisoned")?;
-    with_vault_write(guard.as_mut().ok_or("vault is locked")?, |session| memory::approve(session, &id))
+    let mut guard = state
+        .session
+        .lock()
+        .map_err(|_| "vault session lock poisoned")?;
+    with_vault_write(guard.as_mut().ok_or("vault is locked")?, |session| {
+        memory::approve(session, &id)
+    })
 }
 
 #[tauri::command(async)]
 fn memory_reject(id: String, state: State<'_, AppState>) -> Result<(), String> {
-    let mut guard = state.session.lock().map_err(|_| "vault session lock poisoned")?;
-    with_vault_write(guard.as_mut().ok_or("vault is locked")?, |session| memory::reject(session, &id))
+    let mut guard = state
+        .session
+        .lock()
+        .map_err(|_| "vault session lock poisoned")?;
+    with_vault_write(guard.as_mut().ok_or("vault is locked")?, |session| {
+        memory::reject(session, &id)
+    })
 }
 
 #[tauri::command(async)]
-fn memory_set_pinned(id: String, pinned: bool, state: State<'_, AppState>) -> Result<memory::MemoryNoteDto, String> {
-    let mut guard = state.session.lock().map_err(|_| "vault session lock poisoned")?;
-    with_vault_write(guard.as_mut().ok_or("vault is locked")?, |session| memory::set_pinned(session, &id, pinned))
+fn memory_set_pinned(
+    id: String,
+    pinned: bool,
+    state: State<'_, AppState>,
+) -> Result<memory::MemoryNoteDto, String> {
+    let mut guard = state
+        .session
+        .lock()
+        .map_err(|_| "vault session lock poisoned")?;
+    with_vault_write(guard.as_mut().ok_or("vault is locked")?, |session| {
+        memory::set_pinned(session, &id, pinned)
+    })
 }
 
 #[tauri::command(async)]
 fn memory_forget(id: String, state: State<'_, AppState>) -> Result<(), String> {
-    let mut guard = state.session.lock().map_err(|_| "vault session lock poisoned")?;
-    with_vault_write(guard.as_mut().ok_or("vault is locked")?, |session| memory::forget(session, &id))
+    let mut guard = state
+        .session
+        .lock()
+        .map_err(|_| "vault session lock poisoned")?;
+    with_vault_write(guard.as_mut().ok_or("vault is locked")?, |session| {
+        memory::forget(session, &id)
+    })
 }
 
 #[tauri::command(async)]
 fn memory_relearn(id: String, state: State<'_, AppState>) -> Result<(), String> {
-    let mut guard = state.session.lock().map_err(|_| "vault session lock poisoned")?;
-    with_vault_write(guard.as_mut().ok_or("vault is locked")?, |session| memory::relearn(session, &id))
+    let mut guard = state
+        .session
+        .lock()
+        .map_err(|_| "vault session lock poisoned")?;
+    with_vault_write(guard.as_mut().ok_or("vault is locked")?, |session| {
+        memory::relearn(session, &id)
+    })
 }
 
 #[tauri::command(async)]
-fn memory_set_paused(paused: bool, state: State<'_, AppState>) -> Result<memory::MemoryStatusDto, String> {
-    let generation=state.memory_generation.load(Ordering::Acquire); let mut guard=state.session.lock().map_err(|_| "vault session lock poisoned")?;
-    with_vault_write(guard.as_mut().ok_or("vault is locked")?, |session| memory::set_paused(session, paused, generation))
+fn memory_set_paused(
+    paused: bool,
+    state: State<'_, AppState>,
+) -> Result<memory::MemoryStatusDto, String> {
+    let generation = state.memory_generation.load(Ordering::Acquire);
+    let mut guard = state
+        .session
+        .lock()
+        .map_err(|_| "vault session lock poisoned")?;
+    with_vault_write(guard.as_mut().ok_or("vault is locked")?, |session| {
+        memory::set_paused(session, paused, generation)
+    })
 }
 
 #[tauri::command(async)]
-fn memory_exclude_scope(scope: memory::MemoryScopeDto, state: State<'_, AppState>) -> Result<memory::MemoryStatusDto, String> {
-    let generation=state.memory_generation.load(Ordering::Acquire); let mut guard=state.session.lock().map_err(|_| "vault session lock poisoned")?;
-    with_vault_write(guard.as_mut().ok_or("vault is locked")?, |session| memory::exclude_scope(session, &scope.kind, &scope.id, generation))
+fn memory_exclude_scope(
+    scope: memory::MemoryScopeDto,
+    state: State<'_, AppState>,
+) -> Result<memory::MemoryStatusDto, String> {
+    let generation = state.memory_generation.load(Ordering::Acquire);
+    let mut guard = state
+        .session
+        .lock()
+        .map_err(|_| "vault session lock poisoned")?;
+    with_vault_write(guard.as_mut().ok_or("vault is locked")?, |session| {
+        memory::exclude_scope(session, &scope.kind, &scope.id, generation)
+    })
 }
 
 #[tauri::command(async)]
@@ -6125,7 +6200,10 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::default())
         .manage(updater::UpdaterState::default())
-        .setup(|app| { memory::start_broker(app.handle().clone()); Ok(()) })
+        .setup(|app| {
+            memory::start_broker(app.handle().clone());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             pick_vault_directory,
             unlock_vault,
