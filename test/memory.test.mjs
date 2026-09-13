@@ -42,6 +42,10 @@ test("hook payload and dedupe keys contain references only", () => {
   assert.equal("text" in payload, false);
   assert.equal(dedupeKey(payload, "v1"), dedupeKey({ ...payload, event: "SessionEnd" }, "v1"));
   assert.throws(() => parseHookPayload({ ...payload, command: "powershell secret" }), /command/i);
+  assert.throws(() => parseHookPayload({ ...payload, transcript: "raw transcript" }), /content|transcript/i);
+  assert.throws(() => parseHookPayload({ ...payload, extra: "unexpected" }), /field|payload|unexpected/i);
+  assert.throws(() => parseHookPayload({ ...payload, transcriptPath: "relative\\rollout.jsonl" }), /absolute|path/i);
+  assert.throws(() => parseHookPayload({ ...payload, transcriptPath: "C:\\vault\\..\\outside.jsonl" }), /path|reference/i);
 });
 
 test("batch validation and bootstrap are bounded and do not persist plaintext", () => {
@@ -72,7 +76,7 @@ test("sensitive facts require review and malformed revision or sensitivity never
 });
 
 test("source dedupe is independent of summarizer version", () => {
-  const hook = { version: 1, event: "Stop", sessionId: "s", turnId: "t", transcriptPath: "synthetic.jsonl", createdAt: "2026-09-05T00:00:00Z" };
+  const hook = { version: 1, event: "Stop", sessionId: "s", turnId: "t", transcriptPath: "C:\\synthetic\\rollout.jsonl", createdAt: "2026-09-05T00:00:00Z" };
   assert.equal(dedupeKey(hook, "v1"), dedupeKey(hook, "v2"));
 });
 

@@ -29,7 +29,7 @@ test("MCP output remains bounded after JSON escaping", () => {
 });
 
 test("hook records require an offset-bearing ISO timestamp", () => {
-  const base = { version: 1, event: "Stop", sessionId: "session", turnId: "turn", transcriptPath: "session.jsonl" };
+  const base = { version: 1, event: "Stop", sessionId: "session", turnId: "turn", transcriptPath: "C:\\session.jsonl" };
   assert.throws(() => parseHookPayload({ ...base, createdAt: "03/04/2026" }), /ISO timestamp/iu);
   assert.equal(parseHookPayload({ ...base, createdAt: "2026-03-04T10:11:12Z" }).createdAt, "2026-03-04T10:11:12.000Z");
 });

@@ -50,8 +50,13 @@ export function registerMemoryCommands(program: Command): void {
           chunks.push(buffer);
         }
         const payload = parseHookPayload(JSON.parse(Buffer.concat(chunks).toString("utf8")));
-        await callMemoryNative(options.nativeExecutable, "memory_enqueue", { ...payload });
+        const result = await callMemoryNative(options.nativeExecutable, "memory_enqueue", { ...payload }) as { accepted?: unknown };
+        // A hook caller may advance its own cursor only after native storage
+        // confirms the encrypted reference was accepted. A stale
+        // pre-enrollment pointer is deliberately not acknowledged.
+        if (result.accepted !== true) throw new Error("Memory source was not durably accepted.");
       } catch {
+        process.exitCode = 1;
         fs.writeSync(2, "Memory capture was not queued; inspect desktop status.\n");
       } finally { for (const chunk of chunks) chunk.fill(0); }
     });

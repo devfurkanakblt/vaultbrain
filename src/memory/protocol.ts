@@ -26,6 +26,20 @@ export function boundedString(value: unknown, name: string, maxBytes = MAX_TEXT_
 export function containsSecret(value: string): boolean { return SECRET_PATTERNS.some((pattern) => pattern.test(value)); }
 
 function id(value: unknown, name: string): string { return boundedString(value, name, 240).replace(/[\r\n]/gu, ""); }
+function sourcePath(value: unknown): string {
+  const text = boundedString(value, "transcriptPath", 4 * 1024);
+  // A hook carries only a locator.  Requiring a rooted path prevents a client
+  // from changing the meaning of a queued reference when its working
+  // directory changes.  Both Windows drive/UNC paths and POSIX paths are
+  // accepted because the hook can be produced on another supported host.
+  const normalized = text.replace(/[\\]+/gu, "/");
+  const rooted = normalized.startsWith("/") || /^[A-Za-z]:\//u.test(normalized);
+  const traversesParent = normalized.split("/").some((part) => part === "..");
+  if (!rooted || traversesParent || /[\u0000\r\n]/u.test(text)) {
+    throw new Error("transcriptPath must be an absolute, non-traversing path reference.");
+  }
+  return text;
+}
 function iso(value: unknown, name: string): string {
   const text = boundedString(value, name, 80);
   // Date.parse accepts locale-dependent forms such as "3/4/2026". Hook
@@ -38,11 +52,18 @@ function iso(value: unknown, name: string): string {
 
 export function parseHookPayload(input: unknown): HookPayload {
   if (!input || typeof input !== "object") throw new Error("Invalid memory hook payload.");
-  if ("command" in input || "text" in input || "title" in input) throw new Error("Memory hook payload cannot contain commands or content.");
   const value = input as Record<string, unknown>;
+  const allowed = new Set(["version", "event", "sessionId", "turnId", "transcriptPath", "createdAt"]);
+  const keys = Object.keys(value);
+  if (keys.some((key) => !allowed.has(key))) {
+    if (keys.some((key) => ["command", "text", "title", "body", "content", "transcript"].includes(key))) {
+      throw new Error("Memory hook payload cannot contain commands or content.");
+    }
+    throw new Error("Memory hook payload contains unsupported fields.");
+  }
   if (value.version !== MEMORY_PROTOCOL_VERSION) throw new Error("Unsupported memory hook payload version.");
   if (!["Stop", "PreCompact", "SessionEnd"].includes(String(value.event))) throw new Error("Unsupported memory hook event.");
-  return { version: 1, event: value.event as HookPayload["event"], sessionId: id(value.sessionId, "sessionId"), turnId: id(value.turnId, "turnId"), transcriptPath: id(value.transcriptPath, "transcriptPath"), createdAt: iso(value.createdAt, "createdAt") };
+  return { version: 1, event: value.event as HookPayload["event"], sessionId: id(value.sessionId, "sessionId"), turnId: id(value.turnId, "turnId"), transcriptPath: sourcePath(value.transcriptPath), createdAt: iso(value.createdAt, "createdAt") };
 }
 
 export function dedupeKey(payload: HookPayload, _summarizerVersion: string): string {

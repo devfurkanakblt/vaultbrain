@@ -14,6 +14,10 @@ use std::time::{Duration, Instant};
 
 const MAX_CANDIDATES: usize = 200;
 const MAX_QUERY: usize = 512;
+const MAX_QUEUE: usize = 500;
+const MAX_SOURCE_ID: usize = 240;
+const MAX_SOURCE_PATH: usize = 4 * 1024;
+const QUEUE_TTL_DAYS: i64 = 7;
 const MAX_CLIENT_BYTES: usize = 64 * 1024;
 #[cfg(windows)]
 const MAX_PIPE_WIRE_BYTES: usize = 128 * 1024;
@@ -79,8 +83,34 @@ pub(crate) struct MemoryNoteDto {
 pub(crate) struct MemoryScopeDto { pub(crate) kind: String, pub(crate) id: String }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MemoryHookPayload {
+    version: u8,
+    event: String,
+    session_id: String,
+    turn_id: String,
+    transcript_path: String,
+    created_at: String,
+}
+
+fn pending_queue_state() -> String { "pending".into() }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct QueuePointer { id: String, source_key: String, received_at: String, expires_at: String }
+struct QueuePointer {
+    id: String,
+    source_key: String,
+    #[serde(default)] event: String,
+    #[serde(default)] session_id: String,
+    #[serde(default)] turn_id: String,
+    #[serde(default)] transcript_path: String,
+    #[serde(default)] created_at: String,
+    received_at: String,
+    expires_at: String,
+    #[serde(default = "pending_queue_state")] state: String,
+    #[serde(default)] attempts: u32,
+    #[serde(default)] retry_at: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -135,9 +165,160 @@ fn save(session: &mut VaultSession, control: &MemoryControl) -> Result<(), Strin
     store_note(session,note,previous).map(|_|())
 }
 
+fn parse_timestamp(value: &str, name: &str) -> Result<DateTime<chrono::FixedOffset>, String> {
+    if !bounded(value, 80) {
+        return Err(format!("invalid {name}"));
+    }
+    DateTime::parse_from_rfc3339(value).map_err(|_| format!("invalid {name}"))
+}
+
+fn source_path_is_safe(value: &str) -> bool {
+    if !bounded(value, MAX_SOURCE_PATH)
+        || value.chars().any(|character| matches!(character, '\0' | '\r' | '\n' | '\t'))
+    {
+        return false;
+    }
+    let normalized = value.replace('\\', "/");
+    let bytes = normalized.as_bytes();
+    let rooted = normalized.starts_with('/')
+        || (bytes.len() >= 3 && bytes[1] == b':' && bytes[2] == b'/');
+    rooted && !normalized.split('/').any(|part| part == "..")
+}
+
+fn bounded_reference(value: &str, max: usize) -> bool {
+    bounded(value, max) && !value.chars().any(|character| character.is_control())
+}
+
+fn validate_hook_payload(payload: &MemoryHookPayload) -> Result<DateTime<chrono::FixedOffset>, String> {
+    if payload.version != 1
+        || !matches!(payload.event.as_str(), "Stop" | "PreCompact" | "SessionEnd")
+        || !bounded_reference(&payload.session_id, MAX_SOURCE_ID)
+        || !bounded_reference(&payload.turn_id, MAX_SOURCE_ID)
+        || !source_path_is_safe(&payload.transcript_path)
+    {
+        return Err("invalid memory hook payload".into());
+    }
+    let created_at = parse_timestamp(&payload.created_at, "createdAt")?;
+    // A hook is a pointer only. Validate every existing path component, but
+    // allow a transcript that is still being finalized by the client.
+    reject_symlink(Path::new(&payload.transcript_path))
+        .map_err(|_| "invalid memory source reference".to_string())?;
+    Ok(created_at)
+}
+
+fn parse_hook_payload(value: &Value) -> Result<MemoryHookPayload, String> {
+    let payload: MemoryHookPayload = serde_json::from_value(value.clone())
+        .map_err(|_| "invalid memory hook payload".to_string())?;
+    validate_hook_payload(&payload)?;
+    Ok(payload)
+}
+
+fn source_key(payload: &MemoryHookPayload) -> String {
+    Sha256::digest(format!("{}\0{}", payload.session_id, payload.turn_id).as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn enqueue_pointer(
+    control: &mut MemoryControl,
+    payload: MemoryHookPayload,
+    received_at: &str,
+) -> Result<Value, String> {
+    let created_at = validate_hook_payload(&payload)?;
+    let received = parse_timestamp(received_at, "receivedAt")?;
+    let enrolled_at = control
+        .enrolled_at
+        .as_deref()
+        .ok_or_else(|| "memory is not enrolled".to_string())?;
+    let enrolled = parse_timestamp(enrolled_at, "enrolledAt")?;
+    if created_at <= enrolled {
+        return Ok(serde_json::json!({
+            "accepted": false,
+            "duplicate": false,
+            "reason": "before_enrollment"
+        }));
+    }
+
+    // Expired references are no longer deliverable. Removing them here keeps
+    // the durable queue bounded while retaining the aggregate count for UI
+    // status and audit evidence.
+    let mut retained = Vec::with_capacity(control.queue.len());
+    let mut expired = 0usize;
+    for pointer in control.queue.drain(..) {
+        let keep = parse_timestamp(&pointer.expires_at, "expiresAt")
+            .map(|expires| expires > received)
+            .unwrap_or(false);
+        if keep {
+            retained.push(pointer);
+        } else {
+            expired += 1;
+        }
+    }
+    control.queue = retained;
+    control.expired = control.expired.saturating_add(expired);
+
+    let key = source_key(&payload);
+    if control.queue.iter().any(|pointer| pointer.source_key == key) {
+        return Ok(serde_json::json!({
+            "accepted": true,
+            "duplicate": true,
+            "id": key
+        }));
+    }
+    if control.queue.len() >= MAX_QUEUE {
+        return Err("memory queue is full".into());
+    }
+    let expires_at = (received + chrono::Duration::days(QUEUE_TTL_DAYS))
+        .to_rfc3339_opts(SecondsFormat::Millis, true);
+    control.queue.push(QueuePointer {
+        id: key.clone(),
+        source_key: key.clone(),
+        event: payload.event,
+        session_id: payload.session_id,
+        turn_id: payload.turn_id,
+        transcript_path: payload.transcript_path,
+        created_at: created_at.to_rfc3339_opts(SecondsFormat::Millis, true),
+        received_at: received.to_rfc3339_opts(SecondsFormat::Millis, true),
+        expires_at: expires_at.clone(),
+        state: pending_queue_state(),
+        attempts: 0,
+        retry_at: None,
+    });
+    control.last_capture_at = Some(received.to_rfc3339_opts(SecondsFormat::Millis, true));
+    Ok(serde_json::json!({
+        "accepted": true,
+        "duplicate": false,
+        "id": key,
+        "expiresAt": expires_at
+    }))
+}
+
+fn enqueue_source(session: &mut VaultSession, params: Option<&Value>) -> Result<Value, String> {
+    let mut control = load(session)?;
+    if !control.paired || control.paused {
+        return Err("memory capture is unavailable".into());
+    }
+    let value = params.ok_or_else(|| "invalid memory hook payload".to_string())?;
+    let payload = parse_hook_payload(value)?;
+    let result = enqueue_pointer(&mut control, payload, &now())?;
+    // A stale pre-enrollment hook has no state transition. Every other valid
+    // request is persisted before its acceptance response reaches the helper;
+    // this is the durable acceptance point for the capture cursor.
+    if result.get("reason").and_then(Value::as_str) != Some("before_enrollment") {
+        save(session, &control)?;
+    }
+    Ok(result)
+}
+
 fn status(control: &MemoryControl, generation: u64) -> MemoryStatusDto {
     let state = if !control.paired { "disabled" } else if control.paused { "paused" } else { "ready" };
-    MemoryStatusDto { state: state.into(), enrolled_at: control.enrolled_at.clone(), paired: control.paired, paused: control.paused, queued: control.queue.len(), review: control.review.len(), failed: control.failed, expired: control.expired, last_capture_at: control.last_capture_at.clone(), model: control.model.clone(), compatibility_reasons: vec![], generation }
+    let current = Utc::now();
+    let queued = control.queue.iter().filter(|pointer| {
+        (pointer.state == "pending" || pointer.state == "processing")
+            && parse_timestamp(&pointer.expires_at, "expiresAt").is_ok_and(|expires| expires.with_timezone(&Utc) > current)
+    }).count();
+    MemoryStatusDto { state: state.into(), enrolled_at: control.enrolled_at.clone(), paired: control.paired, paused: control.paused, queued, review: control.review.len(), failed: control.failed, expired: control.expired, last_capture_at: control.last_capture_at.clone(), model: control.model.clone(), compatibility_reasons: vec![], generation }
 }
 
 fn bounded(value: &str, max: usize) -> bool { !value.trim().is_empty() && value.len() <= max && !value.chars().any(|c| c.is_control() && c != '\n' && c != '\t') }
@@ -489,12 +670,12 @@ fn broker_response(app: &AppHandle, bytes: &[u8]) -> Value {
             .map(|_| serde_json::json!({"forgotten": true})),
         "memory_disconnect" => disconnect(session)
             .map(|_| serde_json::json!({"disconnected": true})),
-        "memory_enqueue" => Err("worker unavailable".into()),
+        "memory_enqueue" => with_vault_write(session, |session| enqueue_source(session, request.get("params"))),
         _ => Err("unsupported method".into()),
     };
     match result {
         Ok(value) => serde_json::json!({"version": 1, "ok": true, "result": value}),
-        Err(_) if method == "memory_enqueue" => unavailable("worker_unavailable"),
+        Err(_) if method == "memory_enqueue" => unavailable("capture_unavailable"),
         Err(_) => unavailable("unavailable"),
     }
 }
@@ -683,6 +864,61 @@ mod tests {
         assert_eq!(read_client_input(Cursor::new(valid)).unwrap(), "{\"version\":1,\"method\":\"memory_status\",\"params\":{}}");
         assert!(read_client_input(Cursor::new(vec![b'x'; MAX_CLIENT_BYTES + 1])).is_err());
         assert!(read_client_input(Cursor::new(b"{}\n{}\n")).is_err());
+    }
+
+    #[test]
+    fn hook_queue_acceptance_is_post_enrollment_and_idempotent() {
+        let mut control = MemoryControl::default();
+        control.paired = true;
+        control.enrolled_at = Some("2026-09-04T00:00:00.000Z".into());
+        let value = serde_json::json!({
+            "version": 1,
+            "event": "Stop",
+            "sessionId": "session-1",
+            "turnId": "turn-1",
+            "transcriptPath": "C:\\synthetic\\rollout.jsonl",
+            "createdAt": "2026-09-05T00:00:00.000Z"
+        });
+        let payload = parse_hook_payload(&value).unwrap();
+        let first = enqueue_pointer(&mut control, payload.clone(), "2026-09-05T00:00:01.000Z").unwrap();
+        assert_eq!(first["accepted"], true);
+        assert_eq!(first["duplicate"], false);
+        assert_eq!(control.queue.len(), 1);
+        assert_eq!(control.queue[0].state, "pending");
+        assert_eq!(control.queue[0].transcript_path, "C:\\synthetic\\rollout.jsonl");
+
+        let duplicate = enqueue_pointer(&mut control, payload, "2026-09-05T00:00:02.000Z").unwrap();
+        assert_eq!(duplicate["accepted"], true);
+        assert_eq!(duplicate["duplicate"], true);
+        assert_eq!(control.queue.len(), 1);
+    }
+
+    #[test]
+    fn hook_queue_rejects_content_traversal_and_pre_enrollment_records() {
+        let mut control = MemoryControl::default();
+        control.paired = true;
+        control.enrolled_at = Some("2026-09-05T00:00:00.000Z".into());
+        let before = serde_json::json!({
+            "version": 1,
+            "event": "Stop",
+            "sessionId": "session-1",
+            "turnId": "turn-before",
+            "transcriptPath": "C:\\synthetic\\rollout.jsonl",
+            "createdAt": "2026-09-05T00:00:00.000Z"
+        });
+        let payload = parse_hook_payload(&before).unwrap();
+        let skipped = enqueue_pointer(&mut control, payload, "2026-09-05T00:00:01.000Z").unwrap();
+        assert_eq!(skipped["accepted"], false);
+        assert_eq!(skipped["reason"], "before_enrollment");
+        assert!(control.queue.is_empty());
+
+        let mut traversal = before.clone();
+        traversal["turnId"] = serde_json::json!("turn-traversal");
+        traversal["transcriptPath"] = serde_json::json!("C:\\vault\\..\\outside.jsonl");
+        assert!(parse_hook_payload(&traversal).is_err());
+        traversal["transcriptPath"] = serde_json::json!("C:\\synthetic\\rollout.jsonl");
+        traversal["text"] = serde_json::json!("raw transcript");
+        assert!(parse_hook_payload(&traversal).is_err());
     }
 
     #[cfg(windows)]

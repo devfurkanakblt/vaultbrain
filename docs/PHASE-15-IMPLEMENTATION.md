@@ -1,6 +1,6 @@
 # Phase 15 implementation and acceptance ledger
 
-Base: `f67ab0948204283309ee8c0ef779aefcfe3bdf1a`, branch
+Base: `9ed71bf04ee1f2224df96c2a7102779f30724cbb`, branch
 `phase-14-closure`. Personal memory belongs to a later release, not the initial
 1.0 acceptance. The user executes tests; this change has not been test-verified.
 
@@ -24,6 +24,16 @@ Base: `f67ab0948204283309ee8c0ef779aefcfe3bdf1a`, branch
   native client accepts one UTF-8 JSON request up to 64 KiB and rejects extra
   lines or oversized input. These changes are implementation evidence only;
   the Windows adversarial acceptance below remains **NOT RUN**.
+- Hook capture now accepts only a bounded, absolute transcript reference after
+  pairing. The native broker validates the event, enrollment cutoff and
+  symlink-free path, then stores the reference (never transcript content) in
+  the encrypted control record before returning acceptance. Duplicate
+  session/turn deliveries are idempotent, accepted references expire after
+  seven days, and paused or unpaired memory refuses capture. The durable queue
+  is intentionally only a reference backlog; worker processing remains
+  disabled until the compatibility obligation below is accepted. The hook
+  exits unsuccessfully unless native returns `accepted: true`, so its source
+  cursor cannot advance before encrypted persistence.
 
 ## Worker compatibility: open implementation obligation
 
@@ -71,7 +81,8 @@ Inspect package contents as well as the command exit status.
 | Independent security audit and finding closure | NOT RUN; external reviewer required |
 | Production key, authorized draft and real updater on three platforms | NOT RUN; signing authorization and macOS/Linux hosts required |
 | Native Windows IPC/DPAPI adversarial and lifecycle checks | NOT RUN |
-| Real capture/worker, durable backlog and restore/re-key acceptance | NOT COMPLETE |
+| Real worker processing and restore/re-key acceptance | NOT COMPLETE |
+| Paired reference capture and encrypted seven-day backlog | IMPLEMENTED; user-run native acceptance pending |
 
 Review the acceptance runbooks for sync, re-key and release separately. Prior
 Phase 14 results apply to the prior implementation commit; they do not verify
