@@ -5,10 +5,10 @@ to review, and states plainly what this project already knows is weak,
 unfinished, or out of scope. It is written for the auditor, not as marketing.
 
 Closure status: this is a prepared scope package; no independent audit has been
-completed. Phase 14 reconciles implemented sync and re-key surfaces and maps the
-still-open Phase 13 consolidation work to Phase 14.3. Personal memory is
-experimental and disabled by default, with productization planned separately in
-Phase 15.
+completed. The Phase 13 implementation items are present on the closure branch;
+the remaining artifact and transition evidence is an acceptance obligation owned
+by Phase 14.3. Personal memory is experimental and disabled by default, with
+productization planned separately in Phase 15.
 
 ## 1. Purpose
 
@@ -390,7 +390,39 @@ findings once fixes have shipped.
   release-environment acceptance gates. This scope reviews the helper resource
   boundary and IPC contract present in the source tree.
 
-## 11. Reproducing the build and running the evidence
+## 11. Audit handoff and evidence
+
+The handoff candidate is commit `f67ab0948204283309ee8c0ef779aefcfe3bdf1a`.
+It is a candidate for review, not the final audited or release-pinned commit.
+The maintainer must provide the auditor the exact final commit SHA if the branch
+changes before the engagement starts, together with the repository, fixtures,
+and generated build metadata for that SHA.
+
+### Finding record template
+
+Use one record per finding. A finding is not closed by a code change until the
+reviewer can reproduce the original behavior and verify the fix against the
+same pinned commit or a clearly identified successor.
+
+```markdown
+## FIND-<id> — <short title>
+- Severity: <critical|high|medium|low|informational>
+- Status: <open|fixed-pending-review|accepted-risk|closed>
+- Affected commit: <sha>
+- Affected files and lines: <paths and lines>
+- Security property / question: <what can fail>
+- Preconditions: <vault, platform, identity, or attacker setup>
+- Reproduction: <exact commands or UI steps>
+- Observed result: <what happened>
+- Expected result: <what should happen>
+- Impact: <confidentiality, integrity, availability, or release impact>
+- Fix commit: <sha or none>
+- Verification: <exact rerun and retained artifact>
+- Residual risk / rationale: <if accepted>
+- Reviewer and date: <name, date>
+```
+
+### Reproducing the build and running the evidence
 
 ### Evidence record template
 
@@ -399,6 +431,10 @@ host/OS, tool versions, start and finish time, result (`PASS`, `FAIL`, or
 `NOT RUN`), retained artifact path, and reviewer. `NOT RUN` is an evidence gap, not
 a pass. Synthetic CI package-transition evidence does not close the real native
 installation gate, and this document never marks an independent audit complete.
+Use [the two-desktop runbook](SYNC-DESKTOP-ACCEPTANCE.md),
+[the re-key matrix](REKEY-ACCEPTANCE.md), and
+[the production release checklist](RELEASE-ACCEPTANCE.md) for manual acceptance
+records.
 
 ```bash
 npm ci

@@ -27,6 +27,7 @@ import {
   Paperclip,
   Puzzle,
   KeyRound,
+  Brain,
   RefreshCw,
   Search,
   ShieldCheck,
@@ -54,6 +55,7 @@ import { PropertyTable } from "./PropertyTable";
 import { QuickSwitcher } from "./QuickSwitcher";
 import { clearOwnedClipboard, copyWithExpiry } from "./secure-clipboard";
 import { KeyringStatus } from "./KeyringStatus";
+import { MemoryPanel } from "./MemoryPanel";
 import { SyncStatus } from "./SyncStatus";
 import { ThemeEditor } from "./ThemeEditor";
 import { UpdatePanel } from "./UpdatePanel";
@@ -61,13 +63,13 @@ import { prepareUpdaterInstall } from "./update-install";
 import { WorkspacesDialog } from "./Workspaces";
 import { applyTheme, clearTheme, DEFAULT_THEME, loadTheme, saveTheme, type ThemeSettings } from "./theme";
 import { useVirtualWindow } from "./virtual";
-import type { AttachmentInfo, Backlink, Bookmark, CanvasSummary, DeletedNote, KnowledgeGraph as GraphData, NoteDocument, NoteSummary, PluginSecurityPolicy, PluginSummary, PropertyRow, SavedView, SaveState, SearchHit, KeyringStatusData, SyncStatusData, UnlinkedMention, NoticeTone, Notify, VaultInfo, WorkspaceLayout, WorkspaceState } from "./types";
+import type { AttachmentInfo, Backlink, Bookmark, CanvasSummary, DeletedNote, KnowledgeGraph as GraphData, MemoryReviewCandidate, MemoryScope, MemoryStatusData, NoteDocument, NoteSummary, PluginSecurityPolicy, PluginSummary, PropertyRow, SavedView, SaveState, SearchHit, KeyringStatusData, SyncStatusData, UnlinkedMention, NoticeTone, Notify, VaultInfo, WorkspaceLayout, WorkspaceState } from "./types";
 
 const MarkdownEditor = lazy(() => import("./Editor").then((module) => ({ default: module.MarkdownEditor })));
 const MarkdownPreview = lazy(() => import("./Preview"));
 
 type ViewMode = "write" | "read";
-type WorkspaceView = "notes" | "graph" | "properties" | "canvas" | "files" | "plugins" | "sync" | "keys" | "updates";
+type WorkspaceView = "notes" | "graph" | "properties" | "canvas" | "files" | "plugins" | "memory" | "sync" | "keys" | "updates";
 type LockReason = "manual" | "inactivity";
 /**
  * A message and how it should read. Success and failure shared one green tick
@@ -316,6 +318,8 @@ export function App() {
   const documentBody = useRef<HTMLDivElement>(null);
   const [keyringStatus, setKeyringStatus] = useState<KeyringStatusData | null>(null);
   const [syncStatus, setSyncStatus] = useState<SyncStatusData | null>(null);
+  const [memoryStatus, setMemoryStatus] = useState<MemoryStatusData | null>(null);
+  const [memoryReview, setMemoryReview] = useState<MemoryReviewCandidate[]>([]);
   const [syncRegistryVerified, setSyncRegistryVerified] = useState<boolean | null>(null);
   const [vaultMenuOpen, setVaultMenuOpen] = useState(false);
   const [notice, setNotice] = useState<Notice>();
@@ -404,6 +408,12 @@ export function App() {
     setAttachments(files);
   }, []);
 
+  const refreshMemory = useCallback(async () => {
+    const [status, review] = await Promise.all([vaultBridge.memoryStatus(), vaultBridge.memoryReview()]);
+    setMemoryStatus(status);
+    setMemoryReview(review);
+  }, []);
+
   const rememberTab = useCallback((note: NoteDocument) => {
     setOpenTabs((current) => current.some((tab) => tab.id === note.id)
       ? current.map((tab) => tab.id === note.id ? summarize(note) : tab)
@@ -471,6 +481,13 @@ export function App() {
       // A vault whose keyring cannot be described still opens; the Keys panel
       // is where that gets explained, not a failed unlock.
       setKeyringStatus(null);
+    }
+    try {
+      await refreshMemory();
+    } catch {
+      // Memory is optional and must not turn an otherwise valid vault unlock
+      // into a setup success. The dedicated panel shows its unavailable state.
+      setMemoryStatus(null); setMemoryReview([]);
     }
   }
 
@@ -567,7 +584,7 @@ export function App() {
     pluginHost.current?.stopAll();
     setPlugins([]); setPluginStates([]); setPluginCommands([]); setPluginPanels([]);
     setWorkspaceView("notes"); setGraph({ nodes: [], edges: [] }); setPropertyRows([]); setSavedViews([]);
-    setCanvases([]); setAttachments([]); setSyncStatus(null); setSyncRegistryVerified(null); setKeyringStatus(null);
+    setCanvases([]); setAttachments([]); setSyncStatus(null); setSyncRegistryVerified(null); setKeyringStatus(null); setMemoryStatus(null); setMemoryReview([]);
     setLockNotice(reason === "inactivity"
       ? `Locked automatically after ${idleMinutes} minute${idleMinutes === 1 ? "" : "s"} without activity. The clipboard was cleared too.`
       : "");
@@ -771,6 +788,7 @@ export function App() {
     }
     if (next === "canvas" || next === "files") await refreshAssets();
     if (next === "plugins") await refreshPlugins();
+    if (next === "memory") await refreshMemory();
     if (next === "keys") setKeyringStatus(await vaultBridge.keyringStatus());
     if (next === "sync") {
       const status = await vaultBridge.syncStatus();
@@ -1003,6 +1021,8 @@ export function App() {
           <button className={workspaceView === "canvas" ? "active" : ""} onClick={() => void showWorkspace("canvas")}><FolderKanban size={14} /><span>Canvas</span></button>
           <button className={workspaceView === "files" ? "active" : ""} onClick={() => void showWorkspace("files")}><Paperclip size={14} /><span>Files</span></button>
           <button className={workspaceView === "plugins" ? "active" : ""} onClick={() => void showWorkspace("plugins")}><Puzzle size={14} /><span>Plugins</span></button>
+          <button className={workspaceView === "memory" ? "active" : ""} onClick={() => void showWorkspace("memory")}><Brain size={14} /><span>Memory</span>{memoryStatus && (memoryStatus.review > 0 || memoryStatus.failed > 0)
+            ? <span className="attention-dot" aria-label="Memory needs owner attention" /> : null}</button>
           <button className={workspaceView === "sync" ? "active" : ""} onClick={() => void showWorkspace("sync")}><RefreshCw size={14} /><span>Sync</span></button>
           <button
             className={workspaceView === "keys" ? "active" : ""}
@@ -1148,6 +1168,33 @@ export function App() {
         onRestricted={setRestrictedPlugins}
         onRevoke={revokePluginSigner}
         onRestore={restorePluginSigner}
+        onNotice={report}
+      />
+      : workspaceView === "memory" ? <MemoryPanel
+        status={memoryStatus}
+        review={memoryReview}
+        onRefresh={refreshMemory}
+        onPairBegin={() => vaultBridge.memoryPairBegin()}
+        onPairComplete={async (pairingId) => { await vaultBridge.memoryPairComplete(pairingId); await refreshMemory(); report("Memory pairing refreshed."); }}
+        onPairCancel={(pairingId) => vaultBridge.memoryPairCancel(pairingId)}
+        onDisconnect={async () => {
+          if (!await confirm({ title: "Disconnect personal memory?", body: "This revokes the paired local client. Pair it again before any new capture can begin.", action: "Disconnect", tone: "danger" })) return;
+          await vaultBridge.memoryDisconnect(); await refreshMemory(); report("Memory client disconnected.");
+        }}
+        onPause={async (paused) => { await vaultBridge.memorySetPaused(paused); await refreshMemory(); report(paused ? "Memory queue paused." : "Memory queue resumed."); }}
+        onExclude={async (scope: MemoryScope) => { await vaultBridge.memoryExcludeScope(scope); await refreshMemory(); report(`${scope.kind === "session" ? "Conversation" : "Project"} excluded from memory capture.`); }}
+        onApprove={async (id) => { await vaultBridge.memoryApprove(id); await refreshMemory(); report("Memory candidate approved."); }}
+        onReject={async (id) => { await vaultBridge.memoryReject(id); await refreshMemory(); report("Memory candidate rejected."); }}
+        onPin={async (id, pinned) => { await vaultBridge.memorySetPinned(id, pinned); await refreshMemory(); report(pinned ? "Memory pinned." : "Memory unpinned."); }}
+        onForget={async (id) => {
+          if (!await confirm({ title: "Forget this memory?", body: "It will no longer be used for future recall. Encrypted revisions and backups may still retain history.", action: "Forget memory", tone: "danger" })) return;
+          await vaultBridge.memoryForget(id); await refreshMemory(); report("Memory forgotten. Relearning needs an explicit owner action.");
+        }}
+        onRelearn={async (id) => {
+          if (!await confirm({ title: "Allow this memory to be relearned?", body: "This removes its exclusion from future memory compilation. It does not recreate it automatically.", action: "Allow relearning", tone: "neutral" })) return;
+          await vaultBridge.memoryRelearn(id); await refreshMemory(); report("Memory may be relearned if new eligible source evidence appears.");
+        }}
+        onOpenNote={async (id) => { await openNote(id); setWorkspaceView("notes"); }}
         onNotice={report}
       />
       : workspaceView === "keys" ? <KeyringStatus

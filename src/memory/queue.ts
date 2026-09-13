@@ -5,6 +5,7 @@ export interface MemoryQueueEntry { id: string; payload: HookPayload; expiresAt:
 
 const MAX_QUEUE = 500;
 const TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const copy = (entry: MemoryQueueEntry): MemoryQueueEntry => ({ ...entry, payload: { ...entry.payload } });
 
 export class MemoryPointerQueue {
   private readonly entries = new Map<string, MemoryQueueEntry>();
@@ -13,17 +14,18 @@ export class MemoryPointerQueue {
     const payload = parseHookPayload(input);
     const id = crypto.createHash("sha256").update(`${payload.sessionId}\0${payload.turnId}`).digest("hex");
     const current = this.entries.get(id);
-    if (current && current.state === "pending") return { ...current };
+    if (current) return copy(current);
     if (this.entries.size >= MAX_QUEUE) throw new Error("Memory queue is full; unlock the vault to process pending items.");
     const item: MemoryQueueEntry = { id, payload, expiresAt: new Date(now.getTime() + TTL_MS).toISOString(), attempts: 0, state: "pending" };
     this.entries.set(id, item);
-    return { ...item };
+    return copy(item);
   }
   claim(now = new Date()): MemoryQueueEntry[] {
     const result: MemoryQueueEntry[] = [];
     for (const [id, entry] of this.entries) {
+      if (entry.state !== "pending") continue;
       if (Date.parse(entry.expiresAt) <= now.getTime()) { this.entries.set(id, { ...entry, state: "expired" }); continue; }
-      if (entry.state === "pending") { const next = { ...entry, attempts: entry.attempts + 1 }; this.entries.set(id, next); result.push(next); }
+      const next = { ...entry, attempts: entry.attempts + 1 }; this.entries.set(id, next); result.push(copy(next));
     }
     return result;
   }

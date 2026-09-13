@@ -3,6 +3,11 @@ description = "No custom vault commands are granted implicitly."
 permissions = []
 
 [[permission]]
+identifier = "allow-memory-owner-controls"
+description = "Allows the local main window to manage explicitly paired personal-memory records in the currently unlocked vault."
+commands.allow = ["memory_status", "memory_pair_begin", "memory_pair_complete", "memory_pair_cancel", "memory_disconnect", "memory_list_review", "memory_approve", "memory_reject", "memory_set_pinned", "memory_forget", "memory_relearn", "memory_set_paused", "memory_exclude_scope"]
+
+[[permission]]
 identifier = "allow-pick-vault-directory"
 description = "Allows the main local window to open the native folder chooser and receive only the selected path."
 commands.allow = ["pick_vault_directory"]

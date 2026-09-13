@@ -39,6 +39,7 @@ type HmacSha256 = Hmac<Sha256>;
 mod audit;
 mod desktop_sync;
 mod keyring;
+mod memory;
 mod updater;
 const INDEX_AAD: &str = "secondbrain-vault:document-index:v1";
 const DERIVED_LAYOUT: u8 = 5;
@@ -106,6 +107,9 @@ struct AppState {
     session: Mutex<Option<VaultSession>>,
     plugin_instances: Mutex<HashMap<String, PluginInstanceGrant>>,
     desktop_sync_cancel: AtomicBool,
+    /// Invalidates memory work captured by a former unlock.  Workers must
+    /// compare this value before committing a result.
+    memory_generation: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Debug, Clone)]
@@ -131,6 +135,7 @@ struct PluginInstanceAuthorization {
 type SessionKeys = (
     Zeroizing<[u8; 32]>,
     Zeroizing<[u8; 32]>,
+    Zeroizing<[u8; 32]>,
     Option<Zeroizing<[u8; 32]>>,
 );
 
@@ -139,6 +144,9 @@ struct VaultSession {
     root_dir: PathBuf,
     /// The `documents` key: every object under `documents/` is encrypted with it.
     key: Zeroizing<[u8; 32]>,
+    /// The keyring's dedicated KV key. Memory control data must never be
+    /// encrypted with the document key.
+    kv_key: Zeroizing<[u8; 32]>,
     /// The `attachmentId` key: permanent, because attachment content addresses
     /// are HMACs under it and every reference already written uses them. Equal
     /// to `key` on a legacy vault, which is what the legacy format means.
@@ -1780,6 +1788,7 @@ fn open_vault_keys(
         let keys = keyring::unwrap_keyring(&file, passphrase)?;
         return Ok((
             keys.documents.clone(),
+            keys.kv.clone(),
             keys.attachment_id.clone(),
             Some(keys.audit.clone()),
         ));
@@ -1818,7 +1827,9 @@ fn open_vault_keys(
             return Err("wrong passphrase or damaged manifest".into());
         }
         let attachment_id_key = key.clone();
-        return Ok((key, attachment_id_key, None));
+        // Legacy vaults intentionally cannot enroll memory: they have no
+        // independently-held keyed-KV material.
+        return Ok((key.clone(), key, attachment_id_key, None));
     }
 
     if vault_holds_legacy_material(vault_dir) {
@@ -1840,7 +1851,7 @@ fn open_vault_keys(
             &serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?,
         )?;
         let attachment_id_key = key.clone();
-        return Ok((key, attachment_id_key, None));
+        return Ok((key.clone(), key, attachment_id_key, None));
     }
 
     let keys = keyring::random_key_set();
@@ -1859,6 +1870,7 @@ fn open_vault_keys(
     let opened = keyring::unwrap_keyring(&written, passphrase)?;
     Ok((
         opened.documents.clone(),
+        opened.kv.clone(),
         opened.attachment_id.clone(),
         Some(opened.audit.clone()),
     ))
@@ -1894,7 +1906,7 @@ fn open_session(vault_path: &str, passphrase: &str) -> Result<VaultSession, Stri
     reject_symlink(&root_dir)?;
     fs::create_dir_all(&root_dir).map_err(|error| error.to_string())?;
 
-    let (key, attachment_id_key, audit_key) = open_vault_keys(&vault_dir, &root_dir, passphrase)?;
+    let (key, kv_key, attachment_id_key, audit_key) = open_vault_keys(&vault_dir, &root_dir, passphrase)?;
 
     let index_path = root_dir.join("index.enc");
     let index_existed = index_path.exists();
@@ -1902,6 +1914,7 @@ fn open_session(vault_path: &str, passphrase: &str) -> Result<VaultSession, Stri
         vault_dir,
         root_dir,
         key,
+        kv_key,
         attachment_id_key,
         audit_key,
         index: DocumentIndex::empty(),
@@ -3551,12 +3564,14 @@ fn unlock_vault(
         .map_err(|_| "plugin instance lock poisoned")?
         .clear();
     *session_slot = Some(session);
+    state.memory_generation.fetch_add(1, Ordering::AcqRel);
     Ok(info)
 }
 
 #[tauri::command(async)]
 fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
     state.desktop_sync_cancel.store(true, Ordering::Release);
+    state.memory_generation.fetch_add(1, Ordering::AcqRel);
     *state
         .session
         .lock()
@@ -3567,6 +3582,86 @@ fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
         .map_err(|_| "plugin instance lock poisoned")?
         .clear();
     Ok(())
+}
+
+#[tauri::command(async)]
+fn memory_status(state: State<'_, AppState>) -> Result<memory::MemoryStatusDto, String> {
+    let guard = state.session.lock().map_err(|_| "vault session lock poisoned")?;
+    let session = guard.as_ref().ok_or("vault is locked")?;
+    memory::get_status(session, state.memory_generation.load(Ordering::Acquire))
+}
+
+#[tauri::command(async)]
+fn memory_pair_begin(state: State<'_, AppState>) -> Result<memory::MemoryPairingDto, String> {
+    let mut guard = state.session.lock().map_err(|_| "vault session lock poisoned")?;
+    with_vault_write(guard.as_mut().ok_or("vault is locked")?, memory::pair_begin)
+}
+
+#[tauri::command(async)]
+fn memory_pair_complete(pairing_id: String, state: State<'_, AppState>) -> Result<memory::MemoryStatusDto, String> {
+    let generation = state.memory_generation.load(Ordering::Acquire);
+    let mut guard = state.session.lock().map_err(|_| "vault session lock poisoned")?;
+    with_vault_write(guard.as_mut().ok_or("vault is locked")?, |session| memory::pair_complete(session, &pairing_id, generation))
+}
+
+#[tauri::command(async)]
+fn memory_pair_cancel(pairing_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let mut guard = state.session.lock().map_err(|_| "vault session lock poisoned")?;
+    with_vault_write(guard.as_mut().ok_or("vault is locked")?, |session| memory::pair_cancel(session, &pairing_id))
+}
+
+#[tauri::command(async)]
+fn memory_disconnect(state: State<'_, AppState>) -> Result<(), String> {
+    let mut guard = state.session.lock().map_err(|_| "vault session lock poisoned")?;
+    with_vault_write(guard.as_mut().ok_or("vault is locked")?, memory::disconnect)
+}
+
+#[tauri::command(async)]
+fn memory_list_review(state: State<'_, AppState>) -> Result<Vec<memory::MemoryCandidateDto>, String> {
+    let guard = state.session.lock().map_err(|_| "vault session lock poisoned")?;
+    memory::list_review(guard.as_ref().ok_or("vault is locked")?)
+}
+
+#[tauri::command(async)]
+fn memory_approve(id: String, state: State<'_, AppState>) -> Result<memory::MemoryNoteDto, String> {
+    let mut guard = state.session.lock().map_err(|_| "vault session lock poisoned")?;
+    with_vault_write(guard.as_mut().ok_or("vault is locked")?, |session| memory::approve(session, &id))
+}
+
+#[tauri::command(async)]
+fn memory_reject(id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let mut guard = state.session.lock().map_err(|_| "vault session lock poisoned")?;
+    with_vault_write(guard.as_mut().ok_or("vault is locked")?, |session| memory::reject(session, &id))
+}
+
+#[tauri::command(async)]
+fn memory_set_pinned(id: String, pinned: bool, state: State<'_, AppState>) -> Result<memory::MemoryNoteDto, String> {
+    let mut guard = state.session.lock().map_err(|_| "vault session lock poisoned")?;
+    with_vault_write(guard.as_mut().ok_or("vault is locked")?, |session| memory::set_pinned(session, &id, pinned))
+}
+
+#[tauri::command(async)]
+fn memory_forget(id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let mut guard = state.session.lock().map_err(|_| "vault session lock poisoned")?;
+    with_vault_write(guard.as_mut().ok_or("vault is locked")?, |session| memory::forget(session, &id))
+}
+
+#[tauri::command(async)]
+fn memory_relearn(id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let mut guard = state.session.lock().map_err(|_| "vault session lock poisoned")?;
+    with_vault_write(guard.as_mut().ok_or("vault is locked")?, |session| memory::relearn(session, &id))
+}
+
+#[tauri::command(async)]
+fn memory_set_paused(paused: bool, state: State<'_, AppState>) -> Result<memory::MemoryStatusDto, String> {
+    let generation=state.memory_generation.load(Ordering::Acquire); let mut guard=state.session.lock().map_err(|_| "vault session lock poisoned")?;
+    with_vault_write(guard.as_mut().ok_or("vault is locked")?, |session| memory::set_paused(session, paused, generation))
+}
+
+#[tauri::command(async)]
+fn memory_exclude_scope(scope: memory::MemoryScopeDto, state: State<'_, AppState>) -> Result<memory::MemoryStatusDto, String> {
+    let generation=state.memory_generation.load(Ordering::Acquire); let mut guard=state.session.lock().map_err(|_| "vault session lock poisoned")?;
+    with_vault_write(guard.as_mut().ok_or("vault is locked")?, |session| memory::exclude_scope(session, &scope.kind, &scope.id, generation))
 }
 
 #[tauri::command(async)]
@@ -6030,10 +6125,24 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::default())
         .manage(updater::UpdaterState::default())
+        .setup(|app| { memory::start_broker(app.handle().clone()); Ok(()) })
         .invoke_handler(tauri::generate_handler![
             pick_vault_directory,
             unlock_vault,
             lock_vault,
+            memory_status,
+            memory_pair_begin,
+            memory_pair_complete,
+            memory_pair_cancel,
+            memory_disconnect,
+            memory_list_review,
+            memory_approve,
+            memory_reject,
+            memory_set_pinned,
+            memory_forget,
+            memory_relearn,
+            memory_set_paused,
+            memory_exclude_scope,
             list_notes,
             get_note,
             save_note,
@@ -6095,6 +6204,12 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Vault Brain");
+}
+
+/// Entry point for the hidden, stdin/stdout-only bridge. It starts no window
+/// and deliberately accepts no vault or credential arguments.
+pub fn run_memory_client() -> i32 {
+    memory::client_main()
 }
 
 #[cfg(test)]

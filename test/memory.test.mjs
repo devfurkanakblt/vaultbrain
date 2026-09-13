@@ -11,7 +11,9 @@ import {
   parseCodexTranscript,
   parseHookPayload,
   validateMemoryBatch,
+  validateCandidate,
   buildRunnerArgs,
+  runCodexSummarizer,
 } from "../dist/memory/index.js";
 
 test("parses only visible post-enrollment user and assistant messages", () => {
@@ -57,4 +59,24 @@ test("runner arguments disable ambient hooks and tools without embedding secrets
   const args = buildRunnerArgs("synthetic-model");
   assert.deepEqual(args, ["exec", "-", "--ephemeral", "--json", "--ignore-user-config", "--disable", "hooks", "--disable", "web_search", "--sandbox", "read-only", "-m", "synthetic-model"]);
   assert.doesNotMatch(args.join(" "), /password|passphrase|api[_-]?key|token/iu);
+});
+
+test("sensitive facts require review and malformed revision or sensitivity never auto-commit", () => {
+  const fact = { kind: "preference", title: "Preference", body: "A personal preference", evidence: [{ messageId: "u", quote: "A personal preference" }], sourceKind: "user-stated", sensitive: true, links: [] };
+  assert.equal(classifyCandidate(fact).status, "review");
+  assert.throws(() => validateCandidate({ ...fact, sensitive: "false" }), /sensitivity/iu);
+  for (const baseRevision of [NaN, Infinity, -1, 0, 0.5]) {
+    assert.throws(() => validateCandidate({ ...fact, baseRevision }), /revision/iu);
+  }
+  assert.throws(() => validateCandidate({ ...fact, links: ["../outside"] }), /link/iu);
+});
+
+test("source dedupe is independent of summarizer version", () => {
+  const hook = { version: 1, event: "Stop", sessionId: "s", turnId: "t", transcriptPath: "synthetic.jsonl", createdAt: "2026-09-05T00:00:00Z" };
+  assert.equal(dedupeKey(hook, "v1"), dedupeKey(hook, "v2"));
+});
+
+test("an unaccepted worker adapter never starts a model or trusts a supplied version", async () => {
+  await assert.rejects(runCodexSummarizer({ messages: [] }), /compatibility/iu);
+  await assert.rejects(runCodexSummarizer({ messages: [] }, { version: "codex-cli0.153.1", command: "untrusted-command" }), /compatibility/iu);
 });

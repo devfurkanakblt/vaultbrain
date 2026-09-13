@@ -26,7 +26,15 @@ export function boundedString(value: unknown, name: string, maxBytes = MAX_TEXT_
 export function containsSecret(value: string): boolean { return SECRET_PATTERNS.some((pattern) => pattern.test(value)); }
 
 function id(value: unknown, name: string): string { return boundedString(value, name, 240).replace(/[\r\n]/gu, ""); }
-function iso(value: unknown, name: string): string { const text = boundedString(value, name, 80); if (!Number.isFinite(Date.parse(text))) throw new Error(`${name} must be an ISO timestamp.`); return new Date(text).toISOString(); }
+function iso(value: unknown, name: string): string {
+  const text = boundedString(value, name, 80);
+  // Date.parse accepts locale-dependent forms such as "3/4/2026". Hook
+  // payloads are protocol records, so require an offset-bearing ISO instant.
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/u.test(text) || !Number.isFinite(Date.parse(text))) {
+    throw new Error(`${name} must be an ISO timestamp.`);
+  }
+  return new Date(text).toISOString();
+}
 
 export function parseHookPayload(input: unknown): HookPayload {
   if (!input || typeof input !== "object") throw new Error("Invalid memory hook payload.");
@@ -37,8 +45,8 @@ export function parseHookPayload(input: unknown): HookPayload {
   return { version: 1, event: value.event as HookPayload["event"], sessionId: id(value.sessionId, "sessionId"), turnId: id(value.turnId, "turnId"), transcriptPath: id(value.transcriptPath, "transcriptPath"), createdAt: iso(value.createdAt, "createdAt") };
 }
 
-export function dedupeKey(payload: HookPayload, summarizerVersion: string): string {
-  return crypto.createHash("sha256").update(`${payload.sessionId}\0${payload.turnId}\0${summarizerVersion}`).digest("hex");
+export function dedupeKey(payload: HookPayload, _summarizerVersion: string): string {
+  return crypto.createHash("sha256").update(`${payload.sessionId}\0${payload.turnId}`).digest("hex");
 }
 
 export function validateMemoryBatch(input: unknown): MemoryBatch {
@@ -67,7 +75,11 @@ export function validateCandidate(input: unknown): MemoryCandidate {
     if (containsSecret(quote)) throw new Error("Memory evidence contains secret-like content.");
     return { messageId: id(e.messageId, "evidence messageId"), quote };
   });
-  const links = Array.isArray(value.links) ? value.links.map((link) => id(link, "link")).filter((link) => !/[\\/]/u.test(link) && !link.startsWith(".")) : [];
+  if (typeof value.sensitive !== "boolean") throw new Error("Invalid memory sensitivity.");
+  if (value.baseRevision !== undefined && (!Number.isSafeInteger(value.baseRevision) || Number(value.baseRevision) < 1)) throw new Error("Invalid memory revision.");
+  if (!Array.isArray(value.links)) throw new Error("Invalid memory links.");
+  const links = value.links.map((link) => id(link, "link"));
+  if (links.some((link) => /[\\/]/u.test(link) || link.startsWith("."))) throw new Error("Invalid memory link.");
   if (links.length > 16) throw new Error("Too many memory links.");
   return { kind: value.kind as MemoryKind, title, body, evidence, sourceKind: value.sourceKind as SourceKind, sensitive: value.sensitive === true, links, ...(typeof value.targetId === "string" ? { targetId: id(value.targetId, "targetId") } : {}), ...(typeof value.baseRevision === "number" ? { baseRevision: value.baseRevision } : {}) };
 }
@@ -75,7 +87,7 @@ export function validateCandidate(input: unknown): MemoryCandidate {
 export function classifyCandidate(input: unknown): { status: "auto" | "review" | "rejected"; candidate?: MemoryCandidate; reason?: string } {
   try {
     const candidate = validateCandidate(input);
-    if (candidate.sensitive) return { status: "rejected", reason: "sensitive" };
+    if (candidate.sensitive) return { status: "review", candidate, reason: "sensitive" };
     if (candidate.sourceKind === "inference" || candidate.links.length === 0 && candidate.kind === "fact") return { status: "review", candidate, reason: candidate.sourceKind === "inference" ? "inference" : "unresolved" };
     return { status: "auto", candidate };
   } catch (error) { return { status: "rejected", reason: error instanceof Error ? error.message : "invalid" }; }
