@@ -506,20 +506,27 @@ pub(crate) fn pair_complete(
     pairing_id: &str,
     generation: u64,
 ) -> Result<MemoryStatusDto, String> {
-    let mut control = load(session)?;
-    if control.pairing_id.as_deref() != Some(pairing_id) {
-        return Err("memory pairing confirmation was not found".into());
-    }
-    control.paired = true;
-    control.enrolled_at = Some(now());
-    control.fingerprint = fingerprint(session)?;
-    control.pairing_id = None;
-    #[cfg(windows)]
-    write_pairing_material(&control.fingerprint)?;
     #[cfg(not(windows))]
-    return Err("personal memory is supported only on Windows".into());
-    save(session, &control)?;
-    Ok(status(&control, generation))
+    {
+        let _ = (session, pairing_id, generation);
+        return Err("personal memory is supported only on Windows".into());
+    }
+
+    #[cfg(windows)]
+    {
+        let mut control = load(session)?;
+        if control.pairing_id.as_deref() != Some(pairing_id) {
+            return Err("memory pairing confirmation was not found".into());
+        }
+        control.paired = true;
+        control.enrolled_at = Some(now());
+        control.fingerprint = fingerprint(session)?;
+        control.pairing_id = None;
+        #[cfg(windows)]
+        write_pairing_material(&control.fingerprint)?;
+        save(session, &control)?;
+        Ok(status(&control, generation))
+    }
 }
 pub(crate) fn pair_cancel(session: &mut VaultSession, pairing_id: &str) -> Result<(), String> {
     let mut control = load(session)?;
