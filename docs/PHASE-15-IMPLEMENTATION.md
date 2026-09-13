@@ -35,20 +35,22 @@ Base: `9ed71bf04ee1f2224df96c2a7102779f30724cbb`, branch
   exits unsuccessfully unless native returns `accepted: true`, so its source
   cursor cannot advance before encrypted persistence.
 
-## Worker compatibility: open implementation obligation
+## Worker compatibility: runtime acceptance remains open
 
-Read-only local inspection found `codex-cli 0.154.0-alpha.6.2`. Its exec help
-describes `--json` as JSONL events. The historical adapter assumed CLI 0.153.1,
-parsed a single JSON result, inherited the authentication/config home and did not
-establish a tool-free worker. A supplied version string was not verification.
+The worker runner now has a bounded stdin/stdout contract, an exact normalized
+input schema, deterministic credential-shaped redaction, a static output schema
+file, isolated temporary `HOME`/`CODEX_HOME`, no-shell execution, disabled
+ambient tools, timeout/output/cancellation handling and one-child concurrency.
+It probes the executable's own `--version` output and accepts only
+`codex-cli0.153.1`; a caller-supplied version cannot authorize another binary.
+Known JSONL assistant events are reduced to one locally validated
+`MemoryBatch`, and stderr is drained without retaining diagnostics.
 
-The unsafe launch path is disabled with a compatibility error. No actual model
-request has been made. This is a safety correction, not completion of capture.
-Automatic hooks are not installed. A supported adapter still needs bounded
-process execution, isolated configuration, schema-constrained output, exact
-source validation, one worker, cancellation/generation checks and installed-CLI
-acceptance. Native durable locked queue/capture acceptance must remain open until
-this path exists. Do not label Phase 15 complete based on the manual MCP/UI slice.
+Read-only local inspection found `codex-cli 0.154.0-alpha.6.2`, so this checkout
+has not made an actual model request and automatic capture remains disabled for
+the installed binary. A supported adapter still needs installed-CLI acceptance,
+native lifecycle/generation cancellation and real Windows worker evidence.
+Do not label Phase 15 complete based on the manual MCP/UI slice.
 
 ## User-run validation
 

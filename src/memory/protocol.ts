@@ -16,6 +16,9 @@ export interface MemoryCandidate { kind: MemoryKind; title: string; body: string
 export interface MemoryBatch { version: 1; summary: string; candidates: MemoryCandidate[]; }
 export interface MemorySummary { id: string; title: string; body: string; source: string; }
 
+const SECRET_ASSIGNMENT = /\b(api[_ -]?key|access[_ -]?token|secret|password|passphrase)\s*[:=]\s*[^\s,;]+/giu;
+const SECRET_TOKEN = /\bsk-[A-Za-z0-9_-]{12,}/gu;
+
 export function boundedString(value: unknown, name: string, maxBytes = MAX_TEXT_BYTES): string {
   const allowsNewlines = ["text", "transcript", "body", "summary"].includes(name);
   if (typeof value !== "string" || !value.trim() || (!allowsNewlines && /[\u0000\r\n]/u.test(value))) throw new Error(`${name} must be a non-empty string.`);
@@ -24,6 +27,13 @@ export function boundedString(value: unknown, name: string, maxBytes = MAX_TEXT_
 }
 
 export function containsSecret(value: string): boolean { return SECRET_PATTERNS.some((pattern) => pattern.test(value)); }
+
+/** Replace credential-shaped values before text crosses the model boundary. */
+export function redactSecrets(value: string): string {
+  return value
+    .replace(SECRET_ASSIGNMENT, "[redacted]")
+    .replace(SECRET_TOKEN, "[redacted]");
+}
 
 function id(value: unknown, name: string): string { return boundedString(value, name, 240).replace(/[\r\n]/gu, ""); }
 function sourcePath(value: unknown): string {
@@ -75,14 +85,18 @@ export function validateMemoryBatch(input: unknown): MemoryBatch {
   if (!raw || Buffer.byteLength(raw, "utf8") > MAX_BATCH_BYTES) throw new Error("Memory batch exceeds its size limit.");
   if (!input || typeof input !== "object") throw new Error("Invalid memory batch.");
   const value = input as Record<string, unknown>;
+  if (Object.keys(value).some((key) => !["version", "summary", "candidates"].includes(key))) throw new Error("Invalid memory batch fields.");
   if (value.version !== 1 || typeof value.summary !== "string" || !Array.isArray(value.candidates) || value.candidates.length > 32) throw new Error("Invalid memory batch schema.");
+  const summary = boundedString(value.summary, "summary", 16_000);
+  if (containsSecret(summary)) throw new Error("Memory batch summary contains secret-like content.");
   const candidates = value.candidates.map((item) => validateCandidate(item));
-  return { version: 1, summary: boundedString(value.summary, "summary", 16_000), candidates };
+  return { version: 1, summary, candidates };
 }
 
 export function validateCandidate(input: unknown): MemoryCandidate {
   if (!input || typeof input !== "object") throw new Error("Invalid memory candidate.");
   const value = input as Record<string, unknown>;
+  if (Object.keys(value).some((key) => !["kind", "title", "body", "evidence", "sourceKind", "sensitive", "links", "targetId", "baseRevision"].includes(key))) throw new Error("Invalid memory candidate fields.");
   const kinds: MemoryKind[] = ["preference", "fact", "project", "decision", "goal", "task", "person", "concept"];
   if (!kinds.includes(value.kind as MemoryKind) || !["user-stated", "inference"].includes(String(value.sourceKind))) throw new Error("Invalid memory candidate classification.");
   const title = boundedString(value.title, "title", 400);
@@ -92,6 +106,7 @@ export function validateCandidate(input: unknown): MemoryCandidate {
   const evidence = value.evidence.map((item) => {
     if (!item || typeof item !== "object") throw new Error("Invalid memory evidence.");
     const e = item as Record<string, unknown>;
+    if (Object.keys(e).some((key) => !["messageId", "quote"].includes(key))) throw new Error("Invalid memory evidence fields.");
     const quote = boundedString(e.quote, "evidence quote", 2_000);
     if (containsSecret(quote)) throw new Error("Memory evidence contains secret-like content.");
     return { messageId: id(e.messageId, "evidence messageId"), quote };
