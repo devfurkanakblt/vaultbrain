@@ -325,3 +325,58 @@ export interface SyncStatusData {
   appliedObjectCount: number;
   readable: boolean;
 }
+
+/** Owner-only summary from the native, unlocked-session memory service. */
+export interface MemoryStatusData {
+  state: "disabled" | "locked" | "ready" | "paused" | "unsupported" | "error";
+  enrolledAt?: string;
+  paired: boolean;
+  paused: boolean;
+  queued: number;
+  review: number;
+  failed: number;
+  expired: number;
+  lastCaptureAt?: string;
+  model?: string;
+  compatibilityReasons: string[];
+  generation: number;
+}
+
+export interface MemoryEvidence {
+  messageId: string;
+  quote: string;
+}
+
+export interface MemoryReviewCandidate {
+  id: string;
+  kind: "preference" | "fact" | "project" | "decision" | "goal" | "task" | "person" | "concept";
+  title: string;
+  body: string;
+  evidence: MemoryEvidence[];
+  sourceKind: "user-stated" | "inference";
+  sensitive: boolean;
+  links: string[];
+  targetId?: string;
+  baseRevision?: number;
+  createdAt: string;
+}
+
+export interface MemoryNoteData {
+  id: string;
+  path: string;
+  title: string;
+  revision: number;
+  pinned: boolean;
+  forgotten: boolean;
+  updatedAt: string;
+}
+
+export interface MemoryPairingRequest {
+  pairingId: string;
+  state: "awaitingConfirmation";
+}
+
+export interface MemoryScope {
+  kind: "session" | "project";
+  id: string;
+}

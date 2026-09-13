@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-memory-reject"
+description = "Enables the memory_reject command without any pre-configured scope."
+commands.allow = ["memory_reject"]
+
+[[permission]]
+identifier = "deny-memory-reject"
+description = "Denies the memory_reject command without any pre-configured scope."
+commands.deny = ["memory_reject"]

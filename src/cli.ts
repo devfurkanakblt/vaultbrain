@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { Command } from "commander";
+import { registerMemoryCommands } from "./memory/cli.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -149,6 +150,7 @@ program.hook("preAction", (_thisCommand, actionCommand) => {
     fullCommand === "init" ||
     fullCommand === "lock" ||
     fullCommand === "keychain-status" ||
+    fullCommand.startsWith("memory ") ||
     fullCommand.startsWith("vault-lock ")
   ) {
     return;
@@ -2615,6 +2617,8 @@ program
       JSON.stringify({ formatVersion: VAULT_FORMAT_VERSION, artifacts: Object.fromEntries(Object.entries(FORMAT_COMPATIBILITY).map(([name, { path, reads, writes }]) => [name, { path, reads, writes }])) }, null, 2),
     );
   });
+
+registerMemoryCommands(program);
 
 program.parseAsync(process.argv).catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);

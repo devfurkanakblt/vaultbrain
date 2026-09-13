@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { DesktopSyncOperation } from "../../src/desktop-sync-protocol.js";
-import type { AttachmentContent, AttachmentInfo, Backlink, Bookmark, CanvasDocument, CanvasInput, CanvasSummary, DailyNote, DeletedNote, KeyringStatusData, KnowledgeGraph, PassphraseChangeReport, RecoveryKitReport, NoteDocument, NoteSummary, PluginCallContext, PluginPackage, PluginSecurityPolicy, PluginSummary, PropertyRow, RevisionInfo, SavedView, SearchHit, SyncStatusData, UnlinkedMention, VaultInfo, WorkspaceState } from "./types";
+import type { AttachmentContent, AttachmentInfo, Backlink, Bookmark, CanvasDocument, CanvasInput, CanvasSummary, DailyNote, DeletedNote, KeyringStatusData, KnowledgeGraph, MemoryNoteData, MemoryPairingRequest, MemoryReviewCandidate, MemoryScope, MemoryStatusData, PassphraseChangeReport, RecoveryKitReport, NoteDocument, NoteSummary, PluginCallContext, PluginPackage, PluginSecurityPolicy, PluginSummary, PropertyRow, RevisionInfo, SavedView, SearchHit, SyncStatusData, UnlinkedMention, VaultInfo, WorkspaceState } from "./types";
 
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -85,6 +85,13 @@ const demoSyncStatus: SyncStatusData = {
   changeCount: 0,
   appliedObjectCount: 0,
   readable: true,
+};
+
+// Memory is deliberately unavailable in demo mode. It must never look paired,
+// enrolled, or connected without the native owner service.
+const demoMemoryStatus: MemoryStatusData = {
+  state: "disabled", paired: false, paused: false, queued: 0, review: 0,
+  failed: 0, expired: 0, compatibilityReasons: ["Personal memory has not been enabled for this vault."], generation: 0,
 };
 
 const WIKILINK = /\[\[[^\]]*\]\]/gu;
@@ -716,6 +723,57 @@ export const vaultBridge = {
   async syncStatus(): Promise<SyncStatusData> {
     if (isTauri) return call<SyncStatusData>("sync_status");
     return structuredClone(demoSyncStatus);
+  },
+  async memoryStatus(): Promise<MemoryStatusData> {
+    if (isTauri) return call<MemoryStatusData>("memory_status");
+    return structuredClone(demoMemoryStatus);
+  },
+  async memoryPairBegin(): Promise<MemoryPairingRequest> {
+    if (isTauri) return call<MemoryPairingRequest>("memory_pair_begin");
+    throw new Error("Personal memory is unavailable in demo mode.");
+  },
+  async memoryPairComplete(pairingId: string): Promise<MemoryStatusData> {
+    if (isTauri) return call<MemoryStatusData>("memory_pair_complete", { pairingId });
+    throw new Error("Personal memory is unavailable in demo mode.");
+  },
+  async memoryPairCancel(pairingId: string): Promise<void> {
+    if (isTauri) return call<void>("memory_pair_cancel", { pairingId });
+  },
+  async memoryDisconnect(): Promise<void> {
+    if (isTauri) return call<void>("memory_disconnect");
+    throw new Error("Personal memory is unavailable in demo mode.");
+  },
+  async memoryReview(): Promise<MemoryReviewCandidate[]> {
+    if (isTauri) return call<MemoryReviewCandidate[]>("memory_list_review");
+    return [];
+  },
+  async memoryApprove(id: string): Promise<MemoryNoteData> {
+    if (isTauri) return call<MemoryNoteData>("memory_approve", { id });
+    throw new Error("Personal memory is unavailable in demo mode.");
+  },
+  async memoryReject(id: string): Promise<void> {
+    if (isTauri) return call<void>("memory_reject", { id });
+    throw new Error("Personal memory is unavailable in demo mode.");
+  },
+  async memorySetPinned(id: string, pinned: boolean): Promise<MemoryNoteData> {
+    if (isTauri) return call<MemoryNoteData>("memory_set_pinned", { id, pinned });
+    throw new Error("Personal memory is unavailable in demo mode.");
+  },
+  async memoryForget(id: string): Promise<void> {
+    if (isTauri) return call<void>("memory_forget", { id });
+    throw new Error("Personal memory is unavailable in demo mode.");
+  },
+  async memoryRelearn(id: string): Promise<void> {
+    if (isTauri) return call<void>("memory_relearn", { id });
+    throw new Error("Personal memory is unavailable in demo mode.");
+  },
+  async memorySetPaused(paused: boolean): Promise<MemoryStatusData> {
+    if (isTauri) return call<MemoryStatusData>("memory_set_paused", { paused });
+    throw new Error("Personal memory is unavailable in demo mode.");
+  },
+  async memoryExcludeScope(scope: MemoryScope): Promise<MemoryStatusData> {
+    if (isTauri) return call<MemoryStatusData>("memory_exclude_scope", { scope });
+    throw new Error("Personal memory is unavailable in demo mode.");
   },
   async syncVerifyRegistry(): Promise<boolean> {
     if (isTauri) return call<boolean>("sync_verify_registry");

@@ -16,6 +16,9 @@ export interface MemoryCandidate { kind: MemoryKind; title: string; body: string
 export interface MemoryBatch { version: 1; summary: string; candidates: MemoryCandidate[]; }
 export interface MemorySummary { id: string; title: string; body: string; source: string; }
 
+const SECRET_ASSIGNMENT = /\b(api[_ -]?key|access[_ -]?token|secret|password|passphrase)\s*[:=]\s*[^\s,;]+/giu;
+const SECRET_TOKEN = /\bsk-[A-Za-z0-9_-]{12,}/gu;
+
 export function boundedString(value: unknown, name: string, maxBytes = MAX_TEXT_BYTES): string {
   const allowsNewlines = ["text", "transcript", "body", "summary"].includes(name);
   if (typeof value !== "string" || !value.trim() || (!allowsNewlines && /[\u0000\r\n]/u.test(value))) throw new Error(`${name} must be a non-empty string.`);
@@ -25,20 +28,56 @@ export function boundedString(value: unknown, name: string, maxBytes = MAX_TEXT_
 
 export function containsSecret(value: string): boolean { return SECRET_PATTERNS.some((pattern) => pattern.test(value)); }
 
+/** Replace credential-shaped values before text crosses the model boundary. */
+export function redactSecrets(value: string): string {
+  return value
+    .replace(SECRET_ASSIGNMENT, "[redacted]")
+    .replace(SECRET_TOKEN, "[redacted]");
+}
+
 function id(value: unknown, name: string): string { return boundedString(value, name, 240).replace(/[\r\n]/gu, ""); }
-function iso(value: unknown, name: string): string { const text = boundedString(value, name, 80); if (!Number.isFinite(Date.parse(text))) throw new Error(`${name} must be an ISO timestamp.`); return new Date(text).toISOString(); }
+function sourcePath(value: unknown): string {
+  const text = boundedString(value, "transcriptPath", 4 * 1024);
+  // A hook carries only a locator.  Requiring a rooted path prevents a client
+  // from changing the meaning of a queued reference when its working
+  // directory changes.  Both Windows drive/UNC paths and POSIX paths are
+  // accepted because the hook can be produced on another supported host.
+  const normalized = text.replace(/[\\]+/gu, "/");
+  const rooted = normalized.startsWith("/") || /^[A-Za-z]:\//u.test(normalized);
+  const traversesParent = normalized.split("/").some((part) => part === "..");
+  if (!rooted || traversesParent || /[\u0000\r\n]/u.test(text)) {
+    throw new Error("transcriptPath must be an absolute, non-traversing path reference.");
+  }
+  return text;
+}
+function iso(value: unknown, name: string): string {
+  const text = boundedString(value, name, 80);
+  // Date.parse accepts locale-dependent forms such as "3/4/2026". Hook
+  // payloads are protocol records, so require an offset-bearing ISO instant.
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/u.test(text) || !Number.isFinite(Date.parse(text))) {
+    throw new Error(`${name} must be an ISO timestamp.`);
+  }
+  return new Date(text).toISOString();
+}
 
 export function parseHookPayload(input: unknown): HookPayload {
   if (!input || typeof input !== "object") throw new Error("Invalid memory hook payload.");
-  if ("command" in input || "text" in input || "title" in input) throw new Error("Memory hook payload cannot contain commands or content.");
   const value = input as Record<string, unknown>;
+  const allowed = new Set(["version", "event", "sessionId", "turnId", "transcriptPath", "createdAt"]);
+  const keys = Object.keys(value);
+  if (keys.some((key) => !allowed.has(key))) {
+    if (keys.some((key) => ["command", "text", "title", "body", "content", "transcript"].includes(key))) {
+      throw new Error("Memory hook payload cannot contain commands or content.");
+    }
+    throw new Error("Memory hook payload contains unsupported fields.");
+  }
   if (value.version !== MEMORY_PROTOCOL_VERSION) throw new Error("Unsupported memory hook payload version.");
   if (!["Stop", "PreCompact", "SessionEnd"].includes(String(value.event))) throw new Error("Unsupported memory hook event.");
-  return { version: 1, event: value.event as HookPayload["event"], sessionId: id(value.sessionId, "sessionId"), turnId: id(value.turnId, "turnId"), transcriptPath: id(value.transcriptPath, "transcriptPath"), createdAt: iso(value.createdAt, "createdAt") };
+  return { version: 1, event: value.event as HookPayload["event"], sessionId: id(value.sessionId, "sessionId"), turnId: id(value.turnId, "turnId"), transcriptPath: sourcePath(value.transcriptPath), createdAt: iso(value.createdAt, "createdAt") };
 }
 
-export function dedupeKey(payload: HookPayload, summarizerVersion: string): string {
-  return crypto.createHash("sha256").update(`${payload.sessionId}\0${payload.turnId}\0${summarizerVersion}`).digest("hex");
+export function dedupeKey(payload: HookPayload, _summarizerVersion: string): string {
+  return crypto.createHash("sha256").update(`${payload.sessionId}\0${payload.turnId}`).digest("hex");
 }
 
 export function validateMemoryBatch(input: unknown): MemoryBatch {
@@ -46,14 +85,18 @@ export function validateMemoryBatch(input: unknown): MemoryBatch {
   if (!raw || Buffer.byteLength(raw, "utf8") > MAX_BATCH_BYTES) throw new Error("Memory batch exceeds its size limit.");
   if (!input || typeof input !== "object") throw new Error("Invalid memory batch.");
   const value = input as Record<string, unknown>;
+  if (Object.keys(value).some((key) => !["version", "summary", "candidates"].includes(key))) throw new Error("Invalid memory batch fields.");
   if (value.version !== 1 || typeof value.summary !== "string" || !Array.isArray(value.candidates) || value.candidates.length > 32) throw new Error("Invalid memory batch schema.");
+  const summary = boundedString(value.summary, "summary", 16_000);
+  if (containsSecret(summary)) throw new Error("Memory batch summary contains secret-like content.");
   const candidates = value.candidates.map((item) => validateCandidate(item));
-  return { version: 1, summary: boundedString(value.summary, "summary", 16_000), candidates };
+  return { version: 1, summary, candidates };
 }
 
 export function validateCandidate(input: unknown): MemoryCandidate {
   if (!input || typeof input !== "object") throw new Error("Invalid memory candidate.");
   const value = input as Record<string, unknown>;
+  if (Object.keys(value).some((key) => !["kind", "title", "body", "evidence", "sourceKind", "sensitive", "links", "targetId", "baseRevision"].includes(key))) throw new Error("Invalid memory candidate fields.");
   const kinds: MemoryKind[] = ["preference", "fact", "project", "decision", "goal", "task", "person", "concept"];
   if (!kinds.includes(value.kind as MemoryKind) || !["user-stated", "inference"].includes(String(value.sourceKind))) throw new Error("Invalid memory candidate classification.");
   const title = boundedString(value.title, "title", 400);
@@ -63,11 +106,16 @@ export function validateCandidate(input: unknown): MemoryCandidate {
   const evidence = value.evidence.map((item) => {
     if (!item || typeof item !== "object") throw new Error("Invalid memory evidence.");
     const e = item as Record<string, unknown>;
+    if (Object.keys(e).some((key) => !["messageId", "quote"].includes(key))) throw new Error("Invalid memory evidence fields.");
     const quote = boundedString(e.quote, "evidence quote", 2_000);
     if (containsSecret(quote)) throw new Error("Memory evidence contains secret-like content.");
     return { messageId: id(e.messageId, "evidence messageId"), quote };
   });
-  const links = Array.isArray(value.links) ? value.links.map((link) => id(link, "link")).filter((link) => !/[\\/]/u.test(link) && !link.startsWith(".")) : [];
+  if (typeof value.sensitive !== "boolean") throw new Error("Invalid memory sensitivity.");
+  if (value.baseRevision !== undefined && (!Number.isSafeInteger(value.baseRevision) || Number(value.baseRevision) < 1)) throw new Error("Invalid memory revision.");
+  if (!Array.isArray(value.links)) throw new Error("Invalid memory links.");
+  const links = value.links.map((link) => id(link, "link"));
+  if (links.some((link) => /[\\/]/u.test(link) || link.startsWith("."))) throw new Error("Invalid memory link.");
   if (links.length > 16) throw new Error("Too many memory links.");
   return { kind: value.kind as MemoryKind, title, body, evidence, sourceKind: value.sourceKind as SourceKind, sensitive: value.sensitive === true, links, ...(typeof value.targetId === "string" ? { targetId: id(value.targetId, "targetId") } : {}), ...(typeof value.baseRevision === "number" ? { baseRevision: value.baseRevision } : {}) };
 }
@@ -75,7 +123,7 @@ export function validateCandidate(input: unknown): MemoryCandidate {
 export function classifyCandidate(input: unknown): { status: "auto" | "review" | "rejected"; candidate?: MemoryCandidate; reason?: string } {
   try {
     const candidate = validateCandidate(input);
-    if (candidate.sensitive) return { status: "rejected", reason: "sensitive" };
+    if (candidate.sensitive) return { status: "review", candidate, reason: "sensitive" };
     if (candidate.sourceKind === "inference" || candidate.links.length === 0 && candidate.kind === "fact") return { status: "review", candidate, reason: candidate.sourceKind === "inference" ? "inference" : "unresolved" };
     return { status: "auto", candidate };
   } catch (error) { return { status: "rejected", reason: error instanceof Error ? error.message : "invalid" }; }

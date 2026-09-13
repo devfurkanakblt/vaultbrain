@@ -6,9 +6,12 @@ Documentation and CI evidence do not constitute a production release. Production
 signing, real native installation acceptance and publication remain explicit
 maintainer-owned gates.
 
+The detailed evidence checklist is [RELEASE-ACCEPTANCE.md](RELEASE-ACCEPTANCE.md).
+
 ## One-time signing setup
 
-Generate the production Tauri updater signing key outside this repository. Store the
+Generate the production Tauri updater signing key using the installed Tauri CLI,
+outside this repository. Store the
 private key and its password as GitHub Actions secrets named
 `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, and store the
 matching public key as the repository variable `TAURI_UPDATER_PUBLIC_KEY`. Keep an
@@ -42,7 +45,9 @@ checksums, updater signatures, and provenance; retain the successful run URL as
 release evidence.
 
 Run a real vN to vN+1 updater drill on ephemeral Windows x64, macOS ARM64, and Linux
-x64 hosts. On each host, use a synthetic encrypted vault and record that:
+x64 hosts. The old vN package must itself be production-signed; the unsigned local
+`0.2.0` packages are not a valid old baseline. On each host, use a synthetic
+encrypted vault and record that:
 
 - the user initiates check, download, and final install;
 - the installed version increases and the native application identifier is stable;
@@ -58,6 +63,11 @@ Retain an evidence record for each host with the exact reviewed commit, package
 checksums, signing-key configuration provenance, command transcript, platform and
 tool versions, result, and artifact location. Missing signing material, a missing
 host drill, or an unreviewed result keeps the release gate open.
+
+The script `scripts/release/native-update-acceptance.mjs` is a synthetic package
+transition check. It verifies version, identifier, package-byte and vault-tree
+invariants without installing an updater package, so it cannot satisfy the real
+three-platform gate by itself.
 
 ## Publish or recover
 

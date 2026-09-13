@@ -9,6 +9,7 @@
     "allow-pick-vault-directory",
     "allow-unlock-vault",
     "allow-lock-vault",
+    "allow-memory-owner-controls",
     "allow-list-notes",
     "allow-get-note",
     "allow-save-note",

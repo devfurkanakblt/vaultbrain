@@ -18,8 +18,14 @@ export const VAULT_FORMAT_VERSION = "1.0";
 export interface FormatArtifact {
   /** Where the artifact lives, relative to the vault directory. */
   readonly path: string;
+  /** Whether this is a durable vault artifact, a recovery-time temporary, a contained payload, or an external file. */
+  readonly persistence: "persistent" | "transient" | "nested" | "external";
+  /** Whether the artifact's own bytes are encrypted (rather than merely carrying encrypted children). */
+  readonly protection: "encrypted" | "plaintext";
   /** Anchored POSIX path matcher; absent for nested or external formats. */
   readonly pattern?: RegExp;
+  /** Exact crash-leftover filename shape, never accepted as a live artifact. */
+  readonly temporaryPattern?: RegExp;
   /** A deliberate format-specific limitation, not an implicit skip. */
   readonly limitation?: string;
   /** Versions this build can open. */
@@ -92,6 +98,8 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
   vaultKeyring: {
     pattern: new RegExp("^keyring\\.json$", "u"),
     path: "keyring.json",
+    persistence: "persistent",
+    protection: "encrypted",
     reads: [2],
     writes: [2],
     domains: ["keyringSlot"],
@@ -100,6 +108,8 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
   vaultKeyset: {
     limitation: "Rust refuses transitional keyset v2; finish or roll back re-key with the CLI first.",
     path: "keyring.json (wrapped)",
+    persistence: "nested",
+    protection: "encrypted",
     reads: [1, 2],
     writes: [1, 2],
     domains: ["keyringSlot"],
@@ -108,6 +118,8 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
   encryptedEnvelope: {
     pattern: new RegExp("^[^/]+\\.kv\\.enc$", "u"),
     path: "*.kv.enc",
+    persistence: "persistent",
+    protection: "encrypted",
     reads: [0, 1, 2],
     writes: [1, 2],
     domains: ["keyedEnvelope"],
@@ -116,6 +128,8 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
   keyedEnvelope: {
     pattern: new RegExp("^grants\\.enc$", "u"),
     path: "*.kv.enc, grants.enc",
+    persistence: "persistent",
+    protection: "encrypted",
     reads: [2],
     writes: [2],
     domains: ["keyedEnvelope"],
@@ -124,6 +138,8 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
   documentManifest: {
     pattern: new RegExp("^documents/manifest\\.json$", "u"),
     path: "documents/manifest.json",
+    persistence: "persistent",
+    protection: "plaintext",
     reads: [1, 2],
     writes: [1, 2],
     domains: ["documentKeyCheck"],
@@ -132,6 +148,8 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
   portableWorkspace: {
     pattern: new RegExp("^documents/workspace\\.enc$", "u"),
     path: "documents/workspace.enc",
+    persistence: "persistent",
+    protection: "encrypted",
     reads: [1],
     writes: [1],
     domains: ["workspace"],
@@ -140,6 +158,8 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
   savedViews: {
     pattern: new RegExp("^documents/views\\.enc$", "u"),
     path: "documents/views.enc",
+    persistence: "persistent",
+    protection: "encrypted",
     reads: [1],
     writes: [1],
     domains: ["savedViews"],
@@ -148,6 +168,8 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
   documentIndex: {
     pattern: new RegExp("^documents/index\\.enc$", "u"),
     path: "documents/index.enc",
+    persistence: "persistent",
+    protection: "encrypted",
     reads: [1],
     writes: [1],
     domains: ["documentIndex"],
@@ -156,6 +178,8 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
   pluginPolicy: {
     pattern: new RegExp("^documents/plugin-policy\\.enc$", "u"),
     path: "documents/plugin-policy.enc",
+    persistence: "persistent",
+    protection: "encrypted",
     reads: [1],
     writes: [1],
     domains: ["pluginPolicy"],
@@ -164,6 +188,8 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
   retentionPolicy: {
     pattern: new RegExp("^documents/retention\\.enc$", "u"),
     path: "documents/retention.enc",
+    persistence: "persistent",
+    protection: "encrypted",
     reads: [1],
     writes: [1],
     domains: ["retentionPolicy"],
@@ -172,6 +198,8 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
   documentObjects: {
     pattern: new RegExp("^documents/objects/[a-f0-9-]{36}\\.(?:note|canvas|plugin|pluginstore)\\.enc$", "u"),
     path: "documents/objects/{id}.{note|canvas|plugin|pluginstore}.enc",
+    persistence: "persistent",
+    protection: "encrypted",
     reads: [1],
     writes: [1],
     domains: ["notePrefix", "canvasPrefix", "pluginPrefix", "pluginStorePrefix"],
@@ -180,6 +208,8 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
   documentHistory: {
     pattern: new RegExp("^documents/history/[a-f0-9-]{36}/(?:0|[1-9]\\d*)\\.(?:note|canvas)\\.enc$", "u"),
     path: "documents/history/{id}/{revision}.{note|canvas}.enc",
+    persistence: "persistent",
+    protection: "encrypted",
     reads: [1],
     writes: [1],
     domains: ["noteHistoryPrefix", "canvasHistoryPrefix"],
@@ -188,6 +218,8 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
   attachmentManifest: {
     pattern: new RegExp("^documents/attachments/[a-f0-9]{64}/manifest\\.enc$", "u"),
     path: "documents/attachments/{id}/manifest.enc",
+    persistence: "persistent",
+    protection: "encrypted",
     reads: [1],
     writes: [1],
     domains: ["attachmentId", "attachmentManifestPrefix"],
@@ -196,6 +228,8 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
   attachmentChunks: {
     pattern: new RegExp("^documents/attachments/[a-f0-9]{64}/(?:0|[1-9]\\d*)\\.chunk\\.enc$", "u"),
     path: "documents/attachments/{id}/{index}.chunk.enc",
+    persistence: "persistent",
+    protection: "encrypted",
     reads: [1],
     writes: [1],
     domains: ["attachmentId", "attachmentChunkPrefix"],
@@ -206,6 +240,8 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
       "Re-key refuses vaults containing epoch >=2 changes before commit; epoch keys are not rotated by ordinary re-key.",
     pattern: new RegExp("^documents/sync/changes/[a-f0-9]{64}\\.change\\.enc$", "u"),
     path: "documents/sync/changes/{id}.change.enc",
+    persistence: "persistent",
+    protection: "encrypted",
     reads: [1, 2],
     writes: [1, 2],
     domains: ["syncChangeId", "syncChangeKey", "syncChangeKeyV2", "syncChangePrefix"],
@@ -213,6 +249,8 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
   },
   syncChangeBody: {
     path: "inside sync change envelope",
+    persistence: "nested",
+    protection: "encrypted",
     reads: [1, 2, 3],
     writes: [1, 2, 3],
     domains: ["syncChangeId"],
@@ -221,6 +259,8 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
   syncDeviceRegistry: {
     pattern: new RegExp("^documents/sync/devices\\.enc$", "u"),
     path: "documents/sync/devices.enc",
+    persistence: "persistent",
+    protection: "encrypted",
     reads: [1],
     writes: [1],
     domains: ["syncDeviceRegistry"],
@@ -228,6 +268,8 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
   },
   syncEnrollmentRequest: {
     path: "(transferred)",
+    persistence: "external",
+    protection: "encrypted",
     reads: [1, 2],
     writes: [1, 2],
     domains: ["syncAuthorityKey", "syncAgreementKeyPrefix"],
@@ -236,6 +278,8 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
   syncFreshnessCheckpoint: {
     pattern: new RegExp("^documents/sync/checkpoint\\.enc$", "u"),
     path: "documents/sync/checkpoint.enc",
+    persistence: "persistent",
+    protection: "encrypted",
     reads: [1],
     writes: [1],
     domains: ["syncFreshnessCheckpoint"],
@@ -244,6 +288,8 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
   syncAppliedState: {
     pattern: new RegExp("^documents/sync/applied\\.enc$", "u"),
     path: "documents/sync/applied.enc",
+    persistence: "persistent",
+    protection: "encrypted",
     reads: [1],
     writes: [1],
     domains: ["syncApplied"],
@@ -252,6 +298,11 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
   syncLocalTransaction: {
     pattern: new RegExp("^documents/sync/pending-local\\.enc$", "u"),
     path: "documents/sync/pending-local.enc",
+    // A crash can leave this intent behind, but recovery reads and re-keys it
+    // as a live encrypted payload; classifying it as transient would silently
+    // remove it from the fail-closed re-key boundary.
+    persistence: "persistent",
+    protection: "encrypted",
     reads: [1],
     writes: [1],
     domains: ["syncLocalTransaction"],
@@ -260,6 +311,10 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
   syncApplyReceipt: {
     pattern: new RegExp("^documents/sync/apply-receipt\\.enc$", "u"),
     path: "documents/sync/apply-receipt.enc",
+    // Same recovery rule as pending-local: temporary in lifetime, persistent
+    // for on-disk classification until the owner clears it.
+    persistence: "persistent",
+    protection: "encrypted",
     reads: [1],
     writes: [1],
     domains: ["syncApplyReceipt"],
@@ -268,6 +323,8 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
   syncIdentity: {
     pattern: new RegExp("^documents/sync/identity/(?:authority|[a-f0-9-]{36}(?:\\.x25519)?)\\.key\\.enc$", "u"),
     path: "documents/sync/identity/{authority|device|agreement}.key.enc",
+    persistence: "persistent",
+    protection: "encrypted",
     reads: [1],
     writes: [1],
     domains: ["syncAuthorityKey", "syncDeviceKeyPrefix", "syncAgreementKeyPrefix"],
@@ -276,6 +333,8 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
   syncEpochKey: {
     pattern: new RegExp("^documents/sync/identity/epochs/(?:0|[1-9]\\d*)\\.key\\.enc$", "u"),
     path: "documents/sync/identity/epochs/{epoch}.key.enc",
+    persistence: "persistent",
+    protection: "encrypted",
     reads: [1],
     writes: [1],
     domains: ["syncEpochKeyPrefix", "syncEpochWrap"],
@@ -284,6 +343,8 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
   syncBlob: {
     pattern: new RegExp("^documents/sync/blobs/[a-f0-9]{64}$", "u"),
     path: "documents/sync/blobs/{sha256}",
+    persistence: "persistent",
+    protection: "encrypted",
     reads: [1],
     writes: [1],
     domains: ["syncBlobKey", "attachmentChunkPrefix"],
@@ -291,9 +352,102 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
   },
   vaultBackup: {
     path: "(backup archive)",
+    persistence: "external",
+    protection: "encrypted",
     reads: [1],
     writes: [1],
     domains: ["backupKey", "backupManifestPrefix", "backupEntryPrefix"],
+    rekey: { normal: "preserve", rotateIdentities: "preserve" },
+  },
+  /** Plaintext write intent; recovery consumes it before ordinary document reads continue. */
+  documentJournal: {
+    pattern: new RegExp("^documents/journal\\.json$", "u"),
+    path: "documents/journal.json",
+    persistence: "transient",
+    protection: "plaintext",
+    reads: [1],
+    writes: [1],
+    domains: [],
+    rekey: { normal: "preserve", rotateIdentities: "preserve" },
+  },
+  /** Re-key's durable commit record; it is intentionally not a live vault payload. */
+  rekeyJournal: {
+    path: ".rekey/journal.json",
+    persistence: "transient",
+    protection: "plaintext",
+    reads: [1],
+    writes: [1],
+    domains: [],
+    rekey: { normal: "preserve", rotateIdentities: "preserve" },
+  },
+  /** Verified replacement payloads, held only until the re-key journal installs them. */
+  rekeyNewTree: {
+    path: ".rekey/new/{live artifact}",
+    persistence: "nested",
+    protection: "encrypted",
+    reads: [1],
+    writes: [1],
+    domains: [],
+    rekey: { normal: "reencrypt", rotateIdentities: "rewrite-identities" },
+  },
+  /** Rollback copies created during identity rotation before final deletion. */
+  rekeyOldTree: {
+    path: ".rekey/old/{live artifact}",
+    persistence: "nested",
+    protection: "encrypted",
+    reads: [1],
+    writes: [1],
+    domains: [],
+    rekey: { normal: "preserve", rotateIdentities: "reset" },
+  },
+  /** TypeScript atomic-write sibling; only the exact writer shape is a crash leftover. */
+  typescriptAtomicTemp: {
+    path: ".{final-name}.{pid}.{uuid}.tmp",
+    temporaryPattern: new RegExp("^\\..+\\.[1-9]\\d*\\.[0-9a-f-]{36}\\.tmp$", "u"),
+    persistence: "transient",
+    protection: "encrypted",
+    reads: [1],
+    writes: [1],
+    domains: [],
+    rekey: { normal: "preserve", rotateIdentities: "preserve" },
+  },
+  /** Native atomic-write sibling; UUID-only suffix differs from the TypeScript writer. */
+  rustAtomicTemp: {
+    path: ".{final-name}.{uuid}.tmp",
+    temporaryPattern: new RegExp("^\\..+\\.[0-9a-f-]{36}\\.tmp$", "u"),
+    persistence: "transient",
+    protection: "encrypted",
+    reads: [1],
+    writes: [1],
+    domains: [],
+    rekey: { normal: "preserve", rotateIdentities: "preserve" },
+  },
+  /** The recovery slot mirror lives outside the vault and is independently encrypted. */
+  recoveryKit: {
+    path: "(external recovery kit)",
+    persistence: "external",
+    protection: "encrypted",
+    reads: [1],
+    writes: [1],
+    domains: ["keyringSlot"],
+    rekey: { normal: "preserve", rotateIdentities: "replace-keyset" },
+  },
+  vaultAuditLog: {
+    path: "audit.log",
+    persistence: "persistent",
+    protection: "plaintext",
+    reads: [1],
+    writes: [1],
+    domains: [],
+    rekey: { normal: "preserve", rotateIdentities: "preserve" },
+  },
+  vaultAuditMetadata: {
+    path: "audit.meta.json, audit.head.json",
+    persistence: "persistent",
+    protection: "plaintext",
+    reads: [1],
+    writes: [1],
+    domains: [],
     rekey: { normal: "preserve", rotateIdentities: "preserve" },
   },
 } as const;
@@ -309,7 +463,12 @@ export function artifactForPath(
     relative.startsWith("/")
   )
     throw new Error("Uncatalogued artifact path.");
-  const matches = Object.values(catalogue).filter((entry) => entry.pattern?.test(relative));
+  // This classifier is the live encrypted-file boundary used by re-key. The
+  // catalogue also describes plaintext journals and crash leftovers, but
+  // describing them must never turn them into accepted re-key payloads.
+  const matches = Object.values(catalogue).filter(
+    (entry) => entry.persistence === "persistent" && entry.protection === "encrypted" && entry.pattern?.test(relative),
+  );
   if (matches.length !== 1) throw new Error("Uncatalogued or ambiguous encrypted artifact: " + relative);
   return matches[0];
 }
