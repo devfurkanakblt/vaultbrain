@@ -35,7 +35,7 @@ test("hook records require an offset-bearing ISO timestamp", () => {
 });
 
 test("setup preserves unrelated TOML and refuses to overwrite an existing integration", (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "memory-config-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "memory-config-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const configPath = path.join(root, "config.toml");
   const original = '# owner comment\nmodel = "synthetic"\n[mcp_servers.graphify]\ncommand = "graphify"\n';
@@ -53,7 +53,7 @@ test("setup preserves unrelated TOML and refuses to overwrite an existing integr
 });
 
 test("disconnect refuses to remove user-modified managed config", (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "memory-config-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "memory-config-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const configPath = path.join(root, "config.toml");
   installMemoryConfig({ configPath, nativeExecutable: process.execPath, nodeExecutable: process.execPath, cliPath: path.resolve("dist/cli.js") });

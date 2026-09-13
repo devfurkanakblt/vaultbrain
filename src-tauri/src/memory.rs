@@ -14,11 +14,17 @@ use std::time::{Duration, Instant};
 #[cfg(windows)]
 use tauri::Manager;
 
+#[cfg(windows)]
 const MAX_CANDIDATES: usize = 200;
+#[cfg(windows)]
 const MAX_QUERY: usize = 512;
+#[cfg(any(windows, test))]
 const MAX_QUEUE: usize = 500;
+#[cfg(any(windows, test))]
 const MAX_SOURCE_ID: usize = 240;
+#[cfg(any(windows, test))]
 const MAX_SOURCE_PATH: usize = 4 * 1024;
+#[cfg(any(windows, test))]
 const QUEUE_TTL_DAYS: i64 = 7;
 const MAX_CLIENT_BYTES: usize = 64 * 1024;
 #[cfg(windows)]
@@ -102,6 +108,7 @@ pub(crate) struct MemoryScopeDto {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg(any(windows, test))]
 struct MemoryHookPayload {
     version: u8,
     event: String,
@@ -262,6 +269,7 @@ fn parse_timestamp(value: &str, name: &str) -> Result<DateTime<chrono::FixedOffs
     DateTime::parse_from_rfc3339(value).map_err(|_| format!("invalid {name}"))
 }
 
+#[cfg(any(windows, test))]
 fn source_path_is_safe(value: &str) -> bool {
     if !bounded(value, MAX_SOURCE_PATH)
         || value
@@ -277,10 +285,12 @@ fn source_path_is_safe(value: &str) -> bool {
     rooted && !normalized.split('/').any(|part| part == "..")
 }
 
+#[cfg(any(windows, test))]
 fn bounded_reference(value: &str, max: usize) -> bool {
     bounded(value, max) && !value.chars().any(|character| character.is_control())
 }
 
+#[cfg(any(windows, test))]
 fn validate_hook_payload(
     payload: &MemoryHookPayload,
 ) -> Result<DateTime<chrono::FixedOffset>, String> {
@@ -300,6 +310,7 @@ fn validate_hook_payload(
     Ok(created_at)
 }
 
+#[cfg(any(windows, test))]
 fn parse_hook_payload(value: &Value) -> Result<MemoryHookPayload, String> {
     let payload: MemoryHookPayload = serde_json::from_value(value.clone())
         .map_err(|_| "invalid memory hook payload".to_string())?;
@@ -307,6 +318,7 @@ fn parse_hook_payload(value: &Value) -> Result<MemoryHookPayload, String> {
     Ok(payload)
 }
 
+#[cfg(any(windows, test))]
 fn source_key(payload: &MemoryHookPayload) -> String {
     Sha256::digest(format!("{}\0{}", payload.session_id, payload.turn_id).as_bytes())
         .iter()
@@ -314,6 +326,7 @@ fn source_key(payload: &MemoryHookPayload) -> String {
         .collect()
 }
 
+#[cfg(any(windows, test))]
 fn enqueue_pointer(
     control: &mut MemoryControl,
     payload: MemoryHookPayload,
@@ -392,6 +405,7 @@ fn enqueue_pointer(
     }))
 }
 
+#[cfg(windows)]
 fn enqueue_source(session: &mut VaultSession, params: Option<&Value>) -> Result<Value, String> {
     let mut control = load(session)?;
     if !control.paired || control.paused {
@@ -450,6 +464,7 @@ fn bounded(value: &str, max: usize) -> bool {
             .chars()
             .any(|c| c.is_control() && c != '\n' && c != '\t')
 }
+#[cfg(any(windows, test))]
 fn has_secret(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     lower.contains("password=")
@@ -457,6 +472,7 @@ fn has_secret(value: &str) -> bool {
         || lower.contains("authorization: bearer")
         || lower.contains("-----begin private key")
 }
+#[cfg(any(windows, test))]
 fn validate_candidate(candidate: &MemoryCandidateDto) -> Result<(), String> {
     if !matches!(
         candidate.kind.as_str(),
@@ -509,7 +525,7 @@ pub(crate) fn pair_complete(
     #[cfg(not(windows))]
     {
         let _ = (session, pairing_id, generation);
-        return Err("personal memory is supported only on Windows".into());
+        Err("personal memory is supported only on Windows".into())
     }
 
     #[cfg(windows)]
@@ -572,6 +588,7 @@ pub(crate) fn exclude_scope(
 pub(crate) fn list_review(session: &VaultSession) -> Result<Vec<MemoryCandidateDto>, String> {
     Ok(load(session)?.review)
 }
+#[cfg(windows)]
 pub(crate) fn enqueue_review(
     session: &mut VaultSession,
     mut candidate: MemoryCandidateDto,
@@ -988,6 +1005,7 @@ fn supported_method(method: &str) -> bool {
     )
 }
 
+#[cfg(windows)]
 fn memory_note(note: &NoteDocument, c: &MemoryControl) -> MemoryNoteDto {
     MemoryNoteDto {
         id: note.id.clone(),
@@ -999,6 +1017,7 @@ fn memory_note(note: &NoteDocument, c: &MemoryControl) -> MemoryNoteDto {
         updated_at: note.updated_at.clone(),
     }
 }
+#[cfg(windows)]
 fn public_search(
     session: &VaultSession,
     params: Option<&Value>,
@@ -1034,6 +1053,7 @@ fn public_search(
     notes.truncate(limit);
     Ok(notes)
 }
+#[cfg(windows)]
 fn public_read(session: &VaultSession, params: Option<&Value>) -> Result<MemoryNoteDto, String> {
     let id = params
         .and_then(|v| v.get("id"))
@@ -1052,6 +1072,7 @@ fn public_read(session: &VaultSession, params: Option<&Value>) -> Result<MemoryN
     }
     Ok(memory_note(&note, &c))
 }
+#[cfg(windows)]
 fn public_remember(session: &mut VaultSession, params: Option<&Value>) -> Result<(), String> {
     let mut candidate: MemoryCandidateDto = serde_json::from_value(
         params
@@ -1064,6 +1085,7 @@ fn public_remember(session: &mut VaultSession, params: Option<&Value>) -> Result
     candidate.created_at.clear();
     enqueue_review(session, candidate)
 }
+#[cfg(windows)]
 fn public_forget(session: &mut VaultSession, params: Option<&Value>) -> Result<(), String> {
     let id = params
         .and_then(|v| v.get("id"))
