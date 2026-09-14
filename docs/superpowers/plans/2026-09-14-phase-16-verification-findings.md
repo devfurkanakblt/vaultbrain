@@ -264,7 +264,11 @@ Note and canvas purge, retention, backup create and successful restore, and
 `src-tauri/src/lib.rs:5410` (`remove_dir_all` in `remove_attachment`) is
 UNVERIFIED: it could not be built on this host. This is a product defect with
 security consequences and is not closed by 16.3. It is owned by 16.6:
-[the Phase 16.6 plan](2026-09-14-phase-16-6-non-ascii-vault-removal.md).
+[the Phase 16.6 plan](2026-09-14-phase-16-6-non-ascii-vault-removal.md). 16.6
+has since closed it for `src/`: `purgeAttachment`/`removeAttachment`, re-key
+and identity rotation, and every other removal under `src/` now go through
+`src/fs-tree.ts`, and a source scan fails on any host if a banned removal
+call returns. The Rust analogue stays UNVERIFIED, unchanged.
 
 ## Phase 16.4 — One flaky test
 
