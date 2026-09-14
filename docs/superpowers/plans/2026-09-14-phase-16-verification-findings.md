@@ -263,7 +263,8 @@ Note and canvas purge, retention, backup create and successful restore, and
 `fs-safe.ts` were probed and are unaffected. The Rust analogue at
 `src-tauri/src/lib.rs:5410` (`remove_dir_all` in `remove_attachment`) is
 UNVERIFIED: it could not be built on this host. This is a product defect with
-security consequences and is not closed by 16.3.
+security consequences and is not closed by 16.3. It is owned by 16.6:
+[the Phase 16.6 plan](2026-09-14-phase-16-6-non-ascii-vault-removal.md).
 
 ## Phase 16.4 — One flaky test
 
