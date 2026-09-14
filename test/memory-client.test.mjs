@@ -131,12 +131,17 @@ test("setup reports the owner-typed path for an already-resolved option via give
   const nativeResolved = fs.realpathSync(nativeGiven);
   assert.notEqual(nativeResolved, nativeGiven);
   const configPath = path.join(root, "config.toml");
-  const cliPath = path.resolve("dist/cli.js");
+  // Regular files created inside the test's own temp root, not paths
+  // borrowed from the checkout (e.g. dist/cli.js) — this test must not
+  // depend on whether the checkout itself happens to contain a link
+  // component.
+  const regularFile = path.join(root, "cli.js");
+  fs.writeFileSync(regularFile, "");
   const result = installMemoryConfig({
     configPath,
     nativeExecutable: nativeResolved,
-    nodeExecutable: cliPath,
-    cliPath,
+    nodeExecutable: regularFile,
+    cliPath: regularFile,
     givenPaths: { nativeExecutable: nativeGiven },
   });
   assert.deepEqual(result.resolvedPaths, [{ name: "nativeExecutable", given: nativeGiven, resolved: nativeResolved }]);

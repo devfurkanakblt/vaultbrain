@@ -16,10 +16,13 @@ export function registerMemoryCommands(program: Command): void {
     .option("--config <path>", "client configuration", configDefault)
     .action(async (options) => {
       if (options.client !== "codex") throw new Error("Unsupported memory client.");
-      // Resolve the native executable once, up front: the same resolved path
-      // is used for the pairing check and for the pinned configuration, so a
-      // link retargeted in between cannot let one check pass against a
-      // different binary than the one that gets registered.
+      // Resolve the native executable once, up front: the pairing check and
+      // the pinned configuration both use this same resolved path, so
+      // retargeting the owner's original link after the pairing check cannot
+      // change the binary that gets registered. installMemoryConfig
+      // re-resolves that path with the no-symlink guard at install time, so a
+      // link substituted into the resolved path itself between the two steps
+      // is still refused if it is present at that point.
       const nativeGiven = options.nativeExecutable;
       const nativeResolved = resolveExecutablePath(nativeGiven);
       const status = await callMemoryNative(nativeResolved, "memory_status") as { paired?: boolean };
