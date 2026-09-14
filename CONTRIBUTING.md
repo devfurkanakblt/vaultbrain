@@ -32,6 +32,53 @@ npm run desktop:build
 Use `npm run desktop:dev` for the webview alone, `npm run tauri:dev` for the
 native application and `npm run dev -- --help` for the TypeScript CLI.
 
+### On Windows
+
+Four things about a Windows checkout produce failures that look like defects in
+this repository and are not. None is caught by CI, because a Linux or Windows
+runner has none of them. Read this before filing a bug against a failing check.
+
+**Do not put the checkout under a path containing a non-ASCII character.** This
+is the serious one. Measured on Windows 11 with Node v24.11.1: when any
+component of a path is non-ASCII — `Masaüstü`, `café`, an accented user name —
+every `fs.rmSync` call removes nothing and returns normally (file or directory,
+with or without `recursive`, with or without `force`, never even `ENOENT`), and
+`fs.cpSync(src, dst, { recursive: true })` aborts the process with `0xC0000409`
+(`STATUS_STACK_BUFFER_OVERRUN`). Under an all-ASCII path both behave, and the
+same removal from PowerShell succeeds, so this is Node's defect and not the
+filesystem's. Cloud sync is not a factor; it was isolated against ASCII and
+non-ASCII siblings in the same temp directory. A build that cannot clean its own
+output silently compiles over the previous build, so clone to something like
+`C:\src\vaultbrain`. The
+repository's own scripts walk trees with single-entry calls (see
+`scripts/fs-tree.mjs`) rather than relying on those helpers.
+
+**Run the suite from PowerShell or from Git Bash, but know which `tar` you
+get.** Git for Windows puts GNU tar ahead of `C:\Windows\System32\tar.exe`
+(bsdtar) on PATH. GNU tar reads the leading `C:` of an absolute path as a remote
+host and fails with `Cannot connect to C: resolve failed`.
+`test/platform-artifacts.test.mjs` now picks the system bsdtar itself and
+explains it if no usable reader exists, so this should no longer surprise you.
+
+**Do not run `npm run format` to "fix" `npm run format:check`.** `.gitattributes`
+sets `* text=auto`, so Windows checks files out with CRLF while Prettier defaults
+to `endOfLine: "lf"`. `format:check` reports five files that are byte-identical
+to Prettier's output once carriage returns are stripped. Running `npm run format`
+rewrites them to LF and produces a diff that is pure noise. Confirm carriage
+returns are all it reports, then leave them alone.
+
+**`npm run quality:rust` needs Visual Studio Build Tools** with the "Desktop
+development with C++" workload; the Rust core links with MSVC's `link.exe`.
+Without it, nothing in `src-tauri/` can be verified locally and every Rust
+guarantee rests on CI alone. The command now refuses up front and says so rather
+than letting cargo fail per crate. Note that Git for Windows also ships GNU
+coreutils `link` as `usr\bin\link.exe`; from Git Bash that shadows the MSVC
+linker on PATH, and cargo then reports `link: extra operand '...'`, which names
+neither problem.
+
+A check that could not run on your host is a verification gap, not a pass.
+Report it as not run; do not convert it into a skip.
+
 ## Repository map
 
 - `src/` — CLI, encrypted document engine, grants, plugins, sync and MCP server
