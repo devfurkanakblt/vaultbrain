@@ -103,8 +103,10 @@ being refused. The reasoning, the rejected alternative and the tasks are in
       The library (`installMemoryConfig` resolves an executable path reached
       through a directory junction — the same redirection nvm-windows uses —
       and writes the resolved binary into the managed TOML, or refuses and
-      names the unresolvable path for a dangling junction), the formatter, and
-      the CLI wiring are all covered by tests. What remains is a live
+      names the unresolvable path for a dangling junction) and the formatter
+      are covered by tests; the CLI wiring is covered by inspection and by
+      the library's `givenPaths` tests, since no test loads
+      `src/memory/cli.ts`. What remains is a live
       `vbrain memory setup` run against a real nvm-windows install with a
       paired desktop native executable — no paired desktop has been available
       on any host used for this phase. See the Evidence section below.
@@ -175,21 +177,40 @@ Fail-before / pass-after on this host, `test/memory-client.test.mjs`:
   after adding `givenPaths`: 15/15 pass. This review-findings fix brought
   `test/memory-client.test.mjs` from 13 to 15 tests.
 
-Full suite: `npm test` — 491 tests, 490 pass, 1 fail. The one failure,
-`epoch keys persist under the master key and refuse epoch 1` in
-`test/sync-epoch.test.mjs`, is unrelated to Phase 16.1: `SyntaxError: Invalid
-regular expression: /+1ofthQZH+GvDV6r/u: Nothing to repeat` — the test builds
-a regular expression directly from randomly generated key material, which
-occasionally contains a leading regex metacharacter. Re-running
-`test/sync-epoch.test.mjs` alone passed 9/9, confirming the flake. No failure
-occurred in `test/memory-client.test.mjs` or `test/portable-sync.test.mjs` in
-this run. The most recent prior full run recorded in this repository (before
-this review-findings fix, i.e. Task 2's own closing evidence) was 489 tests,
-489 pass, 0 fail; the two extra tests here are the `givenPaths` tests this fix
+Full suite: `npm test` — **491 tests, 491 pass, 0 fail**. The
+`test/sync-epoch.test.mjs` failure recorded in the previous run of this
+Evidence section (a `SyntaxError` from building a `RegExp` out of random key
+material) is fixed — see "Found beyond 16.1" below — not merely re-flaked;
+this run's zero failures reflect that fix, not luck. No failure occurred in
+`test/memory-client.test.mjs` or `test/portable-sync.test.mjs` in this run.
+The most recent prior full run recorded in this repository (before this
+review-findings fix, i.e. Task 2's own closing evidence) was 489 tests, 489
+pass, 0 fail; the two extra tests here are the `givenPaths` tests this fix
 added. `npm run lint` and `npm run typecheck` both pass with no output.
-`node --test test/fs-removal.test.mjs` — 9/9 pass, confirming
-`src/memory/setup.ts` and `src/memory/cli.ts` introduce no
-`fs.rmSync`/`fs.cpSync` usage.
+`node --test test/memory-client.test.mjs test/sync-epoch.test.mjs
+test/fs-removal.test.mjs` — 33/33 pass, confirming `src/memory/setup.ts` and
+`src/memory/cli.ts` introduce no `fs.rmSync`/`fs.cpSync` usage.
+
+### Found beyond 16.1
+
+`test/sync-epoch.test.mjs:151`, in "epoch keys persist under the master key
+and refuse epoch 1", built a `RegExp` directly from a slice of the epoch
+key's base64 encoding:
+`assert.doesNotMatch(stored, new RegExp(epochKey.toString("base64").slice(0,
+16), "u"))`. Base64 contains `+` and `/`, which are regex metacharacters: a
+leading `+` makes `new RegExp(...)` throw `SyntaxError: Invalid regular
+expression` (seen once during this phase's full-suite run, reported at the
+time as a flake), and a `+` elsewhere in the slice changes what the pattern
+matches, so the assertion could pass even while the raw key's base64 prefix
+is present in the stored ciphertext. Introduced in commit `358b9d3`
+(`feat(sync): persist epoch content keys under the vault key`), which added
+this test.
+Fixed by replacing the regex check with a literal substring check:
+`assert.equal(stored.includes(epochKey.toString("base64").slice(0, 16)),
+false)`, matching the assertion's original intent without treating `+`/`/`
+as metacharacters. This is a test defect, not a product defect —
+`saveEpochKey`'s encryption of the stored file is unaffected; only the test's
+verification of that encryption was unsound.
 
 `vbrain memory setup` itself was NOT RUN end-to-end: it requires a paired
 desktop native executable, and no paired desktop is available on this host.

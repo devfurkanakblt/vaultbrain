@@ -117,19 +117,23 @@ throw `ENOENT` for a dangling junction.
       `### Evidence` section in the style of 16.2's: fail-before and pass-after
       counts from this host, the new tests, full-suite totals. In
       `docs/ROADMAP.md`, tick 16.1. Tick this plan's boxes and add a short
-      `## Evidence` pointer to that section.
+      `## Evidence` pointer to that section. (ROADMAP 16.1 was deliberately left
+      unticked — that step was not followed, since the live nvm-windows run is
+      still outstanding.)
 - [x] Commit.
 
 ## Acceptance gate
 
 - [ ] `vbrain memory setup` completes on a host whose Node is managed by
       nvm-windows, and prints the resolved interpreter path. The library
-      (`installMemoryConfig`), the formatter (`formatResolvedPaths`), and the
-      CLI's resolve-then-check wiring are covered by tests that build their own
-      directory junction standing in for the nvm-windows redirection; what
-      remains is a live `vbrain memory setup` run against a real nvm-windows
-      install with a paired desktop native executable, which no host used for
-      this phase has had available — see Evidence.
+      (`installMemoryConfig`) and the formatter (`formatResolvedPaths`) are
+      covered by tests that build their own directory junction standing in
+      for the nvm-windows redirection; the CLI's resolve-then-check wiring is
+      covered by inspection and by the library's `givenPaths` tests, since no
+      test loads `src/memory/cli.ts`. What remains is a live
+      `vbrain memory setup` run against a real nvm-windows install with a
+      paired desktop native executable, which no host used for this phase
+      has had available — see Evidence.
 - [x] The managed MCP entry names resolved, link-free paths, and this plan documents
       what that means after a Node version switch.
 - [x] A test fails on any host if resolution regresses, if a dangling link is
