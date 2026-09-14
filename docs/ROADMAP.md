@@ -361,6 +361,12 @@ with Phases 12 and 14.
       download reset under concurrent suite load.
 - [ ] 16.5 Triage the twelve open dependency updates, five of which are major
       bumps of crates under the keyring, audit chain and sync envelope.
+- [x] 16.6 Make every removal under `src/` remove. Under a non-ASCII vault path
+      `fs.rmSync` silently removes nothing, so `purgeAttachment` reports a purge
+      that did not happen, a committed re-key keeps its journal and blocks every
+      later re-key, and a failed identity rotation leaves a second wrapped keyset
+      and sync private keys on disk. The plan is
+      [`docs/superpowers/plans/2026-09-14-phase-16-6-non-ascii-vault-removal.md`](superpowers/plans/2026-09-14-phase-16-6-non-ascii-vault-removal.md).
 
 ## Which open phases still need code
 

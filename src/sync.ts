@@ -64,6 +64,7 @@ import {
   type DocumentReadKey,
 } from "./document-crypto.js";
 import { assertNoSymlinkComponents, assertNotSymlink, readTextFileLimited, writeFileAtomic } from "./fs-safe.js";
+import { removeFile } from "./fs-tree.js";
 import { resolveInside } from "./safety.js";
 import { withVaultLock } from "./vault-lock.js";
 import {
@@ -1118,7 +1119,7 @@ export class SyncDeviceManager {
         // agreement key can never be issued an epoch wrap, and the pending-key
         // guard above would then refuse the retry that would fix it. Undo the
         // first write so asking again is all it takes.
-        fs.rmSync(deviceKeyPath(this.session.rootDir, deviceId), { force: true });
+        removeFile(deviceKeyPath(this.session.rootDir, deviceId));
         throw error;
       }
       return validateEnrollmentRequest(request);

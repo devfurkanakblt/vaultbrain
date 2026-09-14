@@ -239,6 +239,17 @@ function validateMacos(bundleDir, outputDir, expected) {
   ];
 }
 
+// Whether a tar, identified by its --version banner, reads a leading drive
+// letter as part of a path. GNU tar reads "C:" as a remote host specification
+// and fails with "Cannot connect to C: resolve failed", so it cannot open an
+// archive by absolute Windows path; bsdtar, shipped as
+// C:\Windows\System32\tar.exe, opens it. This repository writes its own USTAR
+// and PAX records, so tar is only ever a reader here — but a reader that cannot
+// open the file turns a real archive check into an unexplained failure.
+export function readsWindowsPaths(versionOutput) {
+  return /bsdtar|libarchive/iu.test(versionOutput);
+}
+
 export function readWindowsInstallerDetails(msi, execute = execFileSync) {
   return JSON.parse(
     execute(

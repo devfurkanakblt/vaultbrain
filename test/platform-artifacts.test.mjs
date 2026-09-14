@@ -6,10 +6,40 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { readWindowsInstallerDetails } from "../scripts/platform-artifacts.mjs";
+import { readWindowsInstallerDetails, readsWindowsPaths } from "../scripts/platform-artifacts.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const script = path.join(root, "scripts", "platform-artifacts.mjs");
+
+// GNU tar reads the leading "C:" of an absolute Windows path as a remote host
+// specification and fails with "Cannot connect to C: resolve failed", so it
+// cannot read back an archive this repository just wrote. bsdtar, shipped as
+// C:\Windows\System32\tar.exe, reads it as a path. Git for Windows puts GNU tar
+// ahead of it on PATH, which is why these two tests failed on a developer
+// machine and passed in CI. Choose the reader rather than trusting PATH, and
+// say why when no reader on the host will do.
+function archiveReader() {
+  const candidates =
+    process.platform === "win32"
+      ? [path.join(process.env.SystemRoot ?? String.raw`C:\Windows`, "System32", "tar.exe"), "tar"]
+      : ["tar"];
+  const rejected = [];
+  for (const candidate of candidates) {
+    let version;
+    try {
+      version = execFileSync(candidate, ["--version"], { encoding: "utf8" });
+    } catch {
+      rejected.push(`${candidate}: not executable`);
+      continue;
+    }
+    if (process.platform !== "win32" || readsWindowsPaths(version)) return candidate;
+    rejected.push(`${candidate}: ${version.split("\n")[0].trim()} cannot read a drive-letter path`);
+  }
+  throw new Error(
+    `No tar on this host can read an archive by absolute Windows path. Tried:\n  ${rejected.join("\n  ")}\n` +
+      String.raw`Install or restore C:\Windows\System32\tar.exe (bsdtar), which reads a drive letter as a path.`,
+  );
+}
 
 function tempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "vaultbrain-platform-artifacts-"));
@@ -59,6 +89,12 @@ test("passes an MSI path to PowerShell over stdin instead of the command line", 
   assert.ok(!invocation.args.includes(msi), "the MSI path must not be re-parsed as a PowerShell argument");
   assert.match(invocation.args.at(-1), /InputEncoding=\[Text\.UTF8Encoding\]/u);
   assert.match(invocation.args.at(-1), /In\.ReadToEnd/u);
+});
+
+test("a tar is only accepted as an archive reader if it reads a drive letter as a path", () => {
+  assert.equal(readsWindowsPaths("bsdtar 3.8.8 - libarchive 3.8.8 zlib/1.2.13.1-motley cng/2.0"), true);
+  assert.equal(readsWindowsPaths("tar (GNU tar) 1.35\nCopyright (C) 2023 Free Software Foundation, Inc."), false);
+  assert.equal(readsWindowsPaths(""), false);
 });
 
 test("fails when the selected platform's required artifact is absent", () => {
@@ -153,7 +189,7 @@ test("the app archive retains explicit directories and a long nested path", () =
 
     run(["--platform", "macos", "--bundle-dir", bundleDir]);
     const archive = path.join(bundleDir, "macos", "Vault Brain.app.tar.gz");
-    const listing = execFileSync("tar", ["-tvzf", archive], { encoding: "utf8" });
+    const listing = execFileSync(archiveReader(), ["-tvzf", archive], { encoding: "utf8" });
 
     assert.match(listing, /d.+Vault Brain\.app\/Contents\/Resources\/$/mu);
     assert.match(listing, new RegExp(`Vault Brain\\.app/Contents/Resources/${longDirectory}/note\\.txt`, "u"));
@@ -180,7 +216,7 @@ test("the app archive preserves a path longer than the USTAR 255-byte limit", ()
     fs.writeFileSync(nestedFile, "PAX fixture");
 
     run(["--platform", "macos", "--bundle-dir", bundleDir]);
-    const listing = execFileSync("tar", ["-tzf", path.join(bundleDir, "macos", "Vault Brain.app.tar.gz")], {
+    const listing = execFileSync(archiveReader(), ["-tzf", path.join(bundleDir, "macos", "Vault Brain.app.tar.gz")], {
       encoding: "utf8",
     });
     assert.match(listing, new RegExp(`Vault Brain\\.app/Contents/Resources/${segments.join("/")}/note\\.txt`, "u"));

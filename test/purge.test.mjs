@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { DocumentVault } from "../dist/documents.js";
+import { removeTree } from "../dist/fs-tree.js";
 import { SyncedDocumentVault } from "../dist/sync.js";
 
 const PASSPHRASE = "vault-purge-test-passphrase";
@@ -12,6 +13,16 @@ const DEVICE_A = "11111111-1111-4111-8111-111111111111";
 
 function tempVault(label) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `vault-brain-purge-${label}-`));
+}
+
+/**
+ * A vault under a deliberately non-ASCII directory name. On Windows with Node
+ * v24.11.1, fs.rmSync silently removes nothing when any path component is
+ * non-ASCII, so this is the reproduction path for that defect regardless of
+ * where the repository checkout itself happens to live.
+ */
+function nonAsciiTempVault(label) {
+  return fs.mkdtempSync(path.join(os.tmpdir(), `vault-brain-purge-${label}-ü-é-`));
 }
 
 function historyDir(vaultDir, id) {
@@ -145,6 +156,41 @@ test("purging an attachment reports what removeAttachment already did", () => {
   assert.equal(fs.existsSync(path.join(dir, "documents", "attachments", attachment.id)), false);
   assert.equal(vault.listAttachments().length, 0);
   assert.throws(() => vault.purgeAttachment(attachment.id), /not found/iu);
+});
+
+test("purging an attachment removes it even under a non-ASCII vault path", () => {
+  const dir = nonAsciiTempVault("purge-attachment");
+  try {
+    const vault = new DocumentVault(dir, PASSPHRASE);
+    const attachment = vault.putAttachment(Buffer.from("bytes"), "scan.pdf", "application/pdf");
+    const attachmentDir = path.join(dir, "documents", "attachments", attachment.id);
+    assert.equal(fs.existsSync(attachmentDir), true);
+
+    const report = vault.purgeAttachment(attachment.id);
+
+    assert.equal(report.liveRemoved, true);
+    assert.equal(fs.existsSync(attachmentDir), false);
+    assert.equal(vault.listAttachments().length, 0);
+  } finally {
+    removeTree(dir);
+  }
+});
+
+test("removing an attachment removes it even under a non-ASCII vault path", () => {
+  const dir = nonAsciiTempVault("remove-attachment");
+  try {
+    const vault = new DocumentVault(dir, PASSPHRASE);
+    const attachment = vault.putAttachment(Buffer.from("bytes"), "scan.pdf", "application/pdf");
+    const attachmentDir = path.join(dir, "documents", "attachments", attachment.id);
+    assert.equal(fs.existsSync(attachmentDir), true);
+
+    vault.removeAttachment(attachment.id);
+
+    assert.equal(fs.existsSync(attachmentDir), false);
+    assert.equal(vault.listAttachments().length, 0);
+  } finally {
+    removeTree(dir);
+  }
 });
 
 test("a purge on a synchronized vault says what it did not reach", () => {

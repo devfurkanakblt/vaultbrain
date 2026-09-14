@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { listVaultFiles, loadVaultFile } from "./store.js";
 import { assertNotSymlink, readTextFileLimited, writeFileAtomic } from "./fs-safe.js";
+import { removeFile } from "./fs-tree.js";
 import { resolveInside } from "./safety.js";
 import { decrypt, encrypt, type AnyEncryptedPayload } from "./crypto.js";
 
@@ -41,7 +42,7 @@ export function buildSchema(vaultDir: string, passphrase: string): Schema {
   const legacyPath = resolveInside(vaultDir, LEGACY_SCHEMA_FILENAME);
   if (fs.existsSync(legacyPath)) {
     assertNotSymlink(legacyPath);
-    fs.rmSync(legacyPath, { force: true });
+    removeFile(legacyPath);
   }
   return schema;
 }

@@ -6,6 +6,7 @@ import { spawn, execFileSync, spawnSync } from "node:child_process";
 import test from "node:test";
 import { DocumentVault } from "../dist/documents.js";
 import { startSyncRelay, SyncRelayClient } from "../dist/sync-relay.js";
+import { copyTree, removeTree } from "../scripts/fs-tree.mjs";
 
 const PASS = "desktop-helper-passphrase";
 const TOKEN = "desktop-helper-relay-token-012345678901234567890";
@@ -15,7 +16,7 @@ test("the packaged helper starts outside the repository without ambient dependen
   execFileSync(process.execPath, ["scripts/build-desktop-sync-helper.mjs"]);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "packaged-sync-isolated-"));
   try {
-    fs.cpSync("src-tauri/resources/desktop-sync", root, { recursive: true });
+    copyTree("src-tauri/resources/desktop-sync", root);
     const result = spawnSync(path.join(root, process.platform === "win32" ? "node.exe" : "node"), [path.join(root, "dist", "desktop-sync-helper.js")], {
       cwd: root, input: "{}", encoding: "utf8", windowsHide: true,
       env: { ...process.env, NODE_PATH: "", NODE_OPTIONS: "" },
@@ -23,7 +24,7 @@ test("the packaged helper starts outside the repository without ambient dependen
     assert.equal(result.stderr, "");
     assert.equal(JSON.parse(result.stdout).state, "failed");
     assert.equal(result.status, 1);
-  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  } finally { removeTree(root); }
 });
 
 async function call(request) {
@@ -68,6 +69,6 @@ test("packaged helper initializes a device and pushes captured desktop edits", a
   } finally {
     native?.lock();
     await relay?.close();
-    fs.rmSync(root, { recursive: true, force: true });
+    removeTree(root);
   }
 });

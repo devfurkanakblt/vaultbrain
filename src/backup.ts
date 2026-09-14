@@ -12,6 +12,7 @@ import {
   unwrapKeyring,
   zeroKeySet,
 } from "./keyring.js";
+import { removeTree } from "./fs-tree.js";
 import { withVaultLock } from "./vault-lock.js";
 
 export const BACKUP_VERSION = 1;
@@ -540,7 +541,7 @@ export function restoreBackup(archivePath: string, destinationDirectory: string,
       zeroKeySet(opened.keys);
     }
   } catch (error) {
-    if (fs.existsSync(staging)) fs.rmSync(staging, { recursive: true, force: true });
+    if (fs.existsSync(staging)) removeTree(staging);
     throw error;
   } finally {
     fs.closeSync(handle);

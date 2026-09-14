@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { readTextFileLimited } from "./fs-safe.js";
+import { removeFile } from "./fs-tree.js";
 
 const SERVICE = "secondbrain-vault";
 const MACOS_SERVICE = "secondbrain-vault-v2";
@@ -205,7 +206,7 @@ const windowsBackend: KeychainBackend = {
   forget(account) {
     const file = path.join(credentialDir(), `${account}.dpapi`);
     if (!fs.existsSync(file)) return false;
-    fs.rmSync(file, { force: true });
+    removeFile(file);
     return true;
   },
 };

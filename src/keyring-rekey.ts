@@ -26,6 +26,7 @@ import {
   type DocumentPayload,
 } from "./document-crypto.js";
 import { replaceFileAtomic, writeFileAtomic } from "./fs-safe.js";
+import { removeFile, removeTree } from "./fs-tree.js";
 import {
   DEFAULT_SCRYPT_N,
   KEYRING_VERSION,
@@ -439,7 +440,7 @@ export function stageRekey(vaultDir: string, oldKeys: KeySet, newKeys: KeySet, i
       "An interrupted re-key is still journaled; run recovery before staging a new one.",
     );
   }
-  fs.rmSync(stagingRoot(vaultDir), { recursive: true, force: true });
+  removeTree(stagingRoot(vaultDir));
   fs.mkdirSync(tree, { recursive: true, mode: 0o700 });
 
   for (const item of items) {
@@ -472,7 +473,7 @@ export function stageRekey(vaultDir: string, oldKeys: KeySet, newKeys: KeySet, i
       // object, a full disk — with an EBUSY from the removal. A surviving
       // tree is harmless because the next run clears it on entry.
       try {
-        fs.rmSync(stagingRoot(vaultDir), { recursive: true, force: true });
+        removeTree(stagingRoot(vaultDir));
       } catch {
         // Intentionally ignored: the original failure is the one to report.
       }
@@ -557,7 +558,7 @@ export function installStaged(vaultDir: string, journal: RekeyJournal): void {
   // replacement has been installed.
   for (const relative of journal.deletes ?? []) {
     const live = resolveInside(vaultDir, relative);
-    if (fs.existsSync(live)) fs.rmSync(live, { force: true });
+    removeFile(live);
     // Attachment IDs are visible directory names. Remove an old attachment
     // directory once its staged files are gone; leaving an empty directory
     // would preserve the very confirmation oracle identity rotation is meant
@@ -676,12 +677,12 @@ function rewriteAttachmentIdentities(tree: string, keys: KeySet): void {
     plain.fill(0);
     rewritten.fill(0);
   }
-  for (const oldId of replacements.keys()) fs.rmSync(path.join(attachments, oldId), { recursive: true, force: true });
+  for (const oldId of replacements.keys()) removeTree(path.join(attachments, oldId));
 }
 
 function stageIdentitySyncReset(tree: string, passphrase: string, keys: KeySet, options: IdentityRotationOptions): void {
   const sync = path.join(tree, "documents", "sync");
-  fs.rmSync(sync, { recursive: true, force: true });
+  removeTree(sync);
   // The staged root is a self-contained temporary vault solely while the
   // sync owner and bootstrap changes are generated. It is removed before the
   // journal is written; the live keyring remains the commit authority.
@@ -694,7 +695,7 @@ function stageIdentitySyncReset(tree: string, passphrase: string, keys: KeySet, 
     (vault as SyncedDocumentVault & { captureDesktopChanges(): void }).captureDesktopChanges();
     vault.lock();
   } finally {
-    fs.rmSync(path.join(tree, "keyring.json"), { force: true });
+    removeFile(path.join(tree, "keyring.json"));
     forgetVaultKeys(tree);
   }
 }
@@ -755,7 +756,7 @@ export function commitRekey(vaultDir: string, journal: RekeyJournal, keyring: Ke
   writeFileAtomic(journalPath(vaultDir), `${JSON.stringify(journal)}\n`, { mode: 0o600 });
   writeKeyring(vaultDir, keyring);
   installStaged(vaultDir, journal);
-  fs.rmSync(stagingRoot(vaultDir), { recursive: true, force: true });
+  removeTree(stagingRoot(vaultDir));
 }
 
 /**
@@ -768,18 +769,18 @@ export function recoverRekey(vaultDir: string): "none" | "rolled-back" | "finish
   if (!journal) {
     // A staging tree with no journal is an abandoned stage: nothing live was
     // ever touched, so it is safe to drop.
-    fs.rmSync(stagingRoot(vaultDir), { recursive: true, force: true });
+    removeTree(stagingRoot(vaultDir));
     return "none";
   }
 
   const committed = readKeyring(vaultDir)?.slots.some((slot) => slot.id === journal.slotId) ?? false;
   if (!committed) {
-    fs.rmSync(stagingRoot(vaultDir), { recursive: true, force: true });
+    removeTree(stagingRoot(vaultDir));
     return "rolled-back";
   }
 
   installStaged(vaultDir, journal);
-  fs.rmSync(stagingRoot(vaultDir), { recursive: true, force: true });
+  removeTree(stagingRoot(vaultDir));
   return "finished";
 }
 
@@ -1192,7 +1193,7 @@ export function rekeyVault(
         // to be disposable and a denied outcome known to be truthful.
         const safePrecommitFailure = !commitAttempted;
         if (safePrecommitFailure) {
-          fs.rmSync(stagingRoot(vaultDir), { recursive: true, force: true });
+          removeTree(stagingRoot(vaultDir));
         }
         // A rewritten kit already disagrees with an uncommitted vault, so its
         // failure is not a clean denial even though the vault staging tree can

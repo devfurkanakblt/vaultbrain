@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 
 import { appendAudit, readAudit, verifyAudit } from "../dist/audit.js";
 import { DocumentVault } from "../dist/documents.js";
+import { removeTree } from "../dist/fs-tree.js";
 import {
   commitRekey,
   decryptItem,
@@ -55,12 +56,20 @@ function tempDir(label = "rekey") {
 }
 
 /**
+ * os.tmpdir() is ASCII on the hosts this runs on, so a vault under it never
+ * meets the Node defect src/fs-tree.ts exists for: on Windows, fs.rmSync
+ * removes nothing and returns normally when any path component is non-ASCII.
+ */
+function nonAsciiTempDir(label = "rekey") {
+  return fs.mkdtempSync(path.join(os.tmpdir(), `vault-brain-${label}-ü-é-`));
+}
+
+/**
  * A keyring-native vault holding a note with history, a canvas, an
  * attachment, a key-value file, a grant file and an audit chain — one of
  * every artifact class the walk has to classify.
  */
-function seedVault(passphrase = PASSPHRASE) {
-  const dir = tempDir();
+function seedVault(passphrase = PASSPHRASE, dir = tempDir()) {
   const vault = new DocumentVault(dir, passphrase);
   const note = vault.put({ path: "Atlas/First.md", title: "First", body: "# First\n\nbody" });
   vault.put({ id: note.id, path: "Atlas/First.md", title: "First", body: "# First\n\nsecond revision" });
@@ -1549,15 +1558,17 @@ test("identity rotation recovery replays post-install identity deletions after a
   const { dir, attachmentId } = seedVault();
   const next = "phase-77-identity-delete-recovery-passphrase";
   const liveAttachment = path.join(dir, "documents", "attachments", attachmentId, "manifest.enc");
-  const realRmSync = fs.rmSync;
+  // The journaled deletion removes each file with removeFile (src/fs-tree.ts),
+  // which unlinks; that unlink is where the crash lands.
+  const realUnlinkSync = fs.unlinkSync;
   let injected = false;
   try {
-    fs.rmSync = (target, options) => {
+    fs.unlinkSync = (target) => {
       if (!injected && path.resolve(target) === liveAttachment) {
         injected = true;
         throw new Error("simulated crash during identity deletion");
       }
-      return realRmSync(target, options);
+      return realUnlinkSync(target);
     };
     assert.throws(
       () => rekeyVault(dir, PASSPHRASE, next, {
@@ -1566,7 +1577,7 @@ test("identity rotation recovery replays post-install identity deletions after a
       /simulated crash/u,
     );
   } finally {
-    fs.rmSync = realRmSync;
+    fs.unlinkSync = realUnlinkSync;
   }
   assert.equal(injected, true);
   assert.equal(resumeRekey(dir), "finished");
@@ -1581,6 +1592,142 @@ test("identity rotation recovery replays post-install identity deletions after a
   );
   reopened.lock();
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// Phase 16.6: every re-key removal must actually remove under a non-ASCII
+// vault path. When the staging root survived a commit, its journal.json
+// refused every later re-key and made recovery report "rolled-back" for a
+// re-key that had committed.
+test("a committed re-key under a non-ASCII path clears its staging root, and the next re-key runs", (t) => {
+  const { dir } = seedVault(PASSPHRASE, nonAsciiTempDir());
+  t.after(() => {
+    forgetVaultKeys();
+    removeTree(dir);
+  });
+  const third = "phase-16-6-third-passphrase";
+
+  rekeyVault(dir, PASSPHRASE, NEW_PASSPHRASE);
+  assert.equal(fs.existsSync(stagingRoot(dir)), false, "a committed re-key must not leave its staging root or journal");
+
+  const second = rekeyVault(dir, NEW_PASSPHRASE, third);
+  assert.equal(second.resumed, false, "the second run must be a real re-key, not a recovery");
+  assert.equal(second.passphraseChanged, true);
+  assert.equal(fs.existsSync(stagingRoot(dir)), false);
+  assert.equal(recoverRekey(dir), "none");
+
+  forgetVaultKeys();
+  assert.ok(openVaultKeys(dir, third), "the second re-key's passphrase must open the vault");
+});
+
+// Identity rotation removes the old attachment directories and the staged
+// sync state inside the shadow tree, then the temporary keyring beside them.
+// A removal that silently does nothing left a second wrapped keyset under
+// .rekey/new and failed the attachment integrity check.
+test("identity rotation under a non-ASCII path completes and leaves no old identity or staged keyring", (t) => {
+  const { dir, attachmentId } = seedVault(PASSPHRASE, nonAsciiTempDir());
+  t.after(() => {
+    forgetVaultKeys();
+    removeTree(dir);
+  });
+  const next = "phase-16-6-identity-rotation-passphrase";
+
+  rekeyVault(dir, PASSPHRASE, next, {
+    rotateIdentities: { ownerLabel: "Rekeyed owner", ownerDeviceId: "88888888-8888-4888-8888-888888888888" },
+  });
+
+  assert.equal(fs.existsSync(path.join(stagedTree(dir), "keyring.json")), false, "no second wrapped keyset may survive");
+  assert.equal(fs.existsSync(stagingRoot(dir)), false, "identity rotation must not leave its staging root");
+  assert.equal(
+    fs.existsSync(path.join(dir, "documents", "attachments", attachmentId)),
+    false,
+    "the old attachment identity directory must be gone",
+  );
+  assert.equal(recoverRekey(dir), "none");
+
+  forgetVaultKeys();
+  const reopened = new DocumentVault(dir, next);
+  try {
+    const attachments = reopened.listAttachments();
+    assert.equal(attachments.length, 1);
+    assert.notEqual(attachments[0].id, attachmentId);
+    assert.deepEqual(reopened.getAttachment(attachments[0].id).data, Buffer.from("phase 7.4 attachment"));
+  } finally {
+    reopened.lock();
+  }
+});
+
+// Two pre-commit failure points: one inside stageRekey's own loop (its guarded
+// cleanup), and one after staging returned, where rekeyVault's catch and
+// stageIdentitySyncReset's finally do the removing.
+test("a re-key refused during staging under a non-ASCII path leaves no staging root", (t) => {
+  const { dir } = seedVault(PASSPHRASE, nonAsciiTempDir());
+  t.after(() => {
+    forgetVaultKeys();
+    removeTree(dir);
+  });
+  const items = planRekey(dir);
+  const damaged = items[items.length - 1];
+  fs.writeFileSync(
+    path.join(dir, ...damaged.path.split("/")),
+    encryptItem(damaged, randomKeySet(), Buffer.from("not this vault's plaintext")),
+  );
+
+  assert.throws(
+    () => rekeyVault(dir, PASSPHRASE, "phase-16-6-refused-stage-passphrase"),
+    /Unsupported state or unable to authenticate data/u,
+  );
+
+  assert.equal(fs.existsSync(stagingRoot(dir)), false, "a refused stage must not leave its staging root");
+});
+
+// The test above goes through rekeyVault, whose own pre-commit catch also
+// clears the staging root (Task 3's mapping puts that at line ~1196), so a
+// green result there does not prove stageRekey's own guarded cleanup (the
+// catch inside its loop, ~476) does anything at all — rekeyVault's outer
+// cleanup could be masking a regression in stageRekey's. This test calls the
+// exported stageRekey directly, the way "a damaged artifact at the end of the
+// list leaves no partial staging tree" does above, but under a non-ASCII
+// vault path, so only stageRekey's own catch is in a position to remove
+// anything.
+test("stageRekey's own failure cleanup removes the staging root under a non-ASCII path", (t) => {
+  const { dir } = seedVault(PASSPHRASE, nonAsciiTempDir());
+  t.after(() => {
+    forgetVaultKeys();
+    removeTree(dir);
+  });
+  const oldKeys = openVaultKeys(dir, PASSPHRASE);
+  const newKeys = pinnedKeySet(oldKeys);
+  const items = planRekey(dir);
+  assert.ok(items.length > 3, "the seeded vault must hold several artifacts for this to be a mid-loop failure");
+
+  const damaged = items[items.length - 1];
+  fs.writeFileSync(
+    path.join(dir, ...damaged.path.split("/")),
+    encryptItem(damaged, randomKeySet(), Buffer.from("not this vault's plaintext")),
+  );
+
+  assert.throws(
+    () => stageRekey(dir, oldKeys, newKeys, items),
+    /Unsupported state or unable to authenticate data/u,
+  );
+
+  assert.equal(fs.existsSync(stagingRoot(dir)), false, "stageRekey's own catch must clear the staging root it built");
+});
+
+test("an identity rotation refused after staging under a non-ASCII path leaves no staging root", (t) => {
+  const { dir } = seedVault(PASSPHRASE, nonAsciiTempDir());
+  t.after(() => {
+    forgetVaultKeys();
+    removeTree(dir);
+  });
+
+  assert.throws(() => rekeyVault(dir, PASSPHRASE, "phase-16-6-refused-rotation-passphrase", {
+    rotateIdentities: { ownerLabel: "Rekeyed owner", ownerDeviceId: "not-a-device-id" },
+  }), /Sync device ID must be a lowercase UUID/u, "the refusal must come from the sync reset, after staging");
+
+  assert.equal(fs.existsSync(stagingRoot(dir)), false, "a refused identity rotation must not leave its staging root");
+  forgetVaultKeys();
+  assert.ok(openVaultKeys(dir, PASSPHRASE), "the old passphrase must still open the vault");
 });
 
 // seedVault() produces no sync change, so the orchestration's sync-change

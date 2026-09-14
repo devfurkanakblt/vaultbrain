@@ -17,6 +17,7 @@ import {
   readTextFileLimited,
   writeFileAtomic,
 } from "./fs-safe.js";
+import { removeTree } from "./fs-tree.js";
 import { forgetVaultKeys } from "./keyring.js";
 import {
   analyzeMarkdown,
@@ -2624,7 +2625,7 @@ export class DocumentVault {
   removeAttachment(id: string): AttachmentInfo {
     return withVaultLock(this.vaultDir, () => {
       const info = this.readAttachmentManifest(id);
-      fs.rmSync(this.attachmentDir(id), { recursive: true, force: false });
+      removeTree(this.attachmentDir(id));
       return info;
     });
   }
@@ -2724,7 +2725,7 @@ export class DocumentVault {
   purgeAttachment(id: string): PurgeReport {
     return withVaultLock(this.vaultDir, () => {
       const info = this.readAttachmentManifest(id);
-      fs.rmSync(this.attachmentDir(id), { recursive: true, force: false });
+      removeTree(this.attachmentDir(id));
       return {
         version: 1,
         kind: "attachment",

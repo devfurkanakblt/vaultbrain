@@ -1,7 +1,8 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
+import { removeTree } from "../fs-tree.js";
 import {
   MAX_WORKER_INPUT_BYTES,
   MAX_WORKER_OUTPUT_BYTES,
@@ -228,7 +229,7 @@ async function runInternal(input: unknown, options: CodexRunnerOptions): Promise
     if (result.code !== 0) throw new Error("Memory worker failed.");
     return parseWorkerOutput(result.stdout);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeTree(home);
   }
 }
 

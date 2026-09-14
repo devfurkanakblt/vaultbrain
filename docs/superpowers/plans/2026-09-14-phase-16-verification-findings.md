@@ -94,7 +94,7 @@ it, and refusing is only one of two defensible answers.
 - [ ] The managed MCP entry names a path whose meaning is stable and documented.
 - [ ] A test fails if the decided behavior regresses, on any host.
 
-## Phase 16.2 — A build that cannot prove it cleaned itself
+## Phase 16.2 — A build that cannot prove it cleaned itself — CLOSED
 
 Phase 14.3 retired `src/sync/change-log.ts`, and `test/package.test.mjs:10` asserts
 that neither the source nor `dist/sync/change-log.js` survives. On this host the
@@ -106,74 +106,169 @@ the run, because `fs.rmSync(output, { recursive: true, force: true })` in
 The stale file is the small consequence. The real one is that a build claimed
 success while the output directory still held a retired implementation — the exact
 failure mode Phase 13 exists to prevent, and the reason `package.test.mjs` was
-written in the first place. On a host where a sync client, an antivirus scanner or
-an open handle holds one file, `clean-dist` is a no-op that nobody is told about.
+written in the first place.
+
+### What the fix found
+
+The suspected cause — a sync client, a scanner or an open handle holding one file
+— was wrong, and the real one is worse. `fs.rmSync` with `recursive: true` removes
+nothing and returns normally under a path containing a non-ASCII component; this
+checkout lives under `Masaüstü`. Probed three bases on Node v24.11.1: a tree under
+`os.tmpdir()` is removed, a tree under `C:\Users\<user>\OneDrive` is removed, a
+tree under the repository root survives untouched. `fs.unlinkSync` on the same
+entries succeeds, so nothing holds the files. It is the same family as the
+`fs.cpSync` crash in 16.3 item 1: Node's internal recursive filesystem helpers are
+not dependable in this checkout.
+
+So no handle was ever stuck, and this was never intermittent. Every build on this
+machine has compiled on top of its predecessor's output, and the only reason
+anyone noticed is that Phase 14.3 deleted a file whose absence a test asserts.
 
 ### Task 1: Make the clean verifiable
 
-- [ ] Add a failing test: with a file in `dist` that cannot be removed, the build
+- [x] Add a failing test: with a file in `dist` that cannot be removed, the build
       must fail loudly rather than continue.
-- [ ] After the removal, assert the directory is actually gone before `tsc` runs;
+- [x] After the removal, assert the directory is actually gone before `tsc` runs;
       report the paths that survived.
-- [ ] Keep the existing refusal to clean a linked `dist`. Do not add retry loops
+- [x] Keep the existing refusal to clean a linked `dist`. Do not add retry loops
       that hide the condition instead of reporting it.
 
 ### Acceptance gate
 
-- [ ] A build cannot report success while a previous build's output survives.
-- [ ] The failure message names the files that could not be removed.
+- [x] A build cannot report success while a previous build's output survives.
+- [x] The failure message names the files that could not be removed.
 
-## Phase 16.3 — Checks that cannot run, and checks that lie
+### Evidence
 
-Four of the repository's own commands behave differently on a real Windows
-developer machine than in CI. None of these is a product defect; all four cost a
-reviewer time and can be mistaken for one, which is itself the problem.
+`scripts/clean-dist.mjs` now exports `cleanDist(output, { remove })`, walks the
+tree itself rather than calling `fs.rmSync`, and verifies the result: anything
+still under `dist` after the removal aborts the build with the surviving paths
+named, up to twenty, and a count beyond that. The linked-`dist` refusal is
+unchanged and is now taken from `lstat` directly, so a broken link is refused too.
+No retry loop was added.
 
-1. **`fs.cpSync` crashes Node** under this OneDrive-synced checkout. Reproduced
-   directly outside the suite: `fs.cpSync('dist/sync', <temp>, {recursive:true})`
-   exits `-1073740791` (`0xC0000409`, stack buffer overrun) on Node v24.11.1. It
-   takes down `test/desktop-sync-helper.test.mjs`, which builds the helper through
-   `scripts/build-desktop-sync-helper.mjs:18`. The project ledger recorded this in
-   Phase 7.1 and it is still live.
-2. **`tar` resolves to the wrong program** under Git Bash. GNU tar reads
-   `C:\Users\...` as a remote host and fails with `Cannot connect to C: resolve
-   failed`; `test/platform-artifacts.test.mjs` fails two tests. The same command
-   passes 8/8 from PowerShell, where `tar` is `C:\windows\system32\tar.exe`.
-3. **`format:check` reports five files that are byte-identical to Prettier's own
-   output** once carriage returns are stripped. `.gitattributes` sets `* text=auto`,
-   so Windows checks out CRLF while Prettier defaults to `endOfLine: "lf"`. Running
-   `npm run format` locally to "fix" it rewrites the files to LF and produces a diff
-   that is pure noise.
-4. **`quality:rust` cannot run at all.** `cargo 1.98.1` is installed but no Visual
-   Studio Build Tools are (`vswhere.exe` is absent), so `link.exe` is missing and
-   every build script fails to link. Every Rust guarantee on this machine currently
-   rests on CI alone — including, today, the entire Phase 15 broker.
+`test/clean-dist.test.mjs` adds six tests, registered in the `npm test` list. The
+silent-survivor case injects a `remove` that does nothing, so it reproduces the
+observed defect on any host rather than depending on this one's path encoding.
+Before the fix the file did not import; after it, 6/6 pass.
+
+Full suite on this host: 454 tests, 451 pass, 3 fail — from 448/443/5. The
+`package.test.mjs` failure is gone and `npm run build` now removes `dist`. The
+three remaining failures belong to 16.1 (`memory-client`, two) and 16.3 item 1
+(`desktop-sync-helper`). The 16.4 relay flake did not recur in this run and stays
+open under the standing rule that it is not closed on a single green run.
+
+Carried into 16.3: its Task 1 must name the non-ASCII path hazard alongside the
+cloud-sync one, and its Task 2 decision about `fs.cpSync` in the build scripts now
+has a second instance behind it.
+
+## Phase 16.3 — Checks that cannot run, and checks that lie — CLOSED
+
+Four of the repository's own commands behaved differently on a real Windows
+developer machine than in CI. Three of the four original diagnoses were
+incomplete, and one of them was hiding a product defect; the corrected findings
+are recorded under each item.
+
+1. **`fs.cpSync` crashes Node.** Recorded as an OneDrive problem. It is not.
+   `fs.cpSync(src, dst, { recursive: true })` exits `3221226505` (`0xC0000409`,
+   `STATUS_STACK_BUFFER_OVERRUN`) whenever any component of the source path is
+   non-ASCII, and copies normally from an all-ASCII sibling in the same temp
+   directory. Isolated against `ascii`, `ü` and `é` directories outside OneDrive.
+   It is the same defect as 16.2: every `fs.rmSync` call is a silent no-op under
+   the same paths. The same removal from PowerShell succeeds, so the defect is in
+   Node, not the filesystem.
+2. **`tar` resolves to the wrong program** under Git Bash — and, on this host,
+   under PowerShell too, because Git for Windows' `usr\bin` is on the system PATH.
+   GNU tar reads `C:\Users\...` as a remote host. `C:\Windows\System32\tar.exe`
+   is bsdtar 3.8.8 and reads it correctly.
+3. **`format:check` reports five files** that are byte-identical to Prettier's
+   output once carriage returns are stripped. Confirmed for `package.json`,
+   `src-tauri/tauri.conf.json` and `.github/workflows/ci.yml`. Unchanged: this is
+   the one item that is documentation only.
+4. **`quality:rust` cannot run.** Recorded as a missing MSVC linker. That is true
+   — no Visual Studio installation exists — but it is not why cargo's error was
+   unreadable. Git for Windows ships GNU coreutils `link` as `usr\bin\link.exe`;
+   cargo finds it, runs it, and reports `link: extra operand '...'`. The error
+   names neither the missing toolchain nor the wrong program.
 
 ### Task 1: Say all of this once, where a contributor will read it
 
-- [ ] Add a Windows section to `CONTRIBUTING.md`: run the suite from PowerShell,
-      not Git Bash; do not run `npm run format` on a CRLF checkout; a checkout
-      inside a cloud-synced folder will crash the helper build.
-- [ ] Name the Build Tools prerequisite and state plainly that without it the Rust
+- [x] Add a Windows section to `CONTRIBUTING.md`: which `tar` a shell gets; do not
+      run `npm run format` on a CRLF checkout; do not put a checkout under a
+      non-ASCII path. The last one replaces "a cloud-synced folder", which was
+      wrong.
+- [x] Name the Build Tools prerequisite and state plainly that without it the Rust
       half of the project is unverified locally.
 
 ### Task 2: Make the environment failures self-describing
 
-- [ ] Where a test depends on a host-provided program, check the precondition and
-      fail with a message that names the cause — "GNU tar cannot read a Windows
-      path; run this from PowerShell" is a diagnosis, `status 128` is not.
-- [ ] Do not convert any of these into a skip. A check that did not run is recorded
-      as a gap, per the Phase 14 rule.
-- [ ] Decide whether `scripts/build-desktop-sync-helper.mjs` should stop using
-      `fs.cpSync`. A recursive copy helper avoids a crash the project has now hit
-      twice in different phases; the earlier decision to avoid `cpSync` in tests was
-      taken for exactly this reason and never reached the build scripts.
+- [x] `test/platform-artifacts.test.mjs` no longer trusts PATH for `tar`. It
+      prefers the system bsdtar, accepts a reader only if its banner shows it reads
+      a drive letter as a path (`readsWindowsPaths` in
+      `scripts/platform-artifacts.mjs`), and otherwise fails naming every
+      candidate it rejected and why. This goes further than the task asked: the
+      check now runs on this host instead of explaining why it cannot.
+- [x] `npm run quality:rust` now starts with `scripts/rust-toolchain.mjs`, which
+      on Windows looks for a real MSVC linker through `vswhere` and refuses before
+      cargo starts if there is none, naming Build Tools and, when present, the
+      shadowing coreutils `link`. It does nothing on other platforms.
+- [x] No check was converted into a skip.
+- [x] Decided: the build scripts stop using `fs.cpSync` and `fs.rmSync`.
+      `scripts/fs-tree.mjs` provides `removeTree`, `copyTree` and `surviving`,
+      built on `unlink`, `rmdir`, `readdir` and `copyFile`, which are unaffected.
+      `scripts/clean-dist.mjs`, `scripts/build-desktop-sync-helper.mjs` and
+      `test/desktop-sync-helper.test.mjs` use it.
 
 ### Acceptance gate
 
-- [ ] A contributor on Windows can tell, from the failure message alone, which
+- [x] A contributor on Windows can tell, from the failure message alone, which
       failures are theirs and which are their environment's.
-- [ ] No environment-dependent check reports success without running.
+- [x] No environment-dependent check reports success without running.
+
+### Evidence
+
+New tests: `test/fs-tree.test.mjs` (5, run under a deliberately non-ASCII temp
+directory so a return to Node's helpers fails there), `test/rust-toolchain.test.mjs`
+(4), and one in `test/platform-artifacts.test.mjs`. The first two are registered
+in the `npm test` list. Each new test file failed to import before its module
+existed.
+
+- `test/desktop-sync-helper.test.mjs`: crashed the process before; 2/2 now.
+- `npm run test:platform-artifacts` from Git Bash: 6/8 before; 9/9 now.
+- `node scripts/rust-toolchain.mjs` on this host: exit 1 with both causes named.
+- `npm run lint`: exit 0.
+- `npm test`: 463 tests, 459 pass, 4 fail. Two are 16.1 (`memory-client`). Two
+  are in `test/portable-sync.test.mjs` and belong to 16.4 — see the second
+  instance recorded there. This branch changes nothing under `src/`.
+
+`quality:rust` was not run: no MSVC linker on this host. Recorded as NOT RUN.
+
+### What this found beyond 16.3
+
+The Node defect is not confined to build scripts. `fs.rmSync` is used throughout
+`src/` on paths derived from the user's vault directory, and a vault under
+`Masaüstü` is exactly where a Turkish-speaking user keeps one. Probed against
+the real exported APIs, comparing an ASCII vault with a `ü` vault:
+
+- `purgeAttachment` reports `liveRemoved: true`, removes nothing, and the
+  attachment is still returned by `listAttachments()`.
+- After one successful re-key, `journal.json` survives the commit; every later
+  re-key is refused, `recoverRekey` cannot clear it, and recovery reports
+  `rolled-back` for a re-key that committed.
+- Identity rotation fails with `Attachment integrity check failed` and leaves
+  `.rekey/new/keyring.json` — a second wrapped keyset — plus fresh sync authority
+  and device private keys on disk permanently.
+
+Note and canvas purge, retention, backup create and successful restore, and
+`fs-safe.ts` were probed and are unaffected. The Rust analogue at
+`src-tauri/src/lib.rs:5410` (`remove_dir_all` in `remove_attachment`) is
+UNVERIFIED: it could not be built on this host. This is a product defect with
+security consequences and is not closed by 16.3. It is owned by 16.6:
+[the Phase 16.6 plan](2026-09-14-phase-16-6-non-ascii-vault-removal.md). 16.6
+has since closed it for `src/`: `purgeAttachment`/`removeAttachment`, re-key
+and identity rotation, and every other removal under `src/` now go through
+`src/fs-tree.ts`, and a source scan fails on any host if a banned removal
+call returns. The Rust analogue stays UNVERIFIED, unchanged.
 
 ## Phase 16.4 — One flaky test
 
@@ -190,6 +285,17 @@ each with its own loopback relay.
       is legitimate and the client should survive it — in which case the retry
       belongs in the client with a test, not in the test.
 - [ ] Do not mark this closed on a single green run. Run the full suite repeatedly.
+
+**Second instance, 2026-09-14.** A later full run failed a different test in the
+same file: "portable state remains readable after an ordinary content re-key",
+with `EPERM: operation not permitted, rename` while installing
+`.rekey/new/documents/sync/changes/<id>.change.enc` into the live vault under
+`%TEMP%` — an all-ASCII path, so not the 16.2/16.3 Node defect. Run alone it
+passed 3/3. The branch it ran on changed nothing under `src/`. Both instances
+appear only inside the concurrent full suite, so the investigation should cover
+the re-key install's `renameSync` under load as well as the relay download; a
+Windows rename that fails with `EPERM` while another process briefly holds the
+file is a durability question for re-key, not only a test-harness one.
 
 ## Phase 16.5 — The dependency backlog nobody has triaged
 
