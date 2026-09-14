@@ -98,15 +98,16 @@ being refused. The reasoning, the rejected alternative and the tasks are in
 
 ### Acceptance gate
 
-- [x] `vbrain memory setup` completes on a host whose Node is managed by
+- [ ] `vbrain memory setup` completes on a host whose Node is managed by
       nvm-windows, or refuses with a message naming the exact path to use instead.
-      Verified at the library level: `installMemoryConfig` resolves an executable
-      path reached through a directory junction (the same redirection nvm-windows
-      uses) and writes the resolved binary into the managed TOML, or refuses and
-      names the unresolvable path for a dangling junction. Not verified as a live
-      `vbrain memory setup` run against a real nvm-windows install or a paired
-      desktop native executable — no paired desktop is available on this host. See
-      the Evidence section below.
+      The library (`installMemoryConfig` resolves an executable path reached
+      through a directory junction — the same redirection nvm-windows uses —
+      and writes the resolved binary into the managed TOML, or refuses and
+      names the unresolvable path for a dangling junction), the formatter, and
+      the CLI wiring are all covered by tests. What remains is a live
+      `vbrain memory setup` run against a real nvm-windows install with a
+      paired desktop native executable — no paired desktop has been available
+      on any host used for this phase. See the Evidence section below.
 - [x] The managed MCP entry names a path whose meaning is stable and documented.
       The decision paragraph above states the meaning (the binary that ran at
       setup time; a later `nvm use` requires re-running setup) and the CLI prints
@@ -121,38 +122,74 @@ Fail-before / pass-after on this host, `test/memory-client.test.mjs`:
 
 - Before Task 1 (Phase 16 baseline): 2 failures (the two setup tests using
   `process.execPath`, which resolves through the `C:\nvm4w\nodejs` junction on
-  this host). After Task 1: 11/11 pass (`.superpowers/sdd/p16-1-task-1-report.md`
-  RED 6/11 fail — because it also added new junction tests that failed before the
-  fix existed — GREEN 11/11 pass).
-- This task (Task 2) added three tests: a normalization test (forward slashes and
-  a `..` segment through a regular file must not be reported as a resolution — a
+  this host). RED for Task 1, after adding its new junction-based tests but
+  before implementing resolution: 6 of 11 fail —
+  ```
+  ✖ setup preserves unrelated TOML and refuses to overwrite an existing integration
+  ✖ setup resolves a node executable reached through a junction
+  ✖ setup resolves a native executable and cli entry reached through junctions
+  ✖ setup reports no resolutions when no executable path is linked
+  ✖ setup resolves a linked executable under a non-ASCII temporary directory
+  ✖ disconnect refuses to remove user-modified managed config
+  ```
+  (the two pre-existing tests fail with `Refusing symbolic-link path component`,
+  as expected; the four new junction tests fail because no resolution step
+  exists yet; the two tests already correct before the fix — dangling junction,
+  `configPath` through a junction — pass at RED as regression guards, not new
+  bugs). GREEN after Task 1: 11/11 pass.
+- Task 2 added two tests: a normalization test (forward slashes and a `..`
+  segment through a regular file must not be reported as a resolution — a
   review finding: comparing the resolved path against the raw `given` string,
   rather than `path.resolve(given)`, produced a false "resolved" entry even
-  without any link), a `formatResolvedPaths` unit test (entries to lines; empty
-  to no lines), and tightened the dangling-junction test to also match
-  `/Could not resolve installation path/u`. Also fixed a checkout-dependent test
-  (`setup reports no resolutions when no executable path is linked`) that used
-  `path.resolve("dist/cli.js")` to now use a regular file created in its own
-  temp root. RED for the normalization test (confirmed by reverting the
-  `path.resolve(given)` comparison back to a raw-string comparison): 12/13 pass,
-  1 fail —
-  ```
-  ✖ setup does not report a resolution for path normalization without a link
-    AssertionError: Expected values to be strictly deep-equal:
-    + [ { given: '…/sub/node.exe' (forward slashes), name: 'nativeExecutable',
-          resolved: '…\\sub\\node.exe' } ]
-    - []
-  ```
-  GREEN after restoring the fix: `test/memory-client.test.mjs` 13/13 pass.
+  without any link), and a `formatResolvedPaths` unit test (entries to lines;
+  empty to no lines). It also tightened the dangling-junction test's assertion
+  to also match `/Could not resolve installation path/u`, and fixed a
+  checkout-dependent test (`setup reports no resolutions when no executable
+  path is linked`) that used `path.resolve("dist/cli.js")` to instead use a
+  regular file created in its own temp root — both changes to existing tests,
+  not new ones. RED for the normalization test (confirmed by reverting the
+  `path.resolve(given)` comparison back to a raw-string comparison): 12/13
+  pass, 1 fail. GREEN after restoring the fix: 13/13 pass.
+- A later review of Task 2 found the normalization test's `..` case was
+  vacuous: it built the given path with `path.join(root, "sub", "..", "sub",
+  "node.exe")`, which collapses the `..` before `installMemoryConfig` ever
+  sees it, so the assertion could not have caught a regression in that case.
+  The fix builds the string directly
+  (`` `${root}${path.sep}sub${path.sep}..${path.sep}sub${path.sep}node.exe` ``)
+  and asserts it still contains `..` before calling setup. The same review
+  found `src/memory/cli.ts` duplicated `installMemoryConfig`'s "record only
+  when the resolved path differs from `path.resolve(given)`" rule and its
+  fixed name order, to merge in a `nativeExecutable` entry computed from the
+  CLI's own pre-resolution, untested. The fix adds an optional `givenPaths`
+  input to `installMemoryConfig` (the owner-typed path to report as `given`
+  for a name whose option value the caller already resolved); the CLI now
+  passes the pre-resolved native path as `nativeExecutable` and the
+  owner-typed path via `givenPaths.nativeExecutable`, and prints
+  `formatResolvedPaths(result.resolvedPaths)` directly, with no merge logic of
+  its own. Two tests were added: passing an already-resolved native path with
+  `givenPaths.nativeExecutable` set to the junction path yields one entry
+  whose `given` is the junction path and whose `resolved` is the real path;
+  `givenPaths` equal to the path already passed yields no entry. RED for the
+  first (confirmed before `givenPaths` existed): 14/15 pass, 1 fail —
+  `resolvedPaths` came back `[]` instead of naming the native entry. GREEN
+  after adding `givenPaths`: 15/15 pass. This review-findings fix brought
+  `test/memory-client.test.mjs` from 13 to 15 tests.
 
-Full suite: `npm test` — 489 tests, 489 pass, 0 fail. The most recent prior full
-run recorded in this repository (16.6's closing evidence, before Task 1's
-resolution fix landed) was 481 tests, 479 pass, 2 fail — the same two
-`memory-client` setup tests this phase's baseline names. No
-`test/portable-sync.test.mjs` failure occurred in this run. `npm run lint` and
-`npm run typecheck` both pass with no output. `node --test
-test/fs-removal.test.mjs` — 9/9 pass, confirming `src/memory/setup.ts` and
-`src/memory/cli.ts` introduce no `fs.rmSync`/`fs.cpSync` usage.
+Full suite: `npm test` — 491 tests, 490 pass, 1 fail. The one failure,
+`epoch keys persist under the master key and refuse epoch 1` in
+`test/sync-epoch.test.mjs`, is unrelated to Phase 16.1: `SyntaxError: Invalid
+regular expression: /+1ofthQZH+GvDV6r/u: Nothing to repeat` — the test builds
+a regular expression directly from randomly generated key material, which
+occasionally contains a leading regex metacharacter. Re-running
+`test/sync-epoch.test.mjs` alone passed 9/9, confirming the flake. No failure
+occurred in `test/memory-client.test.mjs` or `test/portable-sync.test.mjs` in
+this run. The most recent prior full run recorded in this repository (before
+this review-findings fix, i.e. Task 2's own closing evidence) was 489 tests,
+489 pass, 0 fail; the two extra tests here are the `givenPaths` tests this fix
+added. `npm run lint` and `npm run typecheck` both pass with no output.
+`node --test test/fs-removal.test.mjs` — 9/9 pass, confirming
+`src/memory/setup.ts` and `src/memory/cli.ts` introduce no
+`fs.rmSync`/`fs.cpSync` usage.
 
 `vbrain memory setup` itself was NOT RUN end-to-end: it requires a paired
 desktop native executable, and no paired desktop is available on this host.

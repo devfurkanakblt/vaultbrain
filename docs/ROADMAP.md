@@ -343,7 +343,7 @@ because a Linux runner structurally cannot. The plan is
 Phase 15's own unfinished work stays with Phase 15, and the external gates stay
 with Phases 12 and 14.
 
-- [x] 16.1 Decide what a symlinked interpreter path means to `memory setup`, and
+- [ ] 16.1 Decide what a symlinked interpreter path means to `memory setup`, and
       implement it. `src/memory/setup.ts` now resolves `nodeExecutable`,
       `nativeExecutable` and `cliPath` with `fs.realpathSync` before checking and
       writing them, so a vault owner whose Node is managed by nvm-windows can pair
@@ -353,6 +353,8 @@ with Phases 12 and 14.
       against a real nvm-windows Node or a paired desktop native executable on
       this host. The plan is
       [`docs/superpowers/plans/2026-09-14-phase-16-1-symlinked-interpreter.md`](superpowers/plans/2026-09-14-phase-16-1-symlinked-interpreter.md).
+      Implemented and tested; closes after one live `memory setup` run on an
+      nvm-windows host with a paired desktop.
 - [ ] 16.2 Make `clean-dist` prove it cleaned. A removal that silently failed left
       a retired `dist/sync/change-log.js` in a build that reported success — the
       duplicate-implementation failure Phase 13 exists to prevent, caught only

@@ -64,7 +64,7 @@ throw `ENOENT` for a dangling junction.
 
 ## Task 1: Resolve executable paths in installMemoryConfig
 
-- [ ] In `test/memory-client.test.mjs`, add failing tests. Each builds, under a
+- [x] In `test/memory-client.test.mjs`, add failing tests. Each builds, under a
       temporary root, a real directory holding a regular file and a junction to that
       directory, and passes the file's path *through the junction*:
   - Node executable through a junction: setup succeeds; the managed TOML's
@@ -81,12 +81,12 @@ throw `ENOENT` for a dangling junction.
   - One case built under a non-ASCII temporary directory (for example
     `memory-link-ü-é-`), so the resolution is exercised on the path class that
     broke Phase 16.6.
-- [ ] Update the two existing setup tests, which pass `process.execPath`: expect the
+- [x] Update the two existing setup tests, which pass `process.execPath`: expect the
       resolved path in the TOML (`fs.realpathSync(process.execPath)`), so they pass
       on any host and still fail if the resolution regresses.
-- [ ] Run `npm run build` and `node --test test/memory-client.test.mjs`; record the
+- [x] Run `npm run build` and `node --test test/memory-client.test.mjs`; record the
       failures.
-- [ ] Implement in `src/memory/setup.ts`: resolve the three executable paths first
+- [x] Implement in `src/memory/setup.ts`: resolve the three executable paths first
       (keeping the absolute-path and control-character check on the given path
       before resolution), check the resolved paths with the existing guard and
       regular-file check, write the resolved paths into the table, and return
@@ -94,7 +94,7 @@ throw `ENOENT` for a dangling junction.
       `{ name: "nodeExecutable" | "nativeExecutable" | "cliPath", given, resolved }`
       entries for paths that changed. Keep `checkedPath` for `configPath` unchanged.
       Wrap the `ENOENT` from resolution in an error that names the given path.
-- [ ] `npm run build`, `node --test test/memory-client.test.mjs`, `npm run lint`,
+- [x] `npm run build`, `node --test test/memory-client.test.mjs`, `npm run lint`,
       `npm run typecheck` pass. Commit.
 
 ## Task 2: Show the resolution, and record the evidence
@@ -122,12 +122,14 @@ throw `ENOENT` for a dangling junction.
 
 ## Acceptance gate
 
-- [x] `vbrain memory setup` completes on a host whose Node is managed by
-      nvm-windows, and prints the resolved interpreter path. Verified at the
-      library and formatter level (a directory junction standing in for the
-      nvm-windows redirection) and via the CLI's own resolve-then-check wiring;
-      not run as a live command against a real nvm-windows install or a paired
-      desktop native executable on this host — see Evidence.
+- [ ] `vbrain memory setup` completes on a host whose Node is managed by
+      nvm-windows, and prints the resolved interpreter path. The library
+      (`installMemoryConfig`), the formatter (`formatResolvedPaths`), and the
+      CLI's resolve-then-check wiring are covered by tests that build their own
+      directory junction standing in for the nvm-windows redirection; what
+      remains is a live `vbrain memory setup` run against a real nvm-windows
+      install with a paired desktop native executable, which no host used for
+      this phase has had available — see Evidence.
 - [x] The managed MCP entry names resolved, link-free paths, and this plan documents
       what that means after a Node version switch.
 - [x] A test fails on any host if resolution regresses, if a dangling link is
