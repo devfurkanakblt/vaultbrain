@@ -29,7 +29,7 @@ export interface ResolvedExecutablePath {
  * with write access to the link can retarget without touching the
  * configuration.
  */
-function resolveExecutablePath(file: string): string {
+export function resolveExecutablePath(file: string): string {
   if (!path.isAbsolute(file) || /[\r\n\0]/u.test(file)) throw new Error("An absolute installation path is required.");
   try {
     return fs.realpathSync(file);
@@ -37,6 +37,23 @@ function resolveExecutablePath(file: string): string {
     const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
     throw new Error(`Could not resolve installation path: ${file}${code ? ` (${code})` : ""}`, { cause: error });
   }
+}
+
+/**
+ * Format the executable-path resolutions for display. Only paths whose
+ * resolved form differs from what the owner typed are ever present in
+ * `resolvedPaths` (see `installMemoryConfig`), so every line here reports a
+ * real symbolic-link (or junction) resolution, not mere string
+ * normalization (see `resolveExecutablePath` callers, which compare against
+ * `path.resolve(given)` before recording an entry).
+ */
+export function formatResolvedPaths(resolvedPaths: readonly ResolvedExecutablePath[]): string[] {
+  if (resolvedPaths.length === 0) return [];
+  const lines = resolvedPaths.map(
+    ({ name, given, resolved }) => `Resolved symbolic link for ${name}: ${given} -> ${resolved}`
+  );
+  lines.push("The configuration names the resolved binaries and setup must be run again after switching Node versions.");
+  return lines;
 }
 
 function readConfig(configPath: string): string {
@@ -69,7 +86,10 @@ export function installMemoryConfig(
     checkedPath(resolved);
     if (!fs.statSync(resolved).isFile()) throw new Error("Installation requires a regular executable or entry file.");
     resolvedByName[name] = resolved;
-    if (resolved !== given) resolvedPaths.push({ name, given, resolved });
+    // Compare against the normalized given path, not the raw string: forward
+    // slashes, ".." segments, or other normalization-only differences must
+    // not be reported as a symbolic-link resolution.
+    if (resolved !== path.resolve(given)) resolvedPaths.push({ name, given, resolved });
   }
   const original = readConfig(options.configPath);
   const parsed = TOML.parse(original);

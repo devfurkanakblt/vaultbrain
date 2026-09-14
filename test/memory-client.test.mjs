@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { encodeMemoryRequest, decodeMemoryResponse } from "../dist/memory/client.js";
-import { installMemoryConfig, removeMemoryConfig } from "../dist/memory/setup.js";
+import { formatResolvedPaths, installMemoryConfig, removeMemoryConfig } from "../dist/memory/setup.js";
 import { formatMemoryMcpResult } from "../dist/memory/mcp.js";
 import { parseHookPayload } from "../dist/memory/protocol.js";
 import { removeTree } from "../dist/fs-tree.js";
@@ -121,12 +121,63 @@ test("setup reports no resolutions when no executable path is linked", (t) => {
   const root = junctionRoot("memory-link-");
   t.after(() => removeTree(root));
   const configPath = path.join(root, "config.toml");
-  const cliPath = path.resolve("dist/cli.js");
-  const result = installMemoryConfig({ configPath, nativeExecutable: cliPath, nodeExecutable: cliPath, cliPath });
+  // A regular file created directly under the test's own temp root, not a
+  // path borrowed from the checkout (e.g. dist/cli.js) — this test must not
+  // depend on whether the checkout itself happens to contain no link
+  // component.
+  const regularFile = path.join(root, "cli.js");
+  fs.writeFileSync(regularFile, "");
+  const result = installMemoryConfig({ configPath, nativeExecutable: regularFile, nodeExecutable: regularFile, cliPath: regularFile });
   assert.deepEqual(result.resolvedPaths, []);
   const installed = TOML.parse(fs.readFileSync(configPath, "utf8"));
-  assert.equal(installed.mcp_servers.vaultbrain_memory.command, cliPath);
-  assert.deepEqual(installed.mcp_servers.vaultbrain_memory.args, [cliPath, "memory", "mcp", "--native-executable", cliPath]);
+  assert.equal(installed.mcp_servers.vaultbrain_memory.command, regularFile);
+  assert.deepEqual(installed.mcp_servers.vaultbrain_memory.args, [regularFile, "memory", "mcp", "--native-executable", regularFile]);
+});
+
+test("setup does not report a resolution for path normalization without a link", (t) => {
+  const root = junctionRoot("memory-link-");
+  t.after(() => removeTree(root));
+  const subdir = path.join(root, "sub");
+  fs.mkdirSync(subdir, { recursive: true });
+  const regularFile = path.join(subdir, "node.exe");
+  fs.writeFileSync(regularFile, "");
+  // Forward slashes and a ".." segment collapse to the same resolved path
+  // without following any link; realpathSync only normalizes the string, and
+  // that must not be reported as "Resolved symbolic link ...".
+  const givenWithForwardSlashes = `${root.replace(/\\/gu, "/")}/sub/node.exe`;
+  const givenWithDotDot = path.join(root, "sub", "..", "sub", "node.exe");
+  const configPath = path.join(root, "config.toml");
+  const result = installMemoryConfig({
+    configPath,
+    nativeExecutable: givenWithForwardSlashes,
+    nodeExecutable: givenWithDotDot,
+    cliPath: regularFile,
+  });
+  assert.deepEqual(result.resolvedPaths, []);
+  const installed = TOML.parse(fs.readFileSync(configPath, "utf8"));
+  assert.equal(installed.mcp_servers.vaultbrain_memory.command, fs.realpathSync(regularFile));
+  assert.deepEqual(installed.mcp_servers.vaultbrain_memory.args, [
+    fs.realpathSync(regularFile),
+    "memory",
+    "mcp",
+    "--native-executable",
+    fs.realpathSync(regularFile),
+  ]);
+});
+
+test("formatResolvedPaths turns entries into printable lines, or none when empty", () => {
+  assert.deepEqual(formatResolvedPaths([]), []);
+  assert.deepEqual(
+    formatResolvedPaths([
+      { name: "nodeExecutable", given: "C:\\nvm4w\\nodejs\\node.exe", resolved: "C:\\Users\\me\\nvm\\v24\\node.exe" },
+      { name: "cliPath", given: "C:\\link\\cli.js", resolved: "C:\\real\\cli.js" },
+    ]),
+    [
+      "Resolved symbolic link for nodeExecutable: C:\\nvm4w\\nodejs\\node.exe -> C:\\Users\\me\\nvm\\v24\\node.exe",
+      "Resolved symbolic link for cliPath: C:\\link\\cli.js -> C:\\real\\cli.js",
+      "The configuration names the resolved binaries and setup must be run again after switching Node versions.",
+    ]
+  );
 });
 
 test("setup refuses a dangling junction and leaves the configuration untouched", (t) => {
@@ -149,7 +200,10 @@ test("setup refuses a dangling junction and leaves the configuration untouched",
         nodeExecutable: danglingNode,
         cliPath: path.resolve("dist/cli.js"),
       }),
-    (error) => error instanceof Error && error.message.includes(danglingNode)
+    (error) =>
+      error instanceof Error &&
+      error.message.includes(danglingNode) &&
+      /Could not resolve installation path/u.test(error.message)
   );
   assert.equal(fs.readFileSync(configPath, "utf8"), original);
   const bakFiles = fs.readdirSync(root).filter((name) => /\.vaultbrain-.*\.bak$/u.test(name));

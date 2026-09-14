@@ -5,7 +5,13 @@ import { fileURLToPath } from "node:url";
 import type { Command } from "commander";
 import { callMemoryNative } from "./client.js";
 import { startMemoryMcpServer } from "./mcp.js";
-import { installMemoryConfig, removeMemoryConfig } from "./setup.js";
+import {
+  formatResolvedPaths,
+  installMemoryConfig,
+  removeMemoryConfig,
+  resolveExecutablePath,
+  type ResolvedExecutablePath,
+} from "./setup.js";
 import { parseHookPayload } from "./protocol.js";
 
 export function registerMemoryCommands(program: Command): void {
@@ -16,10 +22,26 @@ export function registerMemoryCommands(program: Command): void {
     .option("--config <path>", "client configuration", configDefault)
     .action(async (options) => {
       if (options.client !== "codex") throw new Error("Unsupported memory client.");
-      const status = await callMemoryNative(options.nativeExecutable, "memory_status") as { paired?: boolean };
+      // Resolve the native executable once, up front: the same resolved path
+      // is used for the pairing check and for the pinned configuration, so a
+      // link retargeted in between cannot let one check pass against a
+      // different binary than the one that gets registered.
+      const nativeGiven = options.nativeExecutable;
+      const nativeResolved = resolveExecutablePath(nativeGiven);
+      const status = await callMemoryNative(nativeResolved, "memory_status") as { paired?: boolean };
       if (!status.paired) throw new Error("Pair this client in the unlocked desktop Memory panel before setup.");
-      installMemoryConfig({ configPath: path.resolve(options.config), nativeExecutable: options.nativeExecutable,
+      const { resolvedPaths } = installMemoryConfig({ configPath: path.resolve(options.config), nativeExecutable: nativeResolved,
         nodeExecutable: process.execPath, cliPath: fileURLToPath(new URL("../cli.js", import.meta.url)) });
+      // installMemoryConfig no longer sees the owner-typed native path (it was
+      // pre-resolved above), so its own resolvedPaths cannot report a native
+      // resolution; merge in the entry computed from the CLI's own
+      // resolution instead, keeping the fixed reporting order.
+      const nativeEntry: ResolvedExecutablePath | undefined =
+        nativeResolved !== path.resolve(nativeGiven) ? { name: "nativeExecutable", given: nativeGiven, resolved: nativeResolved } : undefined;
+      const allResolved = (["nodeExecutable", "nativeExecutable", "cliPath"] as const)
+        .map((name) => (name === "nativeExecutable" ? nativeEntry : resolvedPaths.find((entry) => entry.name === name)))
+        .filter((entry): entry is ResolvedExecutablePath => entry !== undefined);
+      for (const line of formatResolvedPaths(allResolved)) console.log(line);
       console.log("Memory MCP registered. Automatic capture remains disabled until worker and hook compatibility is accepted.");
     });
   for (const name of ["status", "doctor"] as const) {
