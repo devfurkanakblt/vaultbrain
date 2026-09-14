@@ -51,7 +51,7 @@ test("hook records require an offset-bearing ISO timestamp", () => {
 
 test("setup preserves unrelated TOML and refuses to overwrite an existing integration", (t) => {
   const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "memory-config-"));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => removeTree(root));
   const configPath = path.join(root, "config.toml");
   const original = '# owner comment\nmodel = "synthetic"\n[mcp_servers.graphify]\ncommand = "graphify"\n';
   fs.writeFileSync(configPath, original);
@@ -76,7 +76,10 @@ test("setup resolves a node executable reached through a junction", (t) => {
   const resolvedNode = fs.realpathSync(linkedNode);
   assert.notEqual(resolvedNode, linkedNode);
   const configPath = path.join(root, "config.toml");
-  const cliPath = path.resolve("dist/cli.js");
+  // A regular file in the test's own temp root, so a checkout behind a link
+  // cannot add an entry to resolvedPaths.
+  const cliPath = path.join(root, "cli.js");
+  fs.writeFileSync(cliPath, "");
   const result = installMemoryConfig({ configPath, nativeExecutable: cliPath, nodeExecutable: linkedNode, cliPath });
   const installed = TOML.parse(fs.readFileSync(configPath, "utf8"));
   assert.equal(installed.mcp_servers.vaultbrain_memory.command, resolvedNode);
@@ -97,10 +100,12 @@ test("setup resolves a native executable and cli entry reached through junctions
   assert.notEqual(resolvedNative, linkedNative);
   assert.notEqual(resolvedCli, linkedCli);
   const configPath = path.join(root, "config.toml");
+  const regularNode = path.join(root, "node.exe");
+  fs.writeFileSync(regularNode, "");
   const result = installMemoryConfig({
     configPath,
     nativeExecutable: linkedNative,
-    nodeExecutable: path.resolve("dist/cli.js"),
+    nodeExecutable: regularNode,
     cliPath: linkedCli,
   });
   const installed = TOML.parse(fs.readFileSync(configPath, "utf8"));
@@ -328,7 +333,8 @@ test("setup resolves a linked executable under a non-ASCII temporary directory",
   const resolvedNode = fs.realpathSync(linkedNode);
   assert.notEqual(resolvedNode, linkedNode);
   const configPath = path.join(root, "config.toml");
-  const cliPath = path.resolve("dist/cli.js");
+  const cliPath = path.join(root, "cli.js");
+  fs.writeFileSync(cliPath, "");
   const result = installMemoryConfig({ configPath, nativeExecutable: cliPath, nodeExecutable: linkedNode, cliPath });
   const installed = TOML.parse(fs.readFileSync(configPath, "utf8"));
   assert.equal(installed.mcp_servers.vaultbrain_memory.command, resolvedNode);
@@ -337,7 +343,7 @@ test("setup resolves a linked executable under a non-ASCII temporary directory",
 
 test("disconnect refuses to remove user-modified managed config", (t) => {
   const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "memory-config-"));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => removeTree(root));
   const configPath = path.join(root, "config.toml");
   installMemoryConfig({ configPath, nativeExecutable: process.execPath, nodeExecutable: process.execPath, cliPath: path.resolve("dist/cli.js") });
   fs.appendFileSync(configPath, '\n# later owner edit\n');
