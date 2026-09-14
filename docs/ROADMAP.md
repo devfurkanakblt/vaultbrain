@@ -333,3 +333,65 @@ rekey restore behavior. No live integration is enabled by this roadmap entry.
 - [ ] Safe capture and isolated local worker boundary
 - [ ] Owner-controlled MCP, desktop review and forget/relearn lifecycle
 - [ ] Synthetic acceptance evidence and explicit product-owner release decision
+
+## Phase 16 — What the verification run found
+
+A full local verification of `c0236d3` on a real Windows developer machine
+surfaced defects and verification gaps that CI does not catch, two of them
+because a Linux runner structurally cannot. The plan is
+[`docs/superpowers/plans/2026-09-14-phase-16-verification-findings.md`](superpowers/plans/2026-09-14-phase-16-verification-findings.md).
+Phase 15's own unfinished work stays with Phase 15, and the external gates stay
+with Phases 12 and 14.
+
+- [ ] 16.1 Decide what a symlinked interpreter path means to `memory setup`, and
+      implement it. `src/memory/setup.ts` refuses every path with a symlinked
+      component, so no vault owner whose Node is managed by nvm-windows can pair a
+      client at all. The guard is behaving as written; whether it is asking the
+      right question is the open decision.
+- [ ] 16.2 Make `clean-dist` prove it cleaned. A removal that silently failed left
+      a retired `dist/sync/change-log.js` in a build that reported success — the
+      duplicate-implementation failure Phase 13 exists to prevent, caught only
+      because one test happened to assert the file's absence.
+- [ ] 16.3 Document and diagnose the four host-dependent checks: `fs.cpSync`
+      crashing Node under a cloud-synced checkout, GNU `tar` refusing Windows
+      paths under Git Bash, `format:check` reporting carriage returns as style
+      violations, and `quality:rust` being unrunnable without MSVC Build Tools.
+      A check that cannot run stays a gap, never a skip.
+- [ ] 16.4 Diagnose the one flaky test: the portable recovery drill's relay
+      download reset under concurrent suite load.
+- [ ] 16.5 Triage the twelve open dependency updates, five of which are major
+      bumps of crates under the keyring, audit chain and sync envelope.
+
+## Which open phases still need code
+
+A classification of every unchecked item above, so a reader can tell implementation
+work from evidence work without opening five documents. It is a routing note, not a
+new obligation: nothing here adds scope to a phase or moves an item between owners.
+
+**Needs code.**
+
+- **14.2** — the transition-by-transition coverage mapping is still to be signed off
+  ([verification record](PHASE-14-VERIFICATION.md)). If the mapping exposes an
+  uncovered transition, closing it means new tests in `test/keyring-recovery.test.mjs`
+  and `test/rekey-transitions.test.mjs`, not a document change. The rest of 14.2 is
+  independent review of the pinned commit.
+- **14.3** — the remaining encrypted-artifact conformance audit. Phase 13's third
+  item and the Phase 7 follow-up on inventory coverage enforcement both land here.
+- **15** — the worker adapter (the installed `codex-cli 0.154.0-alpha.6.2` is not the
+  `0.153.1` the runner accepts), native lifecycle and generation cancellation, and
+  restore/re-key compatibility. The broker, hook capture and MCP surface are written;
+  their acceptance results are recorded as NOT RUN in
+  [the Phase 15 ledger](PHASE-15-IMPLEMENTATION.md), which is evidence work, not
+  implementation.
+- **16** — 16.1 through 16.4 are defects with named fixes. 16.5 is dependency triage
+  rather than feature work, but the five crypto crate majors sit under the keyring,
+  audit chain and sync envelope, so adapting to a changed API is in scope.
+
+**Does not need code.**
+
+- **Phase 6** external security audit and **14.5** — external gates with named owners.
+- **Phase 12** production signing key, its backup, and the real signed vN→vN+1
+  installation on each platform — operational evidence.
+- **14.0** — reconciling stale roadmap, README, architecture and security prose.
+- **14.1** — the two-desktop enrollment, revocation and offline walkthrough. Manual
+  acceptance; it produces code only if the walkthrough finds a defect.
