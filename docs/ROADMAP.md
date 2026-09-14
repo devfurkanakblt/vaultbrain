@@ -358,11 +358,11 @@ with Phases 12 and 14.
       [`docs/superpowers/plans/2026-09-14-phase-16-1-symlinked-interpreter.md`](superpowers/plans/2026-09-14-phase-16-1-symlinked-interpreter.md).
       Implemented and tested; closes after one live `memory setup` run on an
       nvm-windows host with a paired desktop.
-- [ ] 16.2 Make `clean-dist` prove it cleaned. A removal that silently failed left
+- [x] 16.2 Make `clean-dist` prove it cleaned. A removal that silently failed left
       a retired `dist/sync/change-log.js` in a build that reported success — the
       duplicate-implementation failure Phase 13 exists to prevent, caught only
       because one test happened to assert the file's absence.
-- [ ] 16.3 Document and diagnose the four host-dependent checks: `fs.cpSync`
+- [x] 16.3 Document and diagnose the four host-dependent checks: `fs.cpSync`
       crashing Node under a cloud-synced checkout, GNU `tar` refusing Windows
       paths under Git Bash, `format:check` reporting carriage returns as style
       violations, and `quality:rust` being unrunnable without MSVC Build Tools.
