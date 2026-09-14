@@ -1680,6 +1680,40 @@ test("a re-key refused during staging under a non-ASCII path leaves no staging r
   assert.equal(fs.existsSync(stagingRoot(dir)), false, "a refused stage must not leave its staging root");
 });
 
+// The test above goes through rekeyVault, whose own pre-commit catch also
+// clears the staging root (Task 3's mapping puts that at line ~1196), so a
+// green result there does not prove stageRekey's own guarded cleanup (the
+// catch inside its loop, ~476) does anything at all — rekeyVault's outer
+// cleanup could be masking a regression in stageRekey's. This test calls the
+// exported stageRekey directly, the way "a damaged artifact at the end of the
+// list leaves no partial staging tree" does above, but under a non-ASCII
+// vault path, so only stageRekey's own catch is in a position to remove
+// anything.
+test("stageRekey's own failure cleanup removes the staging root under a non-ASCII path", (t) => {
+  const { dir } = seedVault(PASSPHRASE, nonAsciiTempDir());
+  t.after(() => {
+    forgetVaultKeys();
+    removeTree(dir);
+  });
+  const oldKeys = openVaultKeys(dir, PASSPHRASE);
+  const newKeys = pinnedKeySet(oldKeys);
+  const items = planRekey(dir);
+  assert.ok(items.length > 3, "the seeded vault must hold several artifacts for this to be a mid-loop failure");
+
+  const damaged = items[items.length - 1];
+  fs.writeFileSync(
+    path.join(dir, ...damaged.path.split("/")),
+    encryptItem(damaged, randomKeySet(), Buffer.from("not this vault's plaintext")),
+  );
+
+  assert.throws(
+    () => stageRekey(dir, oldKeys, newKeys, items),
+    /Unsupported state or unable to authenticate data/u,
+  );
+
+  assert.equal(fs.existsSync(stagingRoot(dir)), false, "stageRekey's own catch must clear the staging root it built");
+});
+
 test("an identity rotation refused after staging under a non-ASCII path leaves no staging root", (t) => {
   const { dir } = seedVault(PASSPHRASE, nonAsciiTempDir());
   t.after(() => {
