@@ -14,6 +14,31 @@ function checkedPath(file: string): string {
   return file;
 }
 
+export type ResolvedExecutableName = "nodeExecutable" | "nativeExecutable" | "cliPath";
+
+export interface ResolvedExecutablePath {
+  name: ResolvedExecutableName;
+  given: string;
+  resolved: string;
+}
+
+/**
+ * Resolve an executable path through any symbolic-link (including directory
+ * junction) components before it is validated. A managed `command`/`args`
+ * entry must name the binary that will actually run, not a link that someone
+ * with write access to the link can retarget without touching the
+ * configuration.
+ */
+function resolveExecutablePath(file: string): string {
+  if (!path.isAbsolute(file) || /[\r\n\0]/u.test(file)) throw new Error("An absolute installation path is required.");
+  try {
+    return fs.realpathSync(file);
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+    throw new Error(`Could not resolve installation path: ${file}${code ? ` (${code})` : ""}`, { cause: error });
+  }
+}
+
 function readConfig(configPath: string): string {
   checkedPath(configPath);
   return fs.existsSync(configPath) ? readTextFileLimited(configPath, MAX_CONFIG_BYTES, "Client configuration") : "";
@@ -33,10 +58,18 @@ export interface MemorySetupOptions {
 }
 
 /** Append one parser-validated table, retaining all original bytes and comments. */
-export function installMemoryConfig(options: MemorySetupOptions): { backupPath: string } {
-  for (const file of [options.nativeExecutable, options.nodeExecutable, options.cliPath]) {
-    checkedPath(file);
-    if (!fs.statSync(file).isFile()) throw new Error("Installation requires a regular executable or entry file.");
+export function installMemoryConfig(
+  options: MemorySetupOptions
+): { backupPath: string; resolvedPaths: ResolvedExecutablePath[] } {
+  const resolvedPaths: ResolvedExecutablePath[] = [];
+  const resolvedByName = {} as Record<ResolvedExecutableName, string>;
+  for (const name of ["nodeExecutable", "nativeExecutable", "cliPath"] as const) {
+    const given = options[name];
+    const resolved = resolveExecutablePath(given);
+    checkedPath(resolved);
+    if (!fs.statSync(resolved).isFile()) throw new Error("Installation requires a regular executable or entry file.");
+    resolvedByName[name] = resolved;
+    if (resolved !== given) resolvedPaths.push({ name, given, resolved });
   }
   const original = readConfig(options.configPath);
   const parsed = TOML.parse(original);
@@ -45,8 +78,8 @@ export function installMemoryConfig(options: MemorySetupOptions): { backupPath: 
     throw new Error("A memory integration already exists; disconnect it before setup.");
   }
   const table = TOML.stringify({ mcp_servers: { vaultbrain_memory: {
-    command: options.nodeExecutable,
-    args: [options.cliPath, "memory", "mcp", "--native-executable", options.nativeExecutable],
+    command: resolvedByName.nodeExecutable,
+    args: [resolvedByName.cliPath, "memory", "mcp", "--native-executable", resolvedByName.nativeExecutable],
   } } });
   // Include a digest so removal cannot silently discard owner edits inside the block.
   const digest = crypto.createHash("sha256").update(table).digest("hex");
@@ -57,7 +90,7 @@ export function installMemoryConfig(options: MemorySetupOptions): { backupPath: 
   const backupPath = backup(options.configPath, original);
   if (readConfig(options.configPath) !== original) throw new Error("Client configuration changed during setup.");
   writeFileAtomic(options.configPath, updated);
-  return { backupPath };
+  return { backupPath, resolvedPaths };
 }
 
 export function removeMemoryConfig(configPath: string): { backupPath?: string } {
