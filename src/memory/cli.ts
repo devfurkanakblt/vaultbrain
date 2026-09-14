@@ -17,12 +17,12 @@ export function registerMemoryCommands(program: Command): void {
     .action(async (options) => {
       if (options.client !== "codex") throw new Error("Unsupported memory client.");
       // Resolve the native executable once, up front: the pairing check and
-      // the pinned configuration both use this same resolved path, so
-      // retargeting the owner's original link after the pairing check cannot
-      // change the binary that gets registered. installMemoryConfig
-      // re-resolves that path with the no-symlink guard at install time, so a
-      // link substituted into the resolved path itself between the two steps
-      // is still refused if it is present at that point.
+      // the install use this same resolved path, so retargeting the owner's
+      // original link after the pairing check cannot change the binary that
+      // gets registered. Because it is listed in givenPaths,
+      // installMemoryConfig does not resolve that path again; it refuses it
+      // if any component has become a symbolic link (or junction) since, or
+      // if it no longer resolves to itself.
       const nativeGiven = options.nativeExecutable;
       const nativeResolved = resolveExecutablePath(nativeGiven);
       const status = await callMemoryNative(nativeResolved, "memory_status") as { paired?: boolean };
@@ -32,11 +32,11 @@ export function registerMemoryCommands(program: Command): void {
         nativeExecutable: nativeResolved,
         nodeExecutable: process.execPath,
         cliPath: fileURLToPath(new URL("../cli.js", import.meta.url)),
-        // nativeExecutable was already resolved above (so the pairing check
-        // and the pinned config use the same binary); tell installMemoryConfig
-        // the owner-typed path so it alone applies the "record only when it
-        // differs" rule and the fixed reporting order, instead of this CLI
-        // duplicating that logic.
+        // nativeExecutable was already resolved above; givenPaths marks it
+        // as pre-resolved (see the contract on MemorySetupOptions.givenPaths)
+        // and supplies the owner-typed path, so installMemoryConfig alone
+        // applies the "record only when it differs" rule and the fixed
+        // reporting order.
         givenPaths: { nativeExecutable: nativeGiven },
       });
       for (const line of formatResolvedPaths(resolvedPaths)) console.log(line);

@@ -83,6 +83,14 @@ export interface MemorySetupOptions {
    * supplies the original, owner-typed path here instead of duplicating the
    * "record only when it differs from the resolved path" rule itself. A
    * name absent from `givenPaths` uses its own option value as `given`.
+   *
+   * Contract: for a name present in `givenPaths`, the option value must
+   * already be the resolved path. `installMemoryConfig` does not resolve it
+   * again, so it cannot follow a link substituted into that path after the
+   * caller resolved it. Instead it requires the option value to be absolute,
+   * free of control characters, to have no symbolic-link (or junction)
+   * component, to be a regular file, and to resolve to itself; otherwise it
+   * refuses. A name absent from `givenPaths` is resolved here, then checked.
    */
   givenPaths?: Partial<Record<ResolvedExecutableName, string>>;
 }
@@ -95,9 +103,24 @@ export function installMemoryConfig(
   const resolvedByName = {} as Record<ResolvedExecutableName, string>;
   for (const name of ["nodeExecutable", "nativeExecutable", "cliPath"] as const) {
     const optionValue = options[name];
-    const resolved = resolveExecutablePath(optionValue);
-    checkedPath(resolved);
-    if (!fs.statSync(resolved).isFile()) throw new Error("Installation requires a regular executable or entry file.");
+    const preResolved = options.givenPaths?.[name] !== undefined;
+    let resolved: string;
+    if (preResolved) {
+      // The caller already resolved this path (and may have used it, e.g. for
+      // a pairing check). Resolving it again would follow a link substituted
+      // into it since then to a different binary, so check it as given: the
+      // guard refuses any component that is now a link, and it must still
+      // resolve to itself.
+      resolved = checkedPath(optionValue);
+      if (!fs.statSync(resolved).isFile()) throw new Error("Installation requires a regular executable or entry file.");
+      if (resolveExecutablePath(resolved) !== path.resolve(resolved)) {
+        throw new Error(`Pre-resolved installation path no longer resolves to itself: ${resolved}`);
+      }
+    } else {
+      resolved = resolveExecutablePath(optionValue);
+      checkedPath(resolved);
+      if (!fs.statSync(resolved).isFile()) throw new Error("Installation requires a regular executable or entry file.");
+    }
     resolvedByName[name] = resolved;
     // The reported `given` is the owner-typed path even when the caller had
     // to resolve it before calling us (see `givenPaths`); otherwise it is

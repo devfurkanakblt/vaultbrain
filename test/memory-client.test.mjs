@@ -149,6 +149,49 @@ test("setup reports the owner-typed path for an already-resolved option via give
   assert.equal(installed.mcp_servers.vaultbrain_memory.args[4], nativeResolved);
 });
 
+test("setup refuses a pre-resolved path whose component became a link after resolution", (t) => {
+  // The CLI resolves the native path, runs the pairing check against it, and
+  // only then calls installMemoryConfig. If a component of that resolved path
+  // is swapped for a link in between, the install must not re-resolve it to
+  // wherever the link now points; it must refuse.
+  const root = junctionRoot("memory-link-");
+  t.after(() => removeTree(root));
+  const realDir = path.join(root, "nat-real");
+  fs.mkdirSync(realDir, { recursive: true });
+  fs.writeFileSync(path.join(realDir, "native.exe"), "");
+  const linkDir = path.join(root, "nat-link");
+  fs.symlinkSync(realDir, linkDir, "junction");
+  const nativeGiven = path.join(linkDir, "native.exe");
+  const nativeResolved = fs.realpathSync(nativeGiven);
+  assert.equal(nativeResolved, path.join(realDir, "native.exe"));
+  // Substitution: move the real directory away and put a junction to another
+  // directory holding a different native.exe in its place.
+  fs.renameSync(realDir, path.join(root, "nat-moved"));
+  const evilDir = path.join(root, "evil");
+  fs.mkdirSync(evilDir, { recursive: true });
+  fs.writeFileSync(path.join(evilDir, "native.exe"), "");
+  fs.symlinkSync(evilDir, realDir, "junction");
+  const regularFile = path.join(root, "cli.js");
+  fs.writeFileSync(regularFile, "");
+  const configPath = path.join(root, "config.toml");
+  const original = "# owner comment\n";
+  fs.writeFileSync(configPath, original);
+  assert.throws(
+    () =>
+      installMemoryConfig({
+        configPath,
+        nativeExecutable: nativeResolved,
+        nodeExecutable: regularFile,
+        cliPath: regularFile,
+        givenPaths: { nativeExecutable: nativeGiven },
+      }),
+    /symbolic-link/iu
+  );
+  assert.equal(fs.readFileSync(configPath, "utf8"), original);
+  const bakFiles = fs.readdirSync(root).filter((name) => /\.vaultbrain-.*\.bak$/u.test(name));
+  assert.deepEqual(bakFiles, []);
+});
+
 test("setup reports no entry when givenPaths repeats the path already passed", (t) => {
   const root = junctionRoot("memory-link-");
   t.after(() => removeTree(root));
