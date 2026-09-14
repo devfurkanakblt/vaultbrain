@@ -348,10 +348,13 @@ with Phases 12 and 14.
       `nativeExecutable` and `cliPath` with `fs.realpathSync` before checking and
       writing them, so a vault owner whose Node is managed by nvm-windows can pair
       a client; `configPath` still refuses a symbolic-link component. The CLI
-      prints every resolution and the nvm-version-switch note. Verified at the
-      library and formatter level and via the CLI's wiring; not run end-to-end
-      against a real nvm-windows Node or a paired desktop native executable on
-      this host. The plan is
+      prints every resolution and the nvm-version-switch note. The library and
+      the formatter are covered by tests; the CLI wiring is covered by
+      inspection and by the library's `givenPaths` tests, since no test loads
+      `src/memory/cli.ts`. A test also shows the library refuses a pre-resolved
+      path whose component has since become a link. Not run end-to-end against
+      a real nvm-windows Node or a paired desktop native executable on this
+      host. The plan is
       [`docs/superpowers/plans/2026-09-14-phase-16-1-symlinked-interpreter.md`](superpowers/plans/2026-09-14-phase-16-1-symlinked-interpreter.md).
       Implemented and tested; closes after one live `memory setup` run on an
       nvm-windows host with a paired desktop.

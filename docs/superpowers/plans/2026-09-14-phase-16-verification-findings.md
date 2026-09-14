@@ -176,8 +176,34 @@ Fail-before / pass-after on this host, `test/memory-client.test.mjs`:
   `resolvedPaths` came back `[]` instead of naming the native entry. GREEN
   after adding `givenPaths`: 15/15 pass. This review-findings fix brought
   `test/memory-client.test.mjs` from 13 to 15 tests.
+- The final branch review reproduced a substitution the `setup` comment claimed
+  was closed: resolve `nat-link\native.exe` to `nat-real\native.exe`, rename
+  `nat-real` away, create a junction `nat-real` pointing at `evil\`, then call
+  `installMemoryConfig` with the pre-resolved path and `givenPaths`. Setup
+  succeeded and pinned `evil\native.exe`, because `installMemoryConfig`
+  resolved the path again and the guard only saw the link-free target. The fix:
+  for a name present in `givenPaths`, `installMemoryConfig` no longer resolves
+  the option value; it runs the absolute-path and control-character check and
+  the no-symlink-component guard on the value itself, requires a regular file,
+  and requires the value to still resolve to itself. A new test,
+  `setup refuses a pre-resolved path whose component became a link after
+  resolution`, performs that sequence with junctions in its own temp root and
+  expects a `symbolic-link` refusal, an unchanged configuration and no backup.
+  RED (before the fix): 16 tests, 15 pass, 1 fail, with
+  `AssertionError [ERR_ASSERTION]: Missing expected exception.` because setup
+  succeeded. GREEN after the fix: 16/16 pass, including both `givenPaths`
+  tests. The same review had three tests (node through a junction, native and
+  CLI through junctions, and the non-ASCII case) switched from
+  `path.resolve("dist/cli.js")` to regular files in their own temp roots, and
+  the two older setup tests switched their cleanup to `removeTree`.
 
-Full suite: `npm test` — **491 tests, 491 pass, 0 fail**. The
+Full suite after the final review's substitution fix: `npm test` — **492 tests,
+492 pass, 0 fail, 0 cancelled, 0 skipped**; the one extra test is the
+substitution test. `node --test test/memory-client.test.mjs
+test/fs-removal.test.mjs` — 25/25 pass; `npm run lint` and `npm run typecheck`
+pass. The previous full run is kept below for the record.
+
+Previous full suite: `npm test` — **491 tests, 491 pass, 0 fail**. The
 `test/sync-epoch.test.mjs` failure recorded in the previous run of this
 Evidence section (a `SyntaxError` from building a `RegExp` out of random key
 material) is fixed — see "Found beyond 16.1" below — not merely re-flaked;
@@ -218,7 +244,9 @@ The behavior it depends on (resolution, the guard, the TOML write, the printed
 lines) is covered by the library and formatter tests above and by the CLI
 wiring in `src/memory/cli.ts`, which resolves the native executable once and
 passes the same resolved path to both the pairing check and
-`installMemoryConfig`. What remains: an actual run against a real nvm-windows
+`installMemoryConfig`. The install does not resolve that path again, and
+refuses it if any component has since become a link or it no longer resolves
+to itself (tested at the library level). What remains: an actual run against a real nvm-windows
 Node and a paired desktop, and the acceptance runbook that would exercise it.
 
 ## Phase 16.2 — A build that cannot prove it cleaned itself — CLOSED

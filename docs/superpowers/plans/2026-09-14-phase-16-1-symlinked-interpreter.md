@@ -115,11 +115,11 @@ throw `ENOENT` for a dangling junction.
 - [x] In `docs/superpowers/plans/2026-09-14-phase-16-verification-findings.md`,
       tick the 16.1 Task 2 and Acceptance gate items that are satisfied and add a
       `### Evidence` section in the style of 16.2's: fail-before and pass-after
-      counts from this host, the new tests, full-suite totals. In
-      `docs/ROADMAP.md`, tick 16.1. Tick this plan's boxes and add a short
-      `## Evidence` pointer to that section. (ROADMAP 16.1 was deliberately left
-      unticked — that step was not followed, since the live nvm-windows run is
-      still outstanding.)
+      counts from this host, the new tests, full-suite totals. Tick this plan's
+      boxes and add a short `## Evidence` pointer to that section.
+- [ ] In `docs/ROADMAP.md`, tick 16.1. Left unticked on purpose: it waits for a
+      live `vbrain memory setup` run on an nvm-windows host with a paired
+      desktop, which is still outstanding.
 - [x] Commit.
 
 ## Acceptance gate
