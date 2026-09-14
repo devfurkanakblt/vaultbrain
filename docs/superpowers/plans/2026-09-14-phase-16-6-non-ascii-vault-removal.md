@@ -170,7 +170,7 @@ merged with the new module: the scripts run before `tsc` and cannot import
       second wrapped keyset or sync private keys under the staging root.
 - [x] No `rmSync` or `cpSync` remains under `src/`, and a test fails on any host if
       one returns.
-- [ ] The Rust analogue is recorded as UNVERIFIED, not as passing.
+- [x] The Rust analogue is recorded as UNVERIFIED, not as passing.
 
 ## Evidence
 
