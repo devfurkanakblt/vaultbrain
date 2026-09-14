@@ -19,14 +19,18 @@ import path from "node:path";
 // .mjs script. The two copies exist so both sides of that boundary get the
 // same fix; keep them in sync.
 
-export function removeTree(target: string): void {
-  let stat: fs.Stats | undefined;
+function linkStat(target: string): fs.Stats | undefined {
   try {
-    stat = fs.lstatSync(target);
+    return fs.lstatSync(target);
   } catch (error) {
-    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return;
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return undefined;
     throw error;
   }
+}
+
+export function removeTree(target: string): void {
+  const stat = linkStat(target);
+  if (!stat) return;
   if (stat.isDirectory() && !stat.isSymbolicLink()) {
     for (const entry of fs.readdirSync(target)) removeTree(path.join(target, entry));
     fs.rmdirSync(target);
@@ -36,13 +40,8 @@ export function removeTree(target: string): void {
 }
 
 export function removeFile(target: string): void {
-  let stat: fs.Stats | undefined;
-  try {
-    stat = fs.lstatSync(target);
-  } catch (error) {
-    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return;
-    throw error;
-  }
+  const stat = linkStat(target);
+  if (!stat) return;
   if (stat.isDirectory() && !stat.isSymbolicLink()) {
     throw new Error(`Refusing to remove a directory as a file: ${target}`);
   }
