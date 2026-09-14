@@ -94,7 +94,7 @@ it, and refusing is only one of two defensible answers.
 - [ ] The managed MCP entry names a path whose meaning is stable and documented.
 - [ ] A test fails if the decided behavior regresses, on any host.
 
-## Phase 16.2 — A build that cannot prove it cleaned itself
+## Phase 16.2 — A build that cannot prove it cleaned itself — CLOSED
 
 Phase 14.3 retired `src/sync/change-log.ts`, and `test/package.test.mjs:10` asserts
 that neither the source nor `dist/sync/change-log.js` survives. On this host the
@@ -106,22 +106,61 @@ the run, because `fs.rmSync(output, { recursive: true, force: true })` in
 The stale file is the small consequence. The real one is that a build claimed
 success while the output directory still held a retired implementation — the exact
 failure mode Phase 13 exists to prevent, and the reason `package.test.mjs` was
-written in the first place. On a host where a sync client, an antivirus scanner or
-an open handle holds one file, `clean-dist` is a no-op that nobody is told about.
+written in the first place.
+
+### What the fix found
+
+The suspected cause — a sync client, a scanner or an open handle holding one file
+— was wrong, and the real one is worse. `fs.rmSync` with `recursive: true` removes
+nothing and returns normally under a path containing a non-ASCII component; this
+checkout lives under `Masaüstü`. Probed three bases on Node v24.11.1: a tree under
+`os.tmpdir()` is removed, a tree under `C:\Users\<user>\OneDrive` is removed, a
+tree under the repository root survives untouched. `fs.unlinkSync` on the same
+entries succeeds, so nothing holds the files. It is the same family as the
+`fs.cpSync` crash in 16.3 item 1: Node's internal recursive filesystem helpers are
+not dependable in this checkout.
+
+So no handle was ever stuck, and this was never intermittent. Every build on this
+machine has compiled on top of its predecessor's output, and the only reason
+anyone noticed is that Phase 14.3 deleted a file whose absence a test asserts.
 
 ### Task 1: Make the clean verifiable
 
-- [ ] Add a failing test: with a file in `dist` that cannot be removed, the build
+- [x] Add a failing test: with a file in `dist` that cannot be removed, the build
       must fail loudly rather than continue.
-- [ ] After the removal, assert the directory is actually gone before `tsc` runs;
+- [x] After the removal, assert the directory is actually gone before `tsc` runs;
       report the paths that survived.
-- [ ] Keep the existing refusal to clean a linked `dist`. Do not add retry loops
+- [x] Keep the existing refusal to clean a linked `dist`. Do not add retry loops
       that hide the condition instead of reporting it.
 
 ### Acceptance gate
 
-- [ ] A build cannot report success while a previous build's output survives.
-- [ ] The failure message names the files that could not be removed.
+- [x] A build cannot report success while a previous build's output survives.
+- [x] The failure message names the files that could not be removed.
+
+### Evidence
+
+`scripts/clean-dist.mjs` now exports `cleanDist(output, { remove })`, walks the
+tree itself rather than calling `fs.rmSync`, and verifies the result: anything
+still under `dist` after the removal aborts the build with the surviving paths
+named, up to twenty, and a count beyond that. The linked-`dist` refusal is
+unchanged and is now taken from `lstat` directly, so a broken link is refused too.
+No retry loop was added.
+
+`test/clean-dist.test.mjs` adds six tests, registered in the `npm test` list. The
+silent-survivor case injects a `remove` that does nothing, so it reproduces the
+observed defect on any host rather than depending on this one's path encoding.
+Before the fix the file did not import; after it, 6/6 pass.
+
+Full suite on this host: 454 tests, 451 pass, 3 fail — from 448/443/5. The
+`package.test.mjs` failure is gone and `npm run build` now removes `dist`. The
+three remaining failures belong to 16.1 (`memory-client`, two) and 16.3 item 1
+(`desktop-sync-helper`). The 16.4 relay flake did not recur in this run and stays
+open under the standing rule that it is not closed on a single green run.
+
+Carried into 16.3: its Task 1 must name the non-ASCII path hazard alongside the
+cloud-sync one, and its Task 2 decision about `fs.cpSync` in the build scripts now
+has a second instance behind it.
 
 ## Phase 16.3 — Checks that cannot run, and checks that lie
 
