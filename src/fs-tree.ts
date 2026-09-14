@@ -3,10 +3,11 @@ import path from "node:path";
 
 // Some of Node's filesystem calls are not dependable on every host. Measured on
 // Windows 11 with Node v24.11.1: when any component of a path is non-ASCII,
-// every fs.rmSync call removes nothing and returns normally — file or
-// directory, with or without recursive, with or without force, never even
-// ENOENT. Under an all-ASCII path it behaves, and the same removal from
-// PowerShell succeeds, so the defect is Node's and not the filesystem's.
+// the single-call recursive-removal helper in "node:fs" removes nothing and
+// returns normally — file or directory, with or without recursive, with or
+// without force, never even ENOENT. Under an all-ASCII path it behaves, and
+// the same removal from PowerShell succeeds, so the defect is Node's and not
+// the filesystem's.
 // unlink, rmdir, readdir and lstat are unaffected, so this module walks trees
 // with those and lets every error surface.
 //

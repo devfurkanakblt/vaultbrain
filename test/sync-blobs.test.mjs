@@ -8,6 +8,7 @@ import test from "node:test";
 import { SyncBlobStore, sealAttachmentBlobs } from "../dist/sync-blobs.js";
 import { decryptDocumentBytes } from "../dist/document-crypto.js";
 import { attachmentChunkAad } from "../dist/format-version.js";
+import { removeTree } from "../dist/fs-tree.js";
 
 const KEY = crypto.randomBytes(32);
 const ATTACHMENT_ID = "c".repeat(64);
@@ -54,6 +55,30 @@ test("the blob store refuses a body that does not hash to its id", () => {
 
   store.remove(id);
   assert.equal(store.has(id), false);
+});
+
+test("the blob store's remove deletes the blob file under a non-ASCII directory path", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-blobs-ü-é-"));
+  const store = new SyncBlobStore(dir);
+  const body = Buffer.from("hello");
+  const id = crypto.createHash("sha256").update(body).digest("hex");
+
+  store.put(id, body);
+  assert.equal(store.has(id), true);
+  const files = fs.readdirSync(dir, { recursive: true }).filter((name) => name.includes(id));
+  assert.ok(files.length > 0);
+
+  store.remove(id);
+
+  // Node's fs.rmSync-based removal silently does nothing under a non-ASCII
+  // path on Windows; this asserts the blob file is actually gone.
+  assert.equal(store.has(id), false);
+  assert.deepEqual(
+    fs.readdirSync(dir, { recursive: true }).filter((name) => name.includes(id)),
+    [],
+  );
+
+  removeTree(dir);
 });
 
 test("the blob store rejects an oversize body and a malformed id", () => {

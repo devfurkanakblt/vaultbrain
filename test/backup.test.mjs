@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { createBackup, restoreBackup, verifyBackup } from "../dist/backup.js";
 import { DocumentVault } from "../dist/documents.js";
+import { removeTree } from "../dist/fs-tree.js";
 import { rekeyVault } from "../dist/keyring-rekey.js";
 
 const PASSPHRASE = "vault-backup-test-passphrase";
@@ -109,6 +110,25 @@ test("a backup the passphrase cannot open is refused before anything is written"
     fs.readdirSync(outside).filter((name) => name.includes("restoring")),
     [],
   );
+});
+
+test("a failed restore leaves no staging debris under a non-ASCII path", () => {
+  const { dir } = seededVault();
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-backup-wrong-ü-é-"));
+  const archive = path.join(outside, "vault.vbrainbackup");
+  createBackup(dir, archive, PASSPHRASE);
+  const destination = path.join(outside, "restored");
+
+  assert.throws(() => restoreBackup(archive, destination, "not-the-passphrase"), /Unable to unlock/u);
+  assert.equal(fs.existsSync(destination), false);
+  // Node's fs.rmSync-based cleanup silently does nothing under a non-ASCII
+  // path on Windows; this asserts the staging directory is actually gone.
+  assert.deepEqual(
+    fs.readdirSync(outside).filter((name) => name.includes("restoring")),
+    [],
+  );
+
+  removeTree(outside);
 });
 
 test("an altered archive is refused rather than half-restored", () => {

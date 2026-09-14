@@ -93,3 +93,36 @@ test("removeFile handed a directory throws rather than removing it", () => {
 
   removeTree(root);
 });
+
+// Node's fs.rmSync/fs.cpSync (and their promises and non-fs-qualified
+// equivalents) are the defect this module exists to route around. This scan
+// fails on any host — including Linux CI, which cannot reproduce the
+// underlying Windows defect — if a source file under src/ still calls one of
+// them, so a new call site cannot slip back in silently. src/fs-tree.ts gets
+// no exemption: it must not use them either, even to explain the defect it
+// works around, so its own comments avoid spelling the banned names.
+const BANNED_CALL = /\brmSync\b|\bcpSync\b|\bfs\.rm\(|\bfs\.cp\(|promises\.rm\b|promises\.cp\b/;
+
+function listTsFiles(dir) {
+  const out = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...listTsFiles(full));
+    else if (entry.isFile() && entry.name.endsWith(".ts")) out.push(full);
+  }
+  return out;
+}
+
+test("no source file under src/ calls Node's non-ASCII-unsafe recursive removal helpers", () => {
+  const srcDir = path.join(import.meta.dirname, "..", "src");
+  const offenses = [];
+
+  for (const file of listTsFiles(srcDir)) {
+    const lines = fs.readFileSync(file, "utf8").split("\n");
+    lines.forEach((line, index) => {
+      if (BANNED_CALL.test(line)) offenses.push(`${path.relative(srcDir, file)}:${index + 1}: ${line.trim()}`);
+    });
+  }
+
+  assert.deepEqual(offenses, []);
+});

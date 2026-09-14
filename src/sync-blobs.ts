@@ -10,6 +10,7 @@ import {
 import { ATTACHMENT_CHUNK_SIZE } from "./documents.js";
 import { AAD, attachmentChunkAad } from "./format-version.js";
 import { assertNotSymlink, writeFileAtomic } from "./fs-safe.js";
+import { removeFile } from "./fs-tree.js";
 import { resolveInside } from "./safety.js";
 
 export const MAX_BLOB_BYTES = 2 * 1024 * 1024;
@@ -132,6 +133,6 @@ export class SyncBlobStore {
   }
 
   remove(id: string): void {
-    fs.rmSync(this.pathFor(id), { force: true });
+    removeFile(this.pathFor(id));
   }
 }
