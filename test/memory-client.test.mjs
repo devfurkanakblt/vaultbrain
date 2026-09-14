@@ -117,6 +117,49 @@ test("setup resolves a native executable and cli entry reached through junctions
   ]);
 });
 
+test("setup reports the owner-typed path for an already-resolved option via givenPaths", (t) => {
+  // The CLI resolves nativeExecutable itself, up front (so the pairing check
+  // and the pinned config use the same binary), then passes the already-
+  // resolved path as the nativeExecutable option. installMemoryConfig must
+  // still report the owner-typed (junction) path as `given` when told about
+  // it via givenPaths, not the already-resolved path it was actually given.
+  const root = junctionRoot("memory-link-");
+  t.after(() => removeTree(root));
+  const { realDir, linkDir } = buildJunction(root, "native");
+  fs.writeFileSync(path.join(realDir, "vaultbrain-native"), "");
+  const nativeGiven = path.join(linkDir, "vaultbrain-native");
+  const nativeResolved = fs.realpathSync(nativeGiven);
+  assert.notEqual(nativeResolved, nativeGiven);
+  const configPath = path.join(root, "config.toml");
+  const cliPath = path.resolve("dist/cli.js");
+  const result = installMemoryConfig({
+    configPath,
+    nativeExecutable: nativeResolved,
+    nodeExecutable: cliPath,
+    cliPath,
+    givenPaths: { nativeExecutable: nativeGiven },
+  });
+  assert.deepEqual(result.resolvedPaths, [{ name: "nativeExecutable", given: nativeGiven, resolved: nativeResolved }]);
+  const installed = TOML.parse(fs.readFileSync(configPath, "utf8"));
+  assert.equal(installed.mcp_servers.vaultbrain_memory.args[4], nativeResolved);
+});
+
+test("setup reports no entry when givenPaths repeats the path already passed", (t) => {
+  const root = junctionRoot("memory-link-");
+  t.after(() => removeTree(root));
+  const configPath = path.join(root, "config.toml");
+  const regularFile = path.join(root, "cli.js");
+  fs.writeFileSync(regularFile, "");
+  const result = installMemoryConfig({
+    configPath,
+    nativeExecutable: regularFile,
+    nodeExecutable: regularFile,
+    cliPath: regularFile,
+    givenPaths: { nativeExecutable: regularFile },
+  });
+  assert.deepEqual(result.resolvedPaths, []);
+});
+
 test("setup reports no resolutions when no executable path is linked", (t) => {
   const root = junctionRoot("memory-link-");
   t.after(() => removeTree(root));
@@ -143,9 +186,13 @@ test("setup does not report a resolution for path normalization without a link",
   fs.writeFileSync(regularFile, "");
   // Forward slashes and a ".." segment collapse to the same resolved path
   // without following any link; realpathSync only normalizes the string, and
-  // that must not be reported as "Resolved symbolic link ...".
+  // that must not be reported as "Resolved symbolic link ...". Built without
+  // path.join/path.resolve so the ".." segment survives into the string
+  // installMemoryConfig actually receives (path.join would collapse it
+  // before the call, making the assertion vacuous).
   const givenWithForwardSlashes = `${root.replace(/\\/gu, "/")}/sub/node.exe`;
-  const givenWithDotDot = path.join(root, "sub", "..", "sub", "node.exe");
+  const givenWithDotDot = `${root}${path.sep}sub${path.sep}..${path.sep}sub${path.sep}node.exe`;
+  assert.ok(givenWithDotDot.includes(".."), "fixture must actually contain a .. segment");
   const configPath = path.join(root, "config.toml");
   const result = installMemoryConfig({
     configPath,

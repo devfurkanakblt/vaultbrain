@@ -40,12 +40,14 @@ export function resolveExecutablePath(file: string): string {
 }
 
 /**
- * Format the executable-path resolutions for display. Only paths whose
- * resolved form differs from what the owner typed are ever present in
- * `resolvedPaths` (see `installMemoryConfig`), so every line here reports a
- * real symbolic-link (or junction) resolution, not mere string
- * normalization (see `resolveExecutablePath` callers, which compare against
- * `path.resolve(given)` before recording an entry).
+ * Format the executable-path resolutions for display. `resolvedPaths` always
+ * comes from `installMemoryConfig` — directly, or via a caller's
+ * `givenPaths` when it had to resolve a path itself before calling in (see
+ * `MemorySetupOptions.givenPaths`) — which alone applies the
+ * `resolved !== path.resolve(given)` rule. Only paths whose resolved form
+ * differs from what the owner typed are ever present, so every line here
+ * reports a real symbolic-link (or junction) resolution, not mere string
+ * normalization.
  */
 export function formatResolvedPaths(resolvedPaths: readonly ResolvedExecutablePath[]): string[] {
   if (resolvedPaths.length === 0) return [];
@@ -72,6 +74,17 @@ export interface MemorySetupOptions {
   nativeExecutable: string;
   nodeExecutable: string;
   cliPath: string;
+  /**
+   * Owner-typed path to report as `given` (and to compare against the
+   * resolved path) for a name whose option value here has already been
+   * resolved by the caller. A caller that must resolve a path itself before
+   * calling `installMemoryConfig` (for example to reuse the resolved path
+   * for a check that must run against the same binary that gets installed)
+   * supplies the original, owner-typed path here instead of duplicating the
+   * "record only when it differs from the resolved path" rule itself. A
+   * name absent from `givenPaths` uses its own option value as `given`.
+   */
+  givenPaths?: Partial<Record<ResolvedExecutableName, string>>;
 }
 
 /** Append one parser-validated table, retaining all original bytes and comments. */
@@ -81,14 +94,18 @@ export function installMemoryConfig(
   const resolvedPaths: ResolvedExecutablePath[] = [];
   const resolvedByName = {} as Record<ResolvedExecutableName, string>;
   for (const name of ["nodeExecutable", "nativeExecutable", "cliPath"] as const) {
-    const given = options[name];
-    const resolved = resolveExecutablePath(given);
+    const optionValue = options[name];
+    const resolved = resolveExecutablePath(optionValue);
     checkedPath(resolved);
     if (!fs.statSync(resolved).isFile()) throw new Error("Installation requires a regular executable or entry file.");
     resolvedByName[name] = resolved;
-    // Compare against the normalized given path, not the raw string: forward
-    // slashes, ".." segments, or other normalization-only differences must
-    // not be reported as a symbolic-link resolution.
+    // The reported `given` is the owner-typed path even when the caller had
+    // to resolve it before calling us (see `givenPaths`); otherwise it is
+    // the option value itself. Compare against the normalized given path,
+    // not the raw string: forward slashes, ".." segments, or other
+    // normalization-only differences must not be reported as a
+    // symbolic-link resolution.
+    const given = options.givenPaths?.[name] ?? optionValue;
     if (resolved !== path.resolve(given)) resolvedPaths.push({ name, given, resolved });
   }
   const original = readConfig(options.configPath);
