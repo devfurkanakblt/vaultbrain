@@ -64,16 +64,25 @@ it, and refusing is only one of two defensible answers.
 
 ### Task 1: Decide what a symlinked interpreter path means
 
-- [ ] Write the decision down before writing code. Two candidates: resolve the path
+- [x] Write the decision down before writing code. Two candidates: resolve the path
       with `fs.realpathSync` and record the resolved target in the managed config,
       so the configuration names the binary that will actually run; or keep refusing
       and tell the user the exact resolved path to pass instead.
-- [ ] State which threat the choice addresses and which it accepts. Resolving pins
+- [x] State which threat the choice addresses and which it accepts. Resolving pins
       the binary but freezes the nvm version, so a later `nvm use` silently leaves
       the configuration pointing at an older interpreter. Refusing keeps the user in
       control but makes the command unusable for a common, legitimate setup.
-- [ ] Record whether the same reasoning applies to `nativeExecutable` and `cliPath`,
+- [x] Record whether the same reasoning applies to `nativeExecutable` and `cliPath`,
       which go through the identical check.
+
+**Decided, 2026-09-14: resolve, then record and show.** The three executable paths
+are resolved with `fs.realpathSync`, checked in resolved form by the unchanged
+guard, and written resolved into the managed TOML; setup prints every path it
+resolved and says to run setup again after switching Node versions, so the `nvm use`
+cost is stated rather than silent. `nativeExecutable` and `cliPath` follow the same
+rule. `configPath` does not: a link there redirects where setup writes, and it keeps
+being refused. The reasoning, the rejected alternative and the tasks are in
+[the Phase 16.1 plan](2026-09-14-phase-16-1-symlinked-interpreter.md).
 
 ### Task 2: Implement the decision
 
