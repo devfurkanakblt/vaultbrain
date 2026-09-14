@@ -86,22 +86,82 @@ being refused. The reasoning, the rejected alternative and the tasks are in
 
 ### Task 2: Implement the decision
 
-- [ ] Add a failing test that constructs a symlinked interpreter path itself rather
+- [x] Add a failing test that constructs a symlinked interpreter path itself rather
       than depending on how the host's Node happens to be installed — the current
       tests pass on CI purely because a Linux runner's Node is not symlinked, which
       is why this was never caught.
-- [ ] Implement the decided behavior and assert on what lands in the managed TOML,
+- [x] Implement the decided behavior and assert on what lands in the managed TOML,
       not just on the absence of a throw.
-- [ ] Cover the negative case that the guard exists for: a path component that is a
+- [x] Cover the negative case that the guard exists for: a path component that is a
       symlink pointing somewhere unexpected must still be refused or resolved
       visibly, never silently accepted.
 
 ### Acceptance gate
 
-- [ ] `vbrain memory setup` completes on a host whose Node is managed by
+- [x] `vbrain memory setup` completes on a host whose Node is managed by
       nvm-windows, or refuses with a message naming the exact path to use instead.
-- [ ] The managed MCP entry names a path whose meaning is stable and documented.
-- [ ] A test fails if the decided behavior regresses, on any host.
+      Verified at the library level: `installMemoryConfig` resolves an executable
+      path reached through a directory junction (the same redirection nvm-windows
+      uses) and writes the resolved binary into the managed TOML, or refuses and
+      names the unresolvable path for a dangling junction. Not verified as a live
+      `vbrain memory setup` run against a real nvm-windows install or a paired
+      desktop native executable — no paired desktop is available on this host. See
+      the Evidence section below.
+- [x] The managed MCP entry names a path whose meaning is stable and documented.
+      The decision paragraph above states the meaning (the binary that ran at
+      setup time; a later `nvm use` requires re-running setup) and the CLI prints
+      the resolution and that note; see Evidence.
+- [x] A test fails if the decided behavior regresses, on any host. The junction
+      tests in `test/memory-client.test.mjs` build their own link rather than
+      depending on the host's Node installation.
+
+### Evidence
+
+Fail-before / pass-after on this host, `test/memory-client.test.mjs`:
+
+- Before Task 1 (Phase 16 baseline): 2 failures (the two setup tests using
+  `process.execPath`, which resolves through the `C:\nvm4w\nodejs` junction on
+  this host). After Task 1: 11/11 pass (`.superpowers/sdd/p16-1-task-1-report.md`
+  RED 6/11 fail — because it also added new junction tests that failed before the
+  fix existed — GREEN 11/11 pass).
+- This task (Task 2) added three tests: a normalization test (forward slashes and
+  a `..` segment through a regular file must not be reported as a resolution — a
+  review finding: comparing the resolved path against the raw `given` string,
+  rather than `path.resolve(given)`, produced a false "resolved" entry even
+  without any link), a `formatResolvedPaths` unit test (entries to lines; empty
+  to no lines), and tightened the dangling-junction test to also match
+  `/Could not resolve installation path/u`. Also fixed a checkout-dependent test
+  (`setup reports no resolutions when no executable path is linked`) that used
+  `path.resolve("dist/cli.js")` to now use a regular file created in its own
+  temp root. RED for the normalization test (confirmed by reverting the
+  `path.resolve(given)` comparison back to a raw-string comparison): 12/13 pass,
+  1 fail —
+  ```
+  ✖ setup does not report a resolution for path normalization without a link
+    AssertionError: Expected values to be strictly deep-equal:
+    + [ { given: '…/sub/node.exe' (forward slashes), name: 'nativeExecutable',
+          resolved: '…\\sub\\node.exe' } ]
+    - []
+  ```
+  GREEN after restoring the fix: `test/memory-client.test.mjs` 13/13 pass.
+
+Full suite: `npm test` — 489 tests, 489 pass, 0 fail. The most recent prior full
+run recorded in this repository (16.6's closing evidence, before Task 1's
+resolution fix landed) was 481 tests, 479 pass, 2 fail — the same two
+`memory-client` setup tests this phase's baseline names. No
+`test/portable-sync.test.mjs` failure occurred in this run. `npm run lint` and
+`npm run typecheck` both pass with no output. `node --test
+test/fs-removal.test.mjs` — 9/9 pass, confirming `src/memory/setup.ts` and
+`src/memory/cli.ts` introduce no `fs.rmSync`/`fs.cpSync` usage.
+
+`vbrain memory setup` itself was NOT RUN end-to-end: it requires a paired
+desktop native executable, and no paired desktop is available on this host.
+The behavior it depends on (resolution, the guard, the TOML write, the printed
+lines) is covered by the library and formatter tests above and by the CLI
+wiring in `src/memory/cli.ts`, which resolves the native executable once and
+passes the same resolved path to both the pairing check and
+`installMemoryConfig`. What remains: an actual run against a real nvm-windows
+Node and a paired desktop, and the acceptance runbook that would exercise it.
 
 ## Phase 16.2 — A build that cannot prove it cleaned itself — CLOSED
 

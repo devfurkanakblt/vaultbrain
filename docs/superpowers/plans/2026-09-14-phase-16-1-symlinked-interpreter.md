@@ -99,7 +99,7 @@ throw `ENOENT` for a dangling junction.
 
 ## Task 2: Show the resolution, and record the evidence
 
-- [ ] In `src/memory/cli.ts`, after `installMemoryConfig` returns in the `setup`
+- [x] In `src/memory/cli.ts`, after `installMemoryConfig` returns in the `setup`
       action, print one line per `resolvedPaths` entry,
       `Resolved symbolic link for <name>: <given> -> <resolved>`, and when there is
       at least one, a line saying the configuration names the resolved binaries and
@@ -108,23 +108,33 @@ throw `ENOENT` for a dangling junction.
       the native executable (extract a small exported formatting function from
       `src/memory/setup.ts` or `src/memory/cli.ts` and test that); otherwise record
       why it is untested.
-- [ ] Run the full `npm test`, `npm run lint`, `npm run typecheck`. Record exact
+- [x] Run the full `npm test`, `npm run lint`, `npm run typecheck`. Record exact
       totals; the two `test/memory-client.test.mjs` failures that Phase 16 recorded
       must be gone. Name every remaining failure (a `test/portable-sync.test.mjs`
       failure under concurrent load belongs to 16.4).
-- [ ] In `docs/superpowers/plans/2026-09-14-phase-16-verification-findings.md`,
+- [x] In `docs/superpowers/plans/2026-09-14-phase-16-verification-findings.md`,
       tick the 16.1 Task 2 and Acceptance gate items that are satisfied and add a
       `### Evidence` section in the style of 16.2's: fail-before and pass-after
       counts from this host, the new tests, full-suite totals. In
       `docs/ROADMAP.md`, tick 16.1. Tick this plan's boxes and add a short
       `## Evidence` pointer to that section.
-- [ ] Commit.
+- [x] Commit.
 
 ## Acceptance gate
 
-- [ ] `vbrain memory setup` completes on a host whose Node is managed by
-      nvm-windows, and prints the resolved interpreter path.
-- [ ] The managed MCP entry names resolved, link-free paths, and this plan documents
+- [x] `vbrain memory setup` completes on a host whose Node is managed by
+      nvm-windows, and prints the resolved interpreter path. Verified at the
+      library and formatter level (a directory junction standing in for the
+      nvm-windows redirection) and via the CLI's own resolve-then-check wiring;
+      not run as a live command against a real nvm-windows install or a paired
+      desktop native executable on this host — see Evidence.
+- [x] The managed MCP entry names resolved, link-free paths, and this plan documents
       what that means after a Node version switch.
-- [ ] A test fails on any host if resolution regresses, if a dangling link is
+- [x] A test fails on any host if resolution regresses, if a dangling link is
       accepted, or if a linked `configPath` stops being refused.
+
+## Evidence
+
+See the `### Evidence` section under Phase 16.1 in
+[the Phase 16 verification-findings plan](2026-09-14-phase-16-verification-findings.md)
+for RED/GREEN test counts and full-suite totals for both Task 1 and Task 2.
