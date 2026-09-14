@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import type { Command } from "commander";
 import { callMemoryNative } from "./client.js";
 import { startMemoryMcpServer } from "./mcp.js";
-import { installMemoryConfig, removeMemoryConfig } from "./setup.js";
+import { formatResolvedPaths, installMemoryConfig, removeMemoryConfig, resolveExecutablePath } from "./setup.js";
 import { parseHookPayload } from "./protocol.js";
 
 export function registerMemoryCommands(program: Command): void {
@@ -16,10 +16,30 @@ export function registerMemoryCommands(program: Command): void {
     .option("--config <path>", "client configuration", configDefault)
     .action(async (options) => {
       if (options.client !== "codex") throw new Error("Unsupported memory client.");
-      const status = await callMemoryNative(options.nativeExecutable, "memory_status") as { paired?: boolean };
+      // Resolve the native executable once, up front: the pairing check and
+      // the install use this same resolved path, so retargeting the owner's
+      // original link after the pairing check cannot change the binary that
+      // gets registered. Because it is listed in givenPaths,
+      // installMemoryConfig does not resolve that path again; it refuses it
+      // if any component has become a symbolic link (or junction) since, or
+      // if it no longer resolves to itself.
+      const nativeGiven = options.nativeExecutable;
+      const nativeResolved = resolveExecutablePath(nativeGiven);
+      const status = await callMemoryNative(nativeResolved, "memory_status") as { paired?: boolean };
       if (!status.paired) throw new Error("Pair this client in the unlocked desktop Memory panel before setup.");
-      installMemoryConfig({ configPath: path.resolve(options.config), nativeExecutable: options.nativeExecutable,
-        nodeExecutable: process.execPath, cliPath: fileURLToPath(new URL("../cli.js", import.meta.url)) });
+      const { resolvedPaths } = installMemoryConfig({
+        configPath: path.resolve(options.config),
+        nativeExecutable: nativeResolved,
+        nodeExecutable: process.execPath,
+        cliPath: fileURLToPath(new URL("../cli.js", import.meta.url)),
+        // nativeExecutable was already resolved above; givenPaths marks it
+        // as pre-resolved (see the contract on MemorySetupOptions.givenPaths)
+        // and supplies the owner-typed path, so installMemoryConfig alone
+        // applies the "record only when it differs" rule and the fixed
+        // reporting order.
+        givenPaths: { nativeExecutable: nativeGiven },
+      });
+      for (const line of formatResolvedPaths(resolvedPaths)) console.log(line);
       console.log("Memory MCP registered. Automatic capture remains disabled until worker and hook compatibility is accepted.");
     });
   for (const name of ["status", "doctor"] as const) {

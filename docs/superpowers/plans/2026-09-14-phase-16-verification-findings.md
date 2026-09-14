@@ -64,26 +64,35 @@ it, and refusing is only one of two defensible answers.
 
 ### Task 1: Decide what a symlinked interpreter path means
 
-- [ ] Write the decision down before writing code. Two candidates: resolve the path
+- [x] Write the decision down before writing code. Two candidates: resolve the path
       with `fs.realpathSync` and record the resolved target in the managed config,
       so the configuration names the binary that will actually run; or keep refusing
       and tell the user the exact resolved path to pass instead.
-- [ ] State which threat the choice addresses and which it accepts. Resolving pins
+- [x] State which threat the choice addresses and which it accepts. Resolving pins
       the binary but freezes the nvm version, so a later `nvm use` silently leaves
       the configuration pointing at an older interpreter. Refusing keeps the user in
       control but makes the command unusable for a common, legitimate setup.
-- [ ] Record whether the same reasoning applies to `nativeExecutable` and `cliPath`,
+- [x] Record whether the same reasoning applies to `nativeExecutable` and `cliPath`,
       which go through the identical check.
+
+**Decided, 2026-09-14: resolve, then record and show.** The three executable paths
+are resolved with `fs.realpathSync`, checked in resolved form by the unchanged
+guard, and written resolved into the managed TOML; setup prints every path it
+resolved and says to run setup again after switching Node versions, so the `nvm use`
+cost is stated rather than silent. `nativeExecutable` and `cliPath` follow the same
+rule. `configPath` does not: a link there redirects where setup writes, and it keeps
+being refused. The reasoning, the rejected alternative and the tasks are in
+[the Phase 16.1 plan](2026-09-14-phase-16-1-symlinked-interpreter.md).
 
 ### Task 2: Implement the decision
 
-- [ ] Add a failing test that constructs a symlinked interpreter path itself rather
+- [x] Add a failing test that constructs a symlinked interpreter path itself rather
       than depending on how the host's Node happens to be installed — the current
       tests pass on CI purely because a Linux runner's Node is not symlinked, which
       is why this was never caught.
-- [ ] Implement the decided behavior and assert on what lands in the managed TOML,
+- [x] Implement the decided behavior and assert on what lands in the managed TOML,
       not just on the absence of a throw.
-- [ ] Cover the negative case that the guard exists for: a path component that is a
+- [x] Cover the negative case that the guard exists for: a path component that is a
       symlink pointing somewhere unexpected must still be refused or resolved
       visibly, never silently accepted.
 
@@ -91,8 +100,154 @@ it, and refusing is only one of two defensible answers.
 
 - [ ] `vbrain memory setup` completes on a host whose Node is managed by
       nvm-windows, or refuses with a message naming the exact path to use instead.
-- [ ] The managed MCP entry names a path whose meaning is stable and documented.
-- [ ] A test fails if the decided behavior regresses, on any host.
+      The library (`installMemoryConfig` resolves an executable path reached
+      through a directory junction — the same redirection nvm-windows uses —
+      and writes the resolved binary into the managed TOML, or refuses and
+      names the unresolvable path for a dangling junction) and the formatter
+      are covered by tests; the CLI wiring is covered by inspection and by
+      the library's `givenPaths` tests, since no test loads
+      `src/memory/cli.ts`. What remains is a live
+      `vbrain memory setup` run against a real nvm-windows install with a
+      paired desktop native executable — no paired desktop has been available
+      on any host used for this phase. See the Evidence section below.
+- [x] The managed MCP entry names a path whose meaning is stable and documented.
+      The decision paragraph above states the meaning (the binary that ran at
+      setup time; a later `nvm use` requires re-running setup) and the CLI prints
+      the resolution and that note; see Evidence.
+- [x] A test fails if the decided behavior regresses, on any host. The junction
+      tests in `test/memory-client.test.mjs` build their own link rather than
+      depending on the host's Node installation.
+
+### Evidence
+
+Fail-before / pass-after on this host, `test/memory-client.test.mjs`:
+
+- Before Task 1 (Phase 16 baseline): 2 failures (the two setup tests using
+  `process.execPath`, which resolves through the `C:\nvm4w\nodejs` junction on
+  this host). RED for Task 1, after adding its new junction-based tests but
+  before implementing resolution: 6 of 11 fail —
+  ```
+  ✖ setup preserves unrelated TOML and refuses to overwrite an existing integration
+  ✖ setup resolves a node executable reached through a junction
+  ✖ setup resolves a native executable and cli entry reached through junctions
+  ✖ setup reports no resolutions when no executable path is linked
+  ✖ setup resolves a linked executable under a non-ASCII temporary directory
+  ✖ disconnect refuses to remove user-modified managed config
+  ```
+  (the two pre-existing tests fail with `Refusing symbolic-link path component`,
+  as expected; the four new junction tests fail because no resolution step
+  exists yet; the two tests already correct before the fix — dangling junction,
+  `configPath` through a junction — pass at RED as regression guards, not new
+  bugs). GREEN after Task 1: 11/11 pass.
+- Task 2 added two tests: a normalization test (forward slashes and a `..`
+  segment through a regular file must not be reported as a resolution — a
+  review finding: comparing the resolved path against the raw `given` string,
+  rather than `path.resolve(given)`, produced a false "resolved" entry even
+  without any link), and a `formatResolvedPaths` unit test (entries to lines;
+  empty to no lines). It also tightened the dangling-junction test's assertion
+  to also match `/Could not resolve installation path/u`, and fixed a
+  checkout-dependent test (`setup reports no resolutions when no executable
+  path is linked`) that used `path.resolve("dist/cli.js")` to instead use a
+  regular file created in its own temp root — both changes to existing tests,
+  not new ones. RED for the normalization test (confirmed by reverting the
+  `path.resolve(given)` comparison back to a raw-string comparison): 12/13
+  pass, 1 fail. GREEN after restoring the fix: 13/13 pass.
+- A later review of Task 2 found the normalization test's `..` case was
+  vacuous: it built the given path with `path.join(root, "sub", "..", "sub",
+  "node.exe")`, which collapses the `..` before `installMemoryConfig` ever
+  sees it, so the assertion could not have caught a regression in that case.
+  The fix builds the string directly
+  (`` `${root}${path.sep}sub${path.sep}..${path.sep}sub${path.sep}node.exe` ``)
+  and asserts it still contains `..` before calling setup. The same review
+  found `src/memory/cli.ts` duplicated `installMemoryConfig`'s "record only
+  when the resolved path differs from `path.resolve(given)`" rule and its
+  fixed name order, to merge in a `nativeExecutable` entry computed from the
+  CLI's own pre-resolution, untested. The fix adds an optional `givenPaths`
+  input to `installMemoryConfig` (the owner-typed path to report as `given`
+  for a name whose option value the caller already resolved); the CLI now
+  passes the pre-resolved native path as `nativeExecutable` and the
+  owner-typed path via `givenPaths.nativeExecutable`, and prints
+  `formatResolvedPaths(result.resolvedPaths)` directly, with no merge logic of
+  its own. Two tests were added: passing an already-resolved native path with
+  `givenPaths.nativeExecutable` set to the junction path yields one entry
+  whose `given` is the junction path and whose `resolved` is the real path;
+  `givenPaths` equal to the path already passed yields no entry. RED for the
+  first (confirmed before `givenPaths` existed): 14/15 pass, 1 fail —
+  `resolvedPaths` came back `[]` instead of naming the native entry. GREEN
+  after adding `givenPaths`: 15/15 pass. This review-findings fix brought
+  `test/memory-client.test.mjs` from 13 to 15 tests.
+- The final branch review reproduced a substitution the `setup` comment claimed
+  was closed: resolve `nat-link\native.exe` to `nat-real\native.exe`, rename
+  `nat-real` away, create a junction `nat-real` pointing at `evil\`, then call
+  `installMemoryConfig` with the pre-resolved path and `givenPaths`. Setup
+  succeeded and pinned `evil\native.exe`, because `installMemoryConfig`
+  resolved the path again and the guard only saw the link-free target. The fix:
+  for a name present in `givenPaths`, `installMemoryConfig` no longer resolves
+  the option value; it runs the absolute-path and control-character check and
+  the no-symlink-component guard on the value itself, requires a regular file,
+  and requires the value to still resolve to itself. A new test,
+  `setup refuses a pre-resolved path whose component became a link after
+  resolution`, performs that sequence with junctions in its own temp root and
+  expects a `symbolic-link` refusal, an unchanged configuration and no backup.
+  RED (before the fix): 16 tests, 15 pass, 1 fail, with
+  `AssertionError [ERR_ASSERTION]: Missing expected exception.` because setup
+  succeeded. GREEN after the fix: 16/16 pass, including both `givenPaths`
+  tests. The same review had three tests (node through a junction, native and
+  CLI through junctions, and the non-ASCII case) switched from
+  `path.resolve("dist/cli.js")` to regular files in their own temp roots, and
+  the two older setup tests switched their cleanup to `removeTree`.
+
+Full suite after the final review's substitution fix: `npm test` — **492 tests,
+492 pass, 0 fail, 0 cancelled, 0 skipped**; the one extra test is the
+substitution test. `node --test test/memory-client.test.mjs
+test/fs-removal.test.mjs` — 25/25 pass; `npm run lint` and `npm run typecheck`
+pass. The previous full run is kept below for the record.
+
+Previous full suite: `npm test` — **491 tests, 491 pass, 0 fail**. The
+`test/sync-epoch.test.mjs` failure recorded in the previous run of this
+Evidence section (a `SyntaxError` from building a `RegExp` out of random key
+material) is fixed — see "Found beyond 16.1" below — not merely re-flaked;
+this run's zero failures reflect that fix, not luck. No failure occurred in
+`test/memory-client.test.mjs` or `test/portable-sync.test.mjs` in this run.
+The most recent prior full run recorded in this repository (before this
+review-findings fix, i.e. Task 2's own closing evidence) was 489 tests, 489
+pass, 0 fail; the two extra tests here are the `givenPaths` tests this fix
+added. `npm run lint` and `npm run typecheck` both pass with no output.
+`node --test test/memory-client.test.mjs test/sync-epoch.test.mjs
+test/fs-removal.test.mjs` — 33/33 pass, confirming `src/memory/setup.ts` and
+`src/memory/cli.ts` introduce no `fs.rmSync`/`fs.cpSync` usage.
+
+### Found beyond 16.1
+
+`test/sync-epoch.test.mjs:151`, in "epoch keys persist under the master key
+and refuse epoch 1", built a `RegExp` directly from a slice of the epoch
+key's base64 encoding:
+`assert.doesNotMatch(stored, new RegExp(epochKey.toString("base64").slice(0,
+16), "u"))`. Base64 contains `+` and `/`, which are regex metacharacters: a
+leading `+` makes `new RegExp(...)` throw `SyntaxError: Invalid regular
+expression` (seen once during this phase's full-suite run, reported at the
+time as a flake), and a `+` elsewhere in the slice changes what the pattern
+matches, so the assertion could pass even while the raw key's base64 prefix
+is present in the stored ciphertext. Introduced in commit `358b9d3`
+(`feat(sync): persist epoch content keys under the vault key`), which added
+this test.
+Fixed by replacing the regex check with a literal substring check:
+`assert.equal(stored.includes(epochKey.toString("base64").slice(0, 16)),
+false)`, matching the assertion's original intent without treating `+`/`/`
+as metacharacters. This is a test defect, not a product defect —
+`saveEpochKey`'s encryption of the stored file is unaffected; only the test's
+verification of that encryption was unsound.
+
+`vbrain memory setup` itself was NOT RUN end-to-end: it requires a paired
+desktop native executable, and no paired desktop is available on this host.
+The behavior it depends on (resolution, the guard, the TOML write, the printed
+lines) is covered by the library and formatter tests above and by the CLI
+wiring in `src/memory/cli.ts`, which resolves the native executable once and
+passes the same resolved path to both the pairing check and
+`installMemoryConfig`. The install does not resolve that path again, and
+refuses it if any component has since become a link or it no longer resolves
+to itself (tested at the library level). What remains: an actual run against a real nvm-windows
+Node and a paired desktop, and the acceptance runbook that would exercise it.
 
 ## Phase 16.2 — A build that cannot prove it cleaned itself — CLOSED
 
