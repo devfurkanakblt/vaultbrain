@@ -148,5 +148,5 @@ test("epoch keys persist under the master key and refuse epoch 1", () => {
 
   // The stored file is ciphertext, not the raw key.
   const stored = fs.readFileSync(path.join(session.rootDir, "sync", "identity", "epochs", "2.key.enc"), "utf8");
-  assert.doesNotMatch(stored, new RegExp(epochKey.toString("base64").slice(0, 16), "u"));
+  assert.equal(stored.includes(epochKey.toString("base64").slice(0, 16)), false);
 });
