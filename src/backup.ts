@@ -541,7 +541,7 @@ export function restoreBackup(archivePath: string, destinationDirectory: string,
       zeroKeySet(opened.keys);
     }
   } catch (error) {
-    removeTree(staging);
+    if (fs.existsSync(staging)) removeTree(staging);
     throw error;
   } finally {
     fs.closeSync(handle);
