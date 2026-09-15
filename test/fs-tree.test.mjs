@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { copyTree, removeTree, surviving } from "../scripts/fs-tree.mjs";
+import { copyTree, removeFile, removeTree, surviving } from "../scripts/fs-tree.mjs";
 
 // Deliberately not an ASCII name. Node's own recursive helpers fail here on
 // Windows — fs.rmSync silently removes nothing, fs.cpSync aborts the process
@@ -76,6 +76,38 @@ test("removeTree removes a link without touching what it points at", () => {
 
   assert.equal(fs.existsSync(link), false);
   assert.equal(fs.readFileSync(path.join(real, "keep.js"), "utf8"), "not ours to delete");
+
+  removeTree(root);
+});
+
+test("removeFile removes a single file under a non-ASCII path", () => {
+  const root = temporaryRoot();
+  const file = path.join(root, "note.js");
+  fs.writeFileSync(file, "content");
+
+  removeFile(file);
+
+  assert.equal(fs.existsSync(file), false);
+
+  removeTree(root);
+});
+
+test("removeFile on a missing path returns without throwing", () => {
+  const root = temporaryRoot();
+  const missing = path.join(root, "does-not-exist.js");
+
+  assert.doesNotThrow(() => removeFile(missing));
+
+  removeTree(root);
+});
+
+test("removeFile handed a directory throws and leaves it (and its contents) in place", () => {
+  const root = temporaryRoot();
+  const dir = writeTree(path.join(root, "a-directory"), { "note.js": "inside" });
+
+  assert.throws(() => removeFile(dir));
+  assert.equal(fs.existsSync(dir), true);
+  assert.equal(fs.readFileSync(path.join(dir, "note.js"), "utf8"), "inside");
 
   removeTree(root);
 });

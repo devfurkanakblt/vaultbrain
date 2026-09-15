@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { removeTree } from "../fs-tree.mjs";
+
 const SUPPORTED_PLATFORMS = new Set(["linux", "macos", "windows"]);
 const TARGETS = Object.freeze({
   "linux-deb": { platform: "linux", matcher: /\.deb$/u },
@@ -167,7 +169,7 @@ export function runSyntheticNativeUpdateAcceptance({
     });
     return verifyNativeUpdateTransition(before, after);
   } finally {
-    fs.rmSync(staging, { recursive: true, force: true });
+    removeTree(staging);
   }
 }
 

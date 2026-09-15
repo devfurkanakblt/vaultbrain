@@ -114,10 +114,10 @@ test("removeFile handed a directory throws rather than removing it", () => {
 // name, or reached through "node:fs/promises") are the defect this module
 // exists to route around. This scan fails on any host — including Linux CI,
 // which cannot reproduce the underlying Windows defect — if a source file
-// under src/ still calls one of them, so a new call site cannot slip back in
-// silently. src/fs-tree.ts gets no exemption: it must not use them either,
-// even to explain the defect it works around, so its own comments avoid
-// spelling the banned names.
+// under src/ or scripts/ still calls one of them, so a new call site cannot
+// slip back in silently. src/fs-tree.ts and scripts/fs-tree.mjs get no
+// exemption: neither must use them, even to explain the defect each works
+// around, so their own comments avoid spelling the banned names.
 //
 // A plain regex over the raw source missed real equivalents: `rmdirSync`
 // called with a `recursive` option shares the defect (measured on this host:
@@ -237,24 +237,30 @@ test("findBannedCalls matches every probe that names a banned removal, and none 
   }
 });
 
-function listTsFiles(dir) {
+function listFilesWithExtensions(dir, extensions) {
   const out = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) out.push(...listTsFiles(full));
-    else if (entry.isFile() && entry.name.endsWith(".ts")) out.push(full);
+    if (entry.isDirectory()) out.push(...listFilesWithExtensions(full, extensions));
+    else if (entry.isFile() && extensions.some((extension) => entry.name.endsWith(extension))) out.push(full);
   }
   return out;
 }
 
-test("no source file under src/ calls Node's non-ASCII-unsafe recursive removal helpers", () => {
-  const srcDir = path.join(import.meta.dirname, "..", "src");
+test("no source file under src/ or scripts/ calls Node's non-ASCII-unsafe recursive removal helpers", () => {
+  const repoRoot = path.join(import.meta.dirname, "..");
+  const trees = [
+    { dir: path.join(repoRoot, "src"), extensions: [".ts"] },
+    { dir: path.join(repoRoot, "scripts"), extensions: [".mjs", ".cjs", ".js"] },
+  ];
   const offenses = [];
 
-  for (const file of listTsFiles(srcDir)) {
-    const text = fs.readFileSync(file, "utf8");
-    for (const offense of findBannedCalls(text)) {
-      offenses.push(`${path.relative(srcDir, file)}:${offense.line}: ${offense.text}`);
+  for (const { dir, extensions } of trees) {
+    for (const file of listFilesWithExtensions(dir, extensions)) {
+      const text = fs.readFileSync(file, "utf8");
+      for (const offense of findBannedCalls(text)) {
+        offenses.push(`${path.relative(repoRoot, file)}:${offense.line}: ${offense.text}`);
+      }
     }
   }
 

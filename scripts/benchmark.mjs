@@ -5,6 +5,7 @@ import path from "node:path";
 import { performance } from "node:perf_hooks";
 
 import { DocumentVault } from "../dist/documents.js";
+import { removeTree } from "./fs-tree.mjs";
 
 function argument(name, fallback) {
   const index = process.argv.indexOf(name);
@@ -150,5 +151,5 @@ try {
     console.log(`Performance gates at the ${budget.notes}-note tier: PASS`);
   }
 } finally {
-  fs.rmSync(resolvedRoot, { recursive: true, force: true });
+  removeTree(resolvedRoot);
 }

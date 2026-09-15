@@ -6,6 +6,7 @@ import path from "node:path";
 import { createBackup, restoreBackup } from "../dist/backup.js";
 import { startSyncRelay, SyncRelayClient } from "../dist/sync-relay.js";
 import { SyncChangeLog, SyncDeviceManager } from "../dist/sync.js";
+import { removeTree } from "./fs-tree.mjs";
 import { runPortableRecoveryDrill } from "./portable-recovery-drill.mjs";
 
 const passphrase = process.env.VBRAIN_DRILL_PASSPHRASE ?? process.env.SBRAIN_DRILL_PASSPHRASE ?? "throwaway-sync-recovery-drill-passphrase";
@@ -103,5 +104,5 @@ try {
   sourceLog?.close();
   sourceManager?.close();
   await relay?.close();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeTree(root);
 }

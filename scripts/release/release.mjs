@@ -4,6 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { removeTree } from "../fs-tree.mjs";
+
 const REQUIRED_TARGETS = Object.freeze([
   "darwin-aarch64-app",
   "linux-x86_64-deb",
@@ -85,7 +87,7 @@ export function verifyTauriSignatures({ directory, publicKey, command = "minisig
       });
     }
   } finally {
-    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+    removeTree(temporaryDirectory);
   }
 }
 

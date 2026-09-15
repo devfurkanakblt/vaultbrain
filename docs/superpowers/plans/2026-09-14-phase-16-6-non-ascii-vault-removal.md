@@ -220,7 +220,7 @@ Files: `src/backup.ts`, `src/keychain.ts`, `src/schema.ts`,
 
 **Final review findings (this pass).**
 
-- *Finding 1, the scan's coverage.* RED: a probe script ran the plan's original
+- _Finding 1, the scan's coverage._ RED: a probe script ran the plan's original
   regex (`/\brmSync\b|\bcpSync\b|\bfs\.rm\(|\bfs\.cp\(|promises\.rm\b|promises\.cp\b/`)
   against 22 probe strings that a wider scan should catch; it missed 11 of
   them — whitespace before the parenthesis (`fs.rm (x, cb)`), every
@@ -229,7 +229,7 @@ Files: `src/backup.ts`, `src/keychain.ts`, `src/schema.ts`,
   (including one written across three lines). GREEN: the widened
   `findBannedCalls` matcher in `test/fs-removal.test.mjs`, exercised by
   `"findBannedCalls matches every probe that names a banned removal, and none
-  of the others"`, matches all 22 must-match probes and none of the 12
+of the others"`, matches all 22 must-match probes and none of the 12
   must-not-match probes (which include `mkdirSync(..., { recursive: true })`,
   a non-recursive `rmdirSync`, and identifiers that merely contain "rm" or
   "cp"). `grep` over `src/` before widening the scan confirmed no `src/` file
@@ -237,24 +237,24 @@ Files: `src/backup.ts`, `src/keychain.ts`, `src/schema.ts`,
   the wider scan changes no other file's behavior. Full run after widening:
   `node --test test/fs-removal.test.mjs` — 9 tests, 9 pass, 0 fail. File:
   `test/fs-removal.test.mjs`.
-- *Finding 2, nested junction.* Added
+- _Finding 2, nested junction._ Added
   `"removeTree on a tree containing a nested junction removes the tree and
-  leaves the junction's target intact"` to `test/fs-removal.test.mjs`, which
+leaves the junction's target intact"` to `test/fs-removal.test.mjs`, which
   passes with the existing `removeTree` implementation (no source change was
   needed; the case was already covered by the recursion's unlink-not-follow
   behavior, it just was not asserted). File: `test/fs-removal.test.mjs`.
-- *Finding 5, isolating `stageRekey`'s own cleanup.* Added
+- _Finding 5, isolating `stageRekey`'s own cleanup._ Added
   `"stageRekey's own failure cleanup removes the staging root under a
-  non-ASCII path"` to `test/rekey-vault.test.mjs`, which calls the exported
+non-ASCII path"` to `test/rekey-vault.test.mjs`, which calls the exported
   `stageRekey` directly (not through `rekeyVault`) so `rekeyVault`'s
   pre-commit catch cannot mask the site under test. GREEN (as committed):
   `node --test --test-name-pattern="stageRekey's own failure cleanup"
-  test/rekey-vault.test.mjs` — 1 test, 1 pass, 0 fail. RED (temporary,
+test/rekey-vault.test.mjs` — 1 test, 1 pass, 0 fail. RED (temporary,
   reverted, never committed): the one `removeTree(stagingRoot(vaultDir))`
   call inside `stageRekey`'s own `catch` block (`src/keyring-rekey.ts`,
   the loop's guarded cleanup) was replaced with a no-op comment; the same
   test then failed — `AssertionError: stageRekey's own catch must clear the
-  staging root it built, true !== false` — 1 test, 0 pass, 1 fail. The call
+staging root it built, true !== false` — 1 test, 0 pass, 1 fail. The call
   was restored immediately after and `npm run build` plus the same test run
   were repeated to confirm the GREEN result above. File:
   `test/rekey-vault.test.mjs`.
@@ -299,4 +299,5 @@ fixed here:
 - `scripts/release/release.mjs`: one recursive `fs.rmSync`.
 - `scripts/release/native-update-acceptance.mjs`: one recursive `fs.rmSync`.
 
-This is recorded, not fixed, in this phase.
+This was fixed by the follow-up in
+[`2026-09-15-phase-16-6-non-ascii-scripts.md`](2026-09-15-phase-16-6-non-ascii-scripts.md).

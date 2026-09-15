@@ -5,6 +5,7 @@ import path from "node:path";
 import { createBackup, restoreBackup } from "../dist/backup.js";
 import { SyncedDocumentVault } from "../dist/sync.js";
 import { attachmentBlobIds, startSyncRelay, SyncRelayClient } from "../dist/sync-relay.js";
+import { removeTree } from "./fs-tree.mjs";
 
 /** Synthetic live-storage recovery, separate from the signed checkpoint drill. */
 export async function runPortableRecoveryDrill() {
@@ -106,6 +107,6 @@ export async function runPortableRecoveryDrill() {
     source?.lock();
     restored?.lock();
     await relay?.close();
-    fs.rmSync(root, { recursive: true, force: true });
+    removeTree(root);
   }
 }
