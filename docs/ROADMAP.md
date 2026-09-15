@@ -369,8 +369,21 @@ with Phases 12 and 14.
       A check that cannot run stays a gap, never a skip.
 - [ ] 16.4 Diagnose the one flaky test: the portable recovery drill's relay
       download reset under concurrent suite load.
-- [ ] 16.5 Triage the twelve open dependency updates, five of which are major
-      bumps of crates under the keyring, audit chain and sync envelope.
+- [x] 16.5 Triage the twelve open dependency updates, five of which are major
+      bumps of crates under the keyring, audit chain and sync envelope. The
+      crypto majors (`aes-gcm` 0.11, `rand` 0.10, `sha2` 0.11, `hmac` 0.13,
+      `ed25519-dalek` 3) landed in #10 and #57 with every cross-core vector
+      unchanged; the npm side landed in #59 with `typescript` 7 and
+      `@types/node` 26 declined through Dependabot `ignore` entries. The
+      updates Dependabot opened afterwards landed in #61, #64, #65, #66
+      (superseding #62 and #63 without lockfile churn) and #67 (`scrypt` 0.12,
+      superseding #60, plus a `rand` feature trim and a new cross-core vector
+      for `verifier` and `attachment_id`). #68 fixed the leak assertion in
+      `test/sync-transaction.test.mjs` that matched random base64 ciphertext.
+      The plans are
+      [`docs/superpowers/plans/2026-09-15-phase-16-5-crypto-majors.md`](superpowers/plans/2026-09-15-phase-16-5-crypto-majors.md)
+      and
+      [`docs/superpowers/plans/2026-09-15-phase-16-5-npm-updates.md`](superpowers/plans/2026-09-15-phase-16-5-npm-updates.md).
 - [x] 16.6 Make every removal under `src/` remove. Under a non-ASCII vault path
       `fs.rmSync` silently removes nothing, so `purgeAttachment` reports a purge
       that did not happen, a committed re-key keeps its journal and blocks every

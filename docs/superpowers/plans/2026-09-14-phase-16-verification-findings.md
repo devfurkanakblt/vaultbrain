@@ -466,19 +466,26 @@ keyring, the audit chain and the sync envelope.
 
 ### Task 1: Triage, in two piles
 
-- [ ] Take the Actions and npm development updates as ordinary maintenance, in one
+- [x] Take the Actions and npm development updates as ordinary maintenance, in one
       batch, on CI evidence.
-- [ ] Take each crypto crate separately, with its own review: what changed in the
+- [x] Take each crypto crate separately, with its own review: what changed in the
       release, whether any committed vector or fixture changes by a single byte, and
       whether the cross-core tests still agree.
-- [ ] Record any bump deliberately declined and why, so the PR is not reopened
+- [x] Record any bump deliberately declined and why, so the PR is not reopened
       monthly without an answer.
 
 ### Acceptance gate
 
-- [ ] Every open Dependabot PR is merged, closed with a recorded reason, or has a
+- [x] Every open Dependabot PR is merged, closed with a recorded reason, or has a
       named blocker.
-- [ ] No committed fixture or cross-core vector changed silently as a result.
+- [x] No committed fixture or cross-core vector changed silently as a result.
+
+Closed 2026-09-15. No bump was declined outright except `typescript` 7 and
+`@types/node` 26 (Dependabot `ignore` entries with reasons, see the npm updates
+plan). Superseded PRs were closed with a pointer: #3 #50 (by #59), #5 #7 #9 #11
+(by #57), #60 (by #67), #62 #63 (by #66). `git diff` of `test/fixtures` across
+the crypto upgrades is empty; #67 only adds `document-key-vector.json` and its
+README entry.
 
 ## Required verification commands
 
