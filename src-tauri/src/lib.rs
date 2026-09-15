@@ -6088,8 +6088,14 @@ fn with_lock_transition<T>(
                         .map(|value| &value.token)
                         == holder.as_ref().map(|value| &value.token)
                 {
-                    let _ = fs::remove_file(&path);
-                    continue;
+                    // Retry at once only when the stale record is really gone. A
+                    // reclaim that cannot remove it must still reach the deadline
+                    // below instead of spinning on the same file forever.
+                    match fs::remove_file(&path) {
+                        Ok(()) => continue,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(_) => {}
+                    }
                 }
                 if Instant::now() >= deadline {
                     return Err(

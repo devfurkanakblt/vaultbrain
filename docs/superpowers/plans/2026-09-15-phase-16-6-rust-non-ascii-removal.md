@@ -48,17 +48,18 @@ Test-only removals (`#[cfg(test)]` modules in `lib.rs` and `keyring.rs`) are
 out of scope. `audit.rs`, `keyring.rs`, `desktop_sync.rs` and `updater.rs`
 have no production removal call. The production sites:
 
-| Site (`src-tauri/src/`)                                                     | Error handling        | Classification                                                                                                                                                                                                                                                       |
-| --------------------------------------------------------------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `lib.rs` `remove_attachment` — `remove_dir_all(attachment_dir(..))`         | propagated            | Reported. Tested (Task 1).                                                                                                                                                                                                                                           |
-| `lib.rs` `remove_note_in` — note object                                     | propagated            | Reported. Tested (Task 1).                                                                                                                                                                                                                                           |
-| `lib.rs` `end_journal` — `journal.json`                                     | propagated            | Reported. Tested through `remove_note_in` (Task 1).                                                                                                                                                                                                                  |
-| `lib.rs` revision pruning, `remove_plugin_in`, `delete_canvas`              | propagated            | Reported; same `std::fs::remove_file` call as the tested note path.                                                                                                                                                                                                  |
-| `lib.rs` `VaultWriteGuard` drop, `VaultTransitionGuard` drop — lock files   | ignored (`let _`)     | Not security state: the lock record holds a token, PID, host and time. A `Drop` cannot report, and a surviving record is reclaimed by the existing stale-lock logic. Unchanged; removal is still asserted by the Task 1 tests, which run through `with_vault_write`. |
-| `lib.rs` `VaultWriteGuard::acquire`, `with_lock_transition` — failed write  | ignored (`let _`)     | Cleanup on an error path; the original write error is returned. Unchanged, per the 16.6 constraint.                                                                                                                                                                  |
-| `lib.rs` `VaultWriteGuard::acquire`, `with_lock_transition` — stale reclaim | ignored (`let _`)     | A failed reclaim leaves the lock held, and the loop then times out with an error. Unchanged.                                                                                                                                                                         |
-| `lib.rs` `write_atomic` — `.tmp` cleanup                                    | ignored (`let _`)     | The temp file only survives when `replace_atomic` failed, and that error is returned. Its bytes are the ones the caller asked to persist at the target (ciphertext, wrapped keys, DPAPI blobs), so a leftover adds no exposure beyond the target. Unchanged.         |
-| `memory.rs` `delete_pairing_material` (Windows) — pairing secret            | **ignored (`let _`)** | **Defect.** The file holds the DPAPI-protected bearer secret, and the memory pipe server authorizes a client solely by comparing against it (`broker_secret()`). `disconnect` reported success even when the secret survived. Fixed and tested (Task 2).             |
+| Site (`src-tauri/src/`)                                                    | Error handling        | Classification                                                                                                                                                                                                                                                       |
+| -------------------------------------------------------------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `lib.rs` `remove_attachment` — `remove_dir_all(attachment_dir(..))`        | propagated            | Reported. Tested (Task 1).                                                                                                                                                                                                                                           |
+| `lib.rs` `remove_note_in` — note object                                    | propagated            | Reported. Tested (Task 1).                                                                                                                                                                                                                                           |
+| `lib.rs` `end_journal` — `journal.json`                                    | propagated            | Reported. Tested through `remove_note_in` (Task 1).                                                                                                                                                                                                                  |
+| `lib.rs` revision pruning, `remove_plugin_in`, `delete_canvas`             | propagated            | Reported; same `std::fs::remove_file` call as the tested note path.                                                                                                                                                                                                  |
+| `lib.rs` `VaultWriteGuard` drop, `VaultTransitionGuard` drop — lock files  | ignored (`let _`)     | Not security state: the lock record holds a token, PID, host and time. A `Drop` cannot report, and a surviving record is reclaimed by the existing stale-lock logic. Unchanged; removal is still asserted by the Task 1 tests, which run through `with_vault_write`. |
+| `lib.rs` `VaultWriteGuard::acquire`, `with_lock_transition` — failed write | ignored (`let _`)     | Cleanup on an error path; the original write error is returned. Unchanged, per the 16.6 constraint.                                                                                                                                                                  |
+| `lib.rs` `VaultWriteGuard::acquire` — stale reclaim                        | ignored (`let _`)     | A failed reclaim leaves the lock held; `acquire` returns and the loop reaches its deadline check, so it times out with an error. Unchanged.                                                                                                                          |
+| `lib.rs` `with_lock_transition` — stale reclaim                            | retried only if gone  | Before review the loop ran `continue` after an ignored removal, skipping the deadline check and the sleep, so an unremovable stale transition file spun forever. Fixed: it retries at once only on `Ok` or `NotFound`, otherwise it sleeps and times out.            |
+| `lib.rs` `write_atomic` — `.tmp` cleanup                                   | ignored (`let _`)     | The temp file only survives when `replace_atomic` failed, and that error is returned. Its bytes are the ones the caller asked to persist at the target (ciphertext, wrapped keys, DPAPI blobs), so a leftover adds no exposure beyond the target. Unchanged.         |
+| `memory.rs` `delete_pairing_material` (Windows) — pairing secret           | **ignored (`let _`)** | **Defect.** The file holds the DPAPI-protected bearer secret, and the memory pipe server authorizes a client solely by comparing against it (`broker_secret()`). `disconnect` reported success even when the secret survived. Fixed and tested (Task 2).             |
 
 ## Task 1: Prove the vault removal paths on a non-ASCII vault path
 
@@ -169,3 +170,23 @@ using the path. That is why the Windows result is meaningful here.
 Only `memory.rs`: `delete_pairing_material` now reports a pairing secret that
 was not removed, and `disconnect` fails before saving. All other production
 removal sites are unchanged, for the reasons given in the audit table.
+
+## Review follow-up
+
+A read-only review approved the branch and found one inaccurate audit row: the
+stale reclaim in `with_lock_transition` did not time out. After an ignored
+`fs::remove_file` it ran `continue`, which skipped both the deadline check and
+the poll sleep, so a stale transition file that could not be removed (for
+example a permission error) made the loop spin at full CPU forever. The loop
+now retries at once only when the removal succeeded or the file was already
+gone; any other failure falls through to the deadline check and the sleep.
+`VaultWriteGuard::acquire` already reached its deadline check and is unchanged.
+No test forces an unremovable transition file (the removal would have to fail
+while `create_new` still reports `AlreadyExists`); the change is covered by
+reading and by the existing lock tests in the CI `rust` jobs.
+
+Other review notes, accepted as they are: if the pairing file is removed and the
+config save then fails, the vault still says paired but the broker denies every
+client and a retry succeeds; an outside process holding the pairing file open
+can make a disconnect fail until retried; no test covers `disconnect` skipping
+the save on a failed removal, because it uses the real `LOCALAPPDATA`.
