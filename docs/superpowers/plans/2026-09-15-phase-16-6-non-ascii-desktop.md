@@ -67,8 +67,11 @@ Base: `origin/main` at `54364c8`. Host: Windows 11, Node v24.11.1.
 
 `findBannedCalls` over all of `desktop/`: zero offenses. A grep for
 `rmSync|rmdirSync|cpSync|rm(|rmdir(|cp(|unlink|node:|fs/promises|require(`
-matched only `unlinkedMentions` identifiers (a backlinks feature, not a file
-call) and one `import path from "node:path"` in `desktop/vite.config.ts`. No
+matched no file removal call. Its hits were `unlinkedMentions` identifiers and
+the `get_unlinked_mentions` / `link_unlinked_mention` Tauri command strings (a
+backlinks feature), a `node: CanvasNode` parameter in
+`desktop/src/CanvasBoard.tsx`, and one `import path from "node:path"` in
+`desktop/vite.config.ts`. No
 file under `desktop/` imports `node:fs`, `fs`, or `node:fs/promises`. Nothing
 needed converting.
 
@@ -150,3 +153,11 @@ fixed. A fix would clean `desktop-dist/` with `scripts/fs-tree.mjs` before the
 Vite build (the way `scripts/clean-dist.mjs` owns `dist/`) and set
 `emptyOutDir: false`; it changes the release build path and is left for a
 separate decision.
+
+### Review follow-up
+
+A read-only review approved the branch. Its low-severity point is applied: the
+scan now asserts every tree yields at least one file, so an emptied tree or a
+renamed extension fails instead of passing as "no offenses" (today: desktop 47,
+src 60, scripts 18, test 52). The grep evidence above now lists every hit, and
+the `findBannedCalls` comment no longer claims the function is exported.

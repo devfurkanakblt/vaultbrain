@@ -127,8 +127,8 @@ test("removeFile handed a directory throws rather than removing it", () => {
 // it emits DEP0147, returns normally, and leaves the directory), and neither
 // a "node:fs/promises" import nor a named `{ rm }`/`{ cp }` import from "fs"
 // is caught by matching only qualified calls like "fs.rm(". findBannedCalls
-// below is exported for a probe test to pin against, and is the same
-// function the source scan runs.
+// below is pinned by a probe test in this file, and is the same function
+// the source scan runs.
 function findBannedCalls(text) {
   const offenses = [];
 
@@ -276,7 +276,10 @@ test("no source file under src/, scripts/, test/, or desktop/ calls Node's non-A
   const offenses = [];
 
   for (const { dir, extensions } of trees) {
-    for (const file of listFilesWithExtensions(dir, extensions)) {
+    const files = listFilesWithExtensions(dir, extensions);
+    // An emptied tree or renamed extensions must not pass as "no offenses".
+    assert.ok(files.length > 0, `the scan found no files under ${path.relative(repoRoot, dir)}`);
+    for (const file of files) {
       const relativePath = path.relative(repoRoot, file).split(path.sep).join("/");
       if (relativePath === exemptRelativePath) continue;
       const text = fs.readFileSync(file, "utf8");
