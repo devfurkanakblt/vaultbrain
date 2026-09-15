@@ -8,7 +8,10 @@ export default defineConfig({
   clearScreen: false,
   build: {
     outDir: path.resolve(import.meta.dirname, "../desktop-dist"),
-    emptyOutDir: true,
+    // scripts/clean-dist.mjs empties desktop-dist first (npm run desktop:build) and
+    // fails if anything survives. Vite's own emptying uses Node's recursive
+    // removal, which on Windows silently removes nothing under a non-ASCII path.
+    emptyOutDir: false,
     sourcemap: false,
     target: "es2022",
   },

@@ -42,7 +42,7 @@
     "recovery:drill": "npm run build && node scripts/sync-recovery-drill.mjs",
     "fixtures": "npm run build && node scripts/make-fixtures.mjs",
     "desktop:dev": "vite --config desktop/vite.config.ts",
-    "desktop:build": "tsc -p desktop/tsconfig.json && vite build --config desktop/vite.config.ts",
+    "desktop:build": "node scripts/clean-dist.mjs desktop-dist && tsc -p desktop/tsconfig.json && vite build --config desktop/vite.config.ts",
     "desktop:sync-helper": "npm run build && node scripts/build-desktop-sync-helper.mjs",
     "desktop:test": "vitest run --config desktop/vite.config.ts",
     "tauri:dev": "tauri dev",

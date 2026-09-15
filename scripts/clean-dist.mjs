@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -5,11 +6,20 @@ import { linkStat, removeTree, surviving } from "./fs-tree.mjs";
 
 const REPORTED_SURVIVORS = 20;
 
-// tsc does not remove output for deleted source files. Build only owns dist.
+// The build outputs this command may clean, named relative to the repository
+// root. dist/ is tsc's (`npm run build`); desktop-dist/ is Vite's
+// (`npm run desktop:build`, which `tauri build` runs before packaging it).
+export const BUILD_OUTPUTS = Object.freeze(["dist", "desktop-dist"]);
+
+// tsc does not remove output for deleted source files, and Vite's own
+// emptyOutDir cannot be trusted either: it empties the directory with Node's
+// recursive removal helper, which on Windows removes nothing under a non-ASCII
+// path and returns normally (see scripts/fs-tree.mjs). Each build therefore
+// removes its own output here, before compiling, and proves it did.
 export function cleanDist(output, { remove = removeTree } = {}) {
   const before = linkStat(output);
   if (before?.isSymbolicLink()) {
-    throw new Error("Refusing to clean a linked dist directory.");
+    throw new Error(`Refusing to clean a linked ${path.basename(output)} directory.`);
   }
   if (!before) return;
 
@@ -35,11 +45,22 @@ export function cleanDist(output, { remove = removeTree } = {}) {
   );
 }
 
-const entryPoint = process.argv[1] ? path.resolve(process.argv[1]) : undefined;
-if (entryPoint === fileURLToPath(import.meta.url)) {
+// Node resolves links in a main module's import.meta.url but not in argv[1], so
+// comparing the two as given misses every run through a linked directory (on
+// macOS the temporary directory is one) and the command would exit 0 having
+// cleaned nothing. Compare real paths instead.
+const entryPoint = process.argv[1] ? fs.realpathSync(process.argv[1]) : undefined;
+if (entryPoint === fs.realpathSync(fileURLToPath(import.meta.url))) {
   const root = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
+  const names = process.argv.slice(2);
   try {
-    cleanDist(path.join(root, "dist"));
+    // Only a known output name is accepted, never a path: this command removes
+    // whatever it is pointed at.
+    const name = names.length === 0 ? "dist" : names[0];
+    if (names.length > 1 || !BUILD_OUTPUTS.includes(name)) {
+      throw new Error(`Refusing to clean ${names.join(" ")}: name exactly one build output (${BUILD_OUTPUTS.join(", ")}).`);
+    }
+    cleanDist(path.join(root, name));
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;
