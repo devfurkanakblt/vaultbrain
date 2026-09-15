@@ -870,7 +870,8 @@ impl Drop for VaultWriteGuard {
 }
 
 fn verifier(key: &[u8]) -> Result<String, String> {
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(key).map_err(|_| "invalid HMAC key")?;
+    let mut mac =
+        <HmacSha256 as hmac::KeyInit>::new_from_slice(key).map_err(|_| "invalid HMAC key")?;
     mac.update(KEY_CHECK_CONTEXT.as_bytes());
     Ok(hex_lower(&mac.finalize().into_bytes()))
 }
@@ -2725,7 +2726,7 @@ fn verify_plugin_signature(
         .map_err(|_| "plugin signature verification failed; the manifest or source was changed")?;
     Ok(Some(PluginSignatureInfo {
         algorithm: "ed25519".into(),
-        key_id: format!("{:x}", Sha256::digest(raw_key)),
+        key_id: hex_lower(&Sha256::digest(raw_key)),
     }))
 }
 
@@ -5223,7 +5224,8 @@ fn attachment_chunk_aad(id: &str, index: usize) -> String {
 }
 
 fn attachment_id(key: &[u8], data: &[u8]) -> Result<String, String> {
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(key).map_err(|_| "invalid HMAC key")?;
+    let mut mac =
+        <HmacSha256 as hmac::KeyInit>::new_from_slice(key).map_err(|_| "invalid HMAC key")?;
     mac.update(b"secondbrain-vault:attachment-id:v1\0");
     mac.update(data);
     Ok(hex_lower(&mac.finalize().into_bytes()))

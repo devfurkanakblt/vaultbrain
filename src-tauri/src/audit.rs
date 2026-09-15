@@ -18,7 +18,7 @@
 //! - The head's `mac` is `HMAC-SHA256(auditKey, {"version","signedEntries",
 //!   "lastHash"})`, again in that order.
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::fs::OpenOptions;
