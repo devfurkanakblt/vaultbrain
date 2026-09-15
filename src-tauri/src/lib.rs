@@ -6308,6 +6308,37 @@ mod tests {
         assert!(decrypt(&payload, &key, SAVED_VIEWS_AAD).is_err());
     }
 
+    /// Known answers for the legacy manifest key derivation, `verifier` and
+    /// `attachment_id`. The TypeScript half is `test/document-key-vector.test.mjs`,
+    /// which reaches the same values through `DocumentVault`.
+    #[test]
+    fn the_document_key_vector_matches_the_typescript_core() {
+        let vector: Value =
+            serde_json::from_str(include_str!("../../test/fixtures/document-key-vector.json"))
+                .unwrap();
+        let salt = BASE64
+            .decode(vector["kdf"]["salt"].as_str().unwrap())
+            .unwrap();
+        let n = u32::try_from(vector["kdf"]["N"].as_u64().unwrap()).unwrap();
+        let key = derive_key(vector["passphrase"].as_str().unwrap(), &salt, n).unwrap();
+        assert_eq!(BASE64.encode(key.as_ref()), vector["key"].as_str().unwrap());
+        assert_eq!(
+            verifier(key.as_ref()).unwrap(),
+            vector["verifier"].as_str().unwrap()
+        );
+
+        let attachments = vector["attachments"].as_array().unwrap();
+        assert_eq!(attachments.len(), 3);
+        for (index, attachment) in attachments.iter().enumerate() {
+            let data = BASE64.decode(attachment["data"].as_str().unwrap()).unwrap();
+            assert_eq!(
+                attachment_id(key.as_ref(), &data).unwrap(),
+                attachment["id"].as_str().unwrap(),
+                "attachment {index}"
+            );
+        }
+    }
+
     fn temporary_vault(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("vault-brain-{label}-{}", Uuid::new_v4()))
     }

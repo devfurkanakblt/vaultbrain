@@ -33,3 +33,11 @@ completed re-key replaced. Both cores must unwrap it to the same keys and
 re-serialize it to the same bytes. The Rust core used to parse this shape
 successfully and then drop the field on the next re-wrap, which is what the
 vector exists to prevent recurring.
+
+`document-key-vector.json` is written by
+`scripts/make-document-key-vector.mjs` and also refuses to overwrite itself
+without `--force`. It pins the legacy version 1 manifest key derivation
+(scrypt, N = 32768), the manifest `verifier` and content-addressed attachment
+IDs under that key. The Rust core checks the values directly; the TypeScript
+test reaches them through `DocumentVault` on a legacy vault built from the
+vector.
