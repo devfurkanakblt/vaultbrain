@@ -82,6 +82,72 @@ Node v24.11.1, npm 11.6.2.
   only positive flags and one bare `--experimental-trusted-sync` boolean with
   no negated counterpart), so the behavior change described in the plan has no
   surface here.
+- Full audit of `node_modules/commander/CHANGELOG.md` (not shipped in the
+  installed package; read from the upstream repository instead) for every
+  breaking change across 13.0.0, 14.0.0 and 15.0.0, checked against
+  `src/cli.ts`'s actual commander usage:
+  - 13.0.0 "excess command-arguments cause an error by default" — applies.
+    `src/cli.ts` declares fixed-arity arguments on all 122 commands (no
+    `[args...]`-style variadic command arguments) and never calls
+    `.allowExcessArguments()`, so a caller passing more positional arguments
+    than a command declares now gets a hard error instead of the previous
+    silent ignore. See the empirical check and decision below.
+  - 13.0.0 "throw during Option construction for unsupported option flags"
+    (e.g. a multi-character short flag like `-ws`) — does not apply; grepped
+    every `.option(`/`.requiredOption(` call and every flag is a
+    single-character short flag paired with a `--long` flag, or a bare
+    `--long` flag with no short form.
+  - 13.0.0 "throw on multiple calls to `.parse()` if
+    `storeOptionsAsProperties: true`" — does not apply; `src/cli.ts` never
+    calls `.storeOptionsAsProperties()` and calls `program.parseAsync()`
+    exactly once, at the bottom of the file.
+  - 13.0.0 TypeScript-only "implicit `this` in action handler callback" —
+    does not apply; a type-checking change with no runtime behavior, and
+    `npm run typecheck` passes (see Verification).
+  - 14.0.0 "support for unescaped negative numbers as option-arguments and
+    command-arguments" — additive, not breaking (listed under "Added"); no
+    existing invocation relies on the old escaped-negative-number behavior.
+  - 14.0.0 help-group additions, the leading-space help fix, and the
+    `.configureOutput()` copy-on-set fix — does not apply; `src/cli.ts` calls
+    none of `.helpGroup()`, `.optionsGroup()`, `.commandsGroup()`, or
+    `.configureOutput()`.
+  - 14.0.0 "Commander 14 requires Node.js v20 or higher" — already satisfied;
+    `package.json` `engines.node` is `">=22.12"` from this same change.
+  - 15.0.0 "only lone `--no-*` option sets default option value to `true`,
+    default not implicitly set when define both positive and negative option
+    in either order" — does not apply; confirmed above that `src/cli.ts`
+    defines no `--no-...` options at all, so there is no positive/negative
+    pair to be affected either way.
+  - 15.0.0 "show excess command-arguments in error message" — applies, and is
+    additive on top of the 13.0.0 change: the error message now also names the
+    excess arguments (see empirical check below).
+  - 15.0.0 "migrated Commander implementation from CommonJS to ESM" / "ESM
+    only" — does not apply to how `src/cli.ts` imports it;
+    `import { Command } from "commander"` already used ESM `import` syntax,
+    and the package is itself `"type": "module"`, so no import-style change
+    was needed. `npm run build`, `npm run typecheck`, and `node --test
+  test/cli.test.mjs` all pass against the built output (see Verification).
+  - No other change in the 13.0.0/14.0.0/15.0.0 sections touches option
+    parsing, argument parsing, help output, exit behavior, or the
+    `program.opts()`/action-handler call signature `src/cli.ts` relies on.
+  - **Decision**: the excess-command-arguments error (13.0.0, message detail
+    added in 15.0.0) is accepted as-is. This is a disclosed, accepted CLI
+    behavior change — no `.allowExcessArguments(true)` was added. Recorded in
+    `CHANGELOG.md` under Unreleased.
+- Empirical confirmation: `npm run build` then
+  `node dist/cli.js get somefile somekey extraArg` (`get <file> <key>` is a
+  fixed 2-argument command) printed
+  `error: too many arguments for 'get'. Expected 2 arguments but got 3:
+  somefile, somekey, extraArg.` to stderr and exited 1 — matching the
+  changelog's described 13.0.0/15.0.0 behavior exactly. Previously (commander
+  12) the same invocation would have silently ignored `extraArg` and run
+  `get` normally.
+- Grepped `test/`, `scripts/`, `docs/`, and `README*` for any existing
+  invocation of the CLI with extra positional arguments beyond a command's
+  declared arity, or for any prior reference to this error text
+  (`too many arguments`, `excess`, `allowExcessArguments`): none found outside
+  this task's own changes. No existing test, script, or doc relies on the old
+  permissive behavior.
 - `desktop/vite.config.ts` and `desktop/src/test-setup.ts` needed no changes
   for `vitest` 5 / `jsdom` 30 / `react` 19.3 (see desktop:test below).
 

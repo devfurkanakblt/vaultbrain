@@ -5,6 +5,13 @@ Versioning once the encrypted storage format reaches 1.0.
 
 ## Unreleased
 
+- Changed: the CLI now rejects extra positional arguments instead of silently
+  ignoring them, e.g. `vbrain get file key extra` now exits non-zero with
+  `error: too many arguments for 'get'. Expected 2 arguments but got 3: ...`.
+  This comes from the `commander` 15 upgrade, which made excess
+  command-arguments an error by default (`commander` 13) and now names them in
+  the error message (`commander` 15); it is accepted as-is, with no
+  `allowExcessArguments()` override.
 - Added a draft-only GitHub Releases pipeline for signed Tauri updater artifacts,
   checksums, SPDX SBOM, provenance and fixed bundle-specific update targets.
 - Added a native-owned, manual desktop updater with separate check, download,
