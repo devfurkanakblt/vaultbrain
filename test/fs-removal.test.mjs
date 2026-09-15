@@ -116,7 +116,7 @@ test("removeFile handed a directory throws rather than removing it", () => {
 // which cannot reproduce the underlying Windows defect — if a source file
 // under src/ or scripts/ still calls one of them, so a new call site cannot
 // slip back in silently. src/fs-tree.ts and scripts/fs-tree.mjs get no
-// exemption: neither must use them, even to explain the defect it works
+// exemption: neither must use them, even to explain the defect each works
 // around, so their own comments avoid spelling the banned names.
 //
 // A plain regex over the raw source missed real equivalents: `rmdirSync`
@@ -237,12 +237,12 @@ test("findBannedCalls matches every probe that names a banned removal, and none 
   }
 });
 
-function listFilesWithExtension(dir, extension) {
+function listFilesWithExtensions(dir, extensions) {
   const out = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) out.push(...listFilesWithExtension(full, extension));
-    else if (entry.isFile() && entry.name.endsWith(extension)) out.push(full);
+    if (entry.isDirectory()) out.push(...listFilesWithExtensions(full, extensions));
+    else if (entry.isFile() && extensions.some((extension) => entry.name.endsWith(extension))) out.push(full);
   }
   return out;
 }
@@ -250,13 +250,13 @@ function listFilesWithExtension(dir, extension) {
 test("no source file under src/ or scripts/ calls Node's non-ASCII-unsafe recursive removal helpers", () => {
   const repoRoot = path.join(import.meta.dirname, "..");
   const trees = [
-    { dir: path.join(repoRoot, "src"), extension: ".ts" },
-    { dir: path.join(repoRoot, "scripts"), extension: ".mjs" },
+    { dir: path.join(repoRoot, "src"), extensions: [".ts"] },
+    { dir: path.join(repoRoot, "scripts"), extensions: [".mjs", ".cjs", ".js"] },
   ];
   const offenses = [];
 
-  for (const { dir, extension } of trees) {
-    for (const file of listFilesWithExtension(dir, extension)) {
+  for (const { dir, extensions } of trees) {
+    for (const file of listFilesWithExtensions(dir, extensions)) {
       const text = fs.readFileSync(file, "utf8");
       for (const offense of findBannedCalls(text)) {
         offenses.push(`${path.relative(repoRoot, file)}:${offense.line}: ${offense.text}`);

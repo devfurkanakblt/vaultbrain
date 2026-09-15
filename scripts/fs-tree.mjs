@@ -20,6 +20,14 @@ import path from "node:path";
 // they cannot import compiled product code, and product code cannot import a
 // .mjs script. The two copies exist so both sides of that boundary get the
 // same fix; keep them in sync.
+//
+// Accepted TOCTOU: between the lstat below and the readdir it precedes, a
+// same-user process with write access inside the tree being removed could
+// swap a directory entry for a junction, redirecting the recursion outside
+// the tree. This is accepted because it requires write access inside the
+// tree while a removal is running — a process already in that position has
+// no need of this window — and Node's own removal helper carries the same
+// gap between its own stat and its own recursion.
 
 export function linkStat(target) {
   try {

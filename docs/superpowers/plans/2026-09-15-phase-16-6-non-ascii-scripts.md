@@ -121,6 +121,23 @@ scripts/make-fixtures.mjs`; it must exit 0, and `npm test`'s
   differences on this host are a known `format:check` artifact; report them,
   do not rewrite line endings).
 
+## Found beyond this plan
+
+A grep for Node's rm/cp family (`rmSync`/`cpSync`, `fs.rm(`/`fs.cp(`,
+`promises.rm`/`promises.cp`, and `fs/promises` imports) across `test/` turns
+up 35 files still calling them directly — for example `test/release.test.mjs`,
+`test/canvas.test.mjs`, and `test/cli.test.mjs`. Every sampled call site
+operates under `os.tmpdir()`, which is ASCII on this host, so all of them pass
+here; on a host whose temp directory has a non-ASCII component, the same
+defect this plan fixes for `src/` and `scripts/` could make one of these calls
+silently leak a directory or abort the test process. This is recorded, not
+fixed: the source scan in `test/fs-removal.test.mjs` does not cover `test/`.
+
+Separately: a cleanup error thrown from a `finally` block can now replace the
+body's original error under a non-ASCII path (previously the silent no-op
+hid nothing). This is accepted because the plan requires every removal
+failure to surface.
+
 ## Evidence
 
 ### Task 1 (commit `1b60861`): `removeFile` in `scripts/fs-tree.mjs`

@@ -15,11 +15,11 @@ import path from "node:path";
 // This is not a workaround for a slow disk or a held handle. A removal that
 // does not remove must be reported, never retried into silence.
 //
-// This is a TypeScript copy of scripts/fs-tree.mjs's removeTree: build and
-// packaging scripts run before `tsc` has produced anything under dist/, so
-// they cannot import compiled product code, and product code cannot import a
-// .mjs script. The two copies exist so both sides of that boundary get the
-// same fix; keep them in sync.
+// This is a TypeScript copy of scripts/fs-tree.mjs's removeTree and
+// removeFile: build and packaging scripts run before `tsc` has produced
+// anything under dist/, so they cannot import compiled product code, and
+// product code cannot import a .mjs script. The two copies exist so both
+// sides of that boundary get the same fix; keep them in sync.
 //
 // Accepted TOCTOU: between the lstat below and the readdir it precedes, a
 // same-user process with write access inside the tree being removed could
