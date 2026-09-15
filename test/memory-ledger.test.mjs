@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { MemoryLedger } from "../dist/memory/index.js";
 import { openOrCreateVaultKeySet } from "../dist/keyring.js";
+import { removeTree } from "../scripts/fs-tree.mjs";
 
 test("memory ledger stores and searches only Memory notes", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vaultbrain-memory-ledger-"));
@@ -18,5 +19,5 @@ test("memory ledger stores and searches only Memory notes", () => {
   assert.equal(ledger.remember({ kind: "fact", title: "Maybe", body: "An inference", evidence: [{ messageId: "m2", quote: "maybe" }], sourceKind: "inference", sensitive: false, links: [] }).status, "review");
   ledger.lock();
   assert.throws(() => ledger.search("dark"), /locked/i);
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });

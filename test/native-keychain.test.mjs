@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { forgetPassphrase, keychain, recallPassphrase, rememberPassphrase } from "../dist/keychain.js";
+import { removeTree } from "../scripts/fs-tree.mjs";
 
 const required = process.env.VBRAIN_REQUIRE_NATIVE_KEYCHAIN === "1";
 
@@ -25,6 +26,6 @@ test("the host credential backend stores or reads and then removes an isolated c
     assert.equal(recallPassphrase(vaultDir), undefined);
   } finally {
     forgetPassphrase(vaultDir);
-    fs.rmSync(vaultDir, { recursive: true, force: true });
+    removeTree(vaultDir);
   }
 });

@@ -39,8 +39,9 @@ test("a removal that silently leaves files behind fails and names them", () => {
   const root = temporaryRoot("silent");
   const output = writeOutput(root, { "cli.js": "current", "sync/change-log.js": "retired" });
 
-  // The observed defect: fs.rmSync with force:true returned without removing the
-  // tree and without reporting anything, so the build carried on over stale output.
+  // The observed defect: Node's recursive removal helper, called with force,
+  // returned without removing the tree and without reporting anything, so the
+  // build carried on over stale output.
   assert.throws(() => cleanDist(output, { remove: () => {} }), (error) => {
     assert.match(error.message, /could not be removed/u);
     assert.match(error.message, /change-log\.js/u);

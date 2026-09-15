@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { DocumentVault } from "../dist/documents.js";
+import { removeTree } from "../scripts/fs-tree.mjs";
 
 // Deliberately uncached, full-sort oracle for the existing search contract.
 // It does not call the production scoring or cache helpers.
@@ -69,7 +70,7 @@ test("cached search preserves uncached scores, ordering and query grammar", () =
         assert.deepEqual(vault.search(query, limit).map(({ id, score }) => ({ id, score })), expected, `${query}/${limit}`);
       }
     }
-  } finally { vault.lock(); fs.rmSync(directory, { recursive: true, force: true }); }
+  } finally { vault.lock(); removeTree(directory); }
 });
 
 test("occurrence cache is bounded, cleared after writes/rebuild and zeroed on lock", () => {
@@ -99,5 +100,5 @@ test("occurrence cache is bounded, cleared after writes/rebuild and zeroed on lo
     for (const counts of references) assert.ok(counts.every((value) => value === 0));
     const reopened = new DocumentVault(directory, PASS);
     try { assert.equal(reopened.search("replacement").length, 0); } finally { reopened.lock(); }
-  } finally { vault.lock(); fs.rmSync(directory, { recursive: true, force: true }); }
+  } finally { vault.lock(); removeTree(directory); }
 });

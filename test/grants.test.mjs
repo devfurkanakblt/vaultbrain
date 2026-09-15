@@ -325,7 +325,7 @@ test("removing the authenticated audit head cannot hide a truncated tail", () =>
   const logPath = path.join(vault, "audit.log");
   const [firstEntry] = fs.readFileSync(logPath, "utf8").trim().split("\n");
   fs.writeFileSync(logPath, `${firstEntry}\n`);
-  fs.rmSync(path.join(vault, "audit.head.json"));
+  fs.unlinkSync(path.join(vault, "audit.head.json"));
 
   const verification = verifyAudit(vault, PASSPHRASE);
   assert.equal(verification.valid, false);

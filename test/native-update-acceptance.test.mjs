@@ -10,6 +10,7 @@ import {
   runSyntheticNativeUpdateAcceptance,
   verifyNativeUpdateTransition,
 } from "../scripts/release/native-update-acceptance.mjs";
+import { removeTree } from "../scripts/fs-tree.mjs";
 
 function temporaryDirectory() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-native-update-test-"));
@@ -52,7 +53,7 @@ test("the native CI harness advances one packaged version without changing vault
     assert.notEqual(result.before.packageSha256, result.after.packageSha256);
     assert.equal(result.filesVerified, 2);
   } finally {
-    fs.rmSync(root, { recursive: true, force: true });
+    removeTree(root);
   }
 });
 
@@ -85,7 +86,7 @@ test("transition verification rejects same-version packages and any vault mutati
       /vault identity/iu,
     );
   } finally {
-    fs.rmSync(root, { recursive: true, force: true });
+    removeTree(root);
   }
 });
 
@@ -109,7 +110,7 @@ test("the harness rejects a package whose filename does not carry the requested 
       /package.*version/iu,
     );
   } finally {
-    fs.rmSync(root, { recursive: true, force: true });
+    removeTree(root);
   }
 });
 
@@ -159,6 +160,6 @@ test("the harness selects every native CI package target without cross-platform 
       /target.*platform/iu,
     );
   } finally {
-    fs.rmSync(root, { recursive: true, force: true });
+    removeTree(root);
   }
 });

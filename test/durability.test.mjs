@@ -19,6 +19,7 @@ import {
 import { getPassphrase } from "../dist/passphrase.js";
 import { loadVaultFile, migrateVault, vaultFileEnvelopeVersion } from "../dist/store.js";
 import { lockHolder, VaultBusyError, withVaultLock } from "../dist/vault-lock.js";
+import { copyTree, removeTree } from "../scripts/fs-tree.mjs";
 
 const FIXTURES = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
 const FIXTURE_PASSPHRASE = "fixture-only-passphrase";
@@ -28,19 +29,19 @@ function tempDir(label = "durability") {
   return fs.mkdtempSync(path.join(os.tmpdir(), `vault-brain-${label}-`));
 }
 
-function copyTree(from, to) {
+function copyFixtureTree(from, to) {
   fs.mkdirSync(to, { recursive: true });
   for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
     const source = path.join(from, entry.name);
     const destination = path.join(to, entry.name);
-    if (entry.isDirectory()) copyTree(source, destination);
+    if (entry.isDirectory()) copyFixtureTree(source, destination);
     else fs.copyFileSync(source, destination);
   }
 }
 
 function copyFixture(name) {
   const target = tempDir(name);
-  copyTree(path.join(FIXTURES, name), target);
+  copyFixtureTree(path.join(FIXTURES, name), target);
   return target;
 }
 
@@ -155,15 +156,15 @@ test("an interrupted write is replayed from its journal on the next unlock", () 
 
   // Snapshot the vault, then advance it: the snapshot now holds a stale index.
   const crashed = tempDir("crash-copy");
-  fs.rmSync(crashed, { recursive: true, force: true });
-  fs.cpSync(live, crashed, { recursive: true });
+  removeTree(crashed);
+  copyTree(live, crashed);
   vault.put({ id: alpha.id, path: "Notes/Alpha.md", body: "# Alpha\n\nrecoverytoken [[Notes/Beta]]." });
 
   // A crash between the object write and the index write leaves exactly this:
   // the new object on disk, the old index, and a journal naming the note.
   const stale = tempDir("crash-stale");
-  fs.rmSync(stale, { recursive: true, force: true });
-  fs.cpSync(crashed, stale, { recursive: true });
+  removeTree(stale);
+  copyTree(crashed, stale);
   fs.copyFileSync(objectPath(live, alpha.id), objectPath(crashed, alpha.id));
   fs.copyFileSync(objectPath(live, alpha.id), objectPath(stale, alpha.id));
   fs.writeFileSync(
@@ -192,7 +193,7 @@ test("recovery drops a note whose object never landed, and rebuilds after a bulk
   const ghost = vault.put({ path: "Notes/Ghost.md", body: "# Ghost" });
   vault.put({ path: "Notes/Real.md", body: "# Real" });
 
-  fs.rmSync(objectPath(vaultDir, ghost.id));
+  fs.unlinkSync(objectPath(vaultDir, ghost.id));
   fs.writeFileSync(
     journalPath(vaultDir),
     JSON.stringify({ version: 1, startedAt: new Date().toISOString(), scope: "notes", ids: [ghost.id] }),
@@ -217,7 +218,7 @@ test("recovery drops a note whose object never landed, and rebuilds after a bulk
   assert.equal(fs.existsSync(journalPath(vaultDir)), false);
 
   // A missing index is rebuilt from the objects alone.
-  fs.rmSync(path.join(vaultDir, "documents", "index.enc"));
+  fs.unlinkSync(path.join(vaultDir, "documents", "index.enc"));
   assert.deepEqual(
     new DocumentVault(vaultDir, PASSPHRASE).list().map((note) => note.title),
     ["Real"],
