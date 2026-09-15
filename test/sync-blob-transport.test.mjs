@@ -8,6 +8,7 @@ import test from "node:test";
 import { SyncBlobStore } from "../dist/sync-blobs.js";
 import { attachmentBlobIds, startSyncRelay, SyncRelayClient } from "../dist/sync-relay.js";
 import { parseAttachmentSnapshot, SyncDeviceManager, SyncedDocumentVault } from "../dist/sync.js";
+import { copyTree, removeTree } from "../scripts/fs-tree.mjs";
 
 const PASSPHRASE = "blob-transport-test-passphrase";
 const TOKEN = "relay-test-token-that-is-at-least-thirty-two-bytes";
@@ -19,7 +20,7 @@ function tempDir(label) {
 }
 
 function removeAll(...dirs) {
-  for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
+  for (const dir of dirs) removeTree(dir);
 }
 
 /**
@@ -39,8 +40,8 @@ function enrolledPair(label) {
   vault.lock();
 
   const targetDir = tempDir(`${label}-target`);
-  fs.rmSync(targetDir, { recursive: true, force: true });
-  fs.cpSync(sourceDir, targetDir, { recursive: true });
+  removeTree(targetDir);
+  copyTree(sourceDir, targetDir);
   return { sourceDir, targetDir, vaultId };
 }
 

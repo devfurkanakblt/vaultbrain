@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { SyncedDocumentVault } from "../dist/sync.js";
+import { copyTree, removeTree } from "../scripts/fs-tree.mjs";
 
 const PASSPHRASE = "sync-apply-test-passphrase";
 const DEVICE_A = "11111111-1111-4111-8111-111111111111";
@@ -17,7 +18,7 @@ function tempVault(label) {
 
 function closeAndRemove(vault, vaultDir) {
   vault?.lock();
-  fs.rmSync(vaultDir, { recursive: true, force: true });
+  removeTree(vaultDir);
 }
 
 // A device receives sealed attachment chunks out of band, the way `sync relay
@@ -25,13 +26,13 @@ function closeAndRemove(vault, vaultDir) {
 function stageBlobs(fromDir, toDir) {
   const from = path.join(fromDir, "documents", "sync", "blobs");
   if (!fs.existsSync(from)) return;
-  fs.cpSync(from, path.join(toDir, "documents", "sync", "blobs"), { recursive: true });
+  copyTree(from, path.join(toDir, "documents", "sync", "blobs"));
 }
 
 function copyVault(from, label) {
   const to = tempVault(label);
-  fs.rmSync(to, { recursive: true, force: true });
-  fs.cpSync(from, to, { recursive: true });
+  removeTree(to);
+  copyTree(from, to);
   return to;
 }
 
@@ -48,8 +49,8 @@ test("an asymmetric clean merge applies its required off-cursor ancestor before 
   let source = new SyncedDocumentVault(sourceDir, PASSPHRASE, DEVICE_A);
   source.put({ id: note.id, path: note.path, body: "from A", baseRevision: 1 });
   source.lock();
-  fs.rmSync(targetDir, { recursive: true, force: true });
-  fs.cpSync(sourceDir, targetDir, { recursive: true });
+  removeTree(targetDir);
+  copyTree(sourceDir, targetDir);
 
   const branch = new SyncedDocumentVault(branchDir, PASSPHRASE, DEVICE_B);
   branch.put({ id: note.id, path: note.path, body: "from B", baseRevision: 1 });
