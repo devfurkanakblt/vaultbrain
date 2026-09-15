@@ -6088,8 +6088,14 @@ fn with_lock_transition<T>(
                         .map(|value| &value.token)
                         == holder.as_ref().map(|value| &value.token)
                 {
-                    let _ = fs::remove_file(&path);
-                    continue;
+                    // Retry at once only when the stale record is really gone. A
+                    // reclaim that cannot remove it must still reach the deadline
+                    // below instead of spinning on the same file forever.
+                    match fs::remove_file(&path) {
+                        Ok(()) => continue,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(_) => {}
+                    }
                 }
                 if Instant::now() >= deadline {
                     return Err(
@@ -8076,6 +8082,92 @@ mod tests {
 
         drop(session);
         fs::remove_dir_all(path).unwrap();
+    }
+
+    /// A vault whose path has non-ASCII components of its own, so the check
+    /// does not depend on the host's temp directory: Node's recursive removal
+    /// silently removed nothing under such a path on Windows (Phase 16.6).
+    /// `𝄞` is outside the BMP, a surrogate pair in the wide-char Win32 APIs.
+    /// Returns the outer directory to clean up and the vault path.
+    fn non_ascii_vault(label: &str) -> (PathBuf, PathBuf) {
+        let outer = temporary_vault(label);
+        let vault = outer.join("Masaüstü").join("çğış-𝄞").join("vault");
+        let text = vault.to_str().expect("the vault path is valid Unicode");
+        assert!(!text.is_ascii(), "the vault path must be non-ASCII");
+        assert!(
+            text.chars().any(|character| u32::from(character) > 0xFFFF),
+            "the vault path must contain a non-BMP character"
+        );
+        (outer, vault)
+    }
+
+    /// `exists()` alone is also false when metadata cannot be read, so the
+    /// removal is only proven by `NotFound`.
+    fn assert_removed(path: &Path) {
+        assert!(!path.exists(), "{} still exists", path.display());
+        let error = fs::symlink_metadata(path)
+            .expect_err("a removed path must not resolve to any entry, links included");
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::NotFound,
+            "{}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn an_attachment_purge_removes_its_directory_under_a_non_ascii_vault_path() {
+        let (outer, vault) = non_ascii_vault("non-ascii-attachment");
+        let mut session = open_session(&vault.to_string_lossy(), "attachment passphrase").unwrap();
+        let info = put_attachment(
+            &session,
+            &spanning_bytes(),
+            "Masaüstü-çğış-𝄞.bin",
+            "application/octet-stream",
+        )
+        .unwrap();
+        let dir = attachment_dir(&session.root_dir, &info.id).unwrap();
+        assert!(
+            files_in(&dir).len() > 2,
+            "a manifest and more than one chunk exist before the purge"
+        );
+
+        // What the `delete_attachment` command runs.
+        let removed =
+            with_vault_write(&mut session, |session| remove_attachment(session, &info.id)).unwrap();
+        assert_eq!(removed.id, info.id);
+        assert_removed(&dir);
+        assert_removed(&session.vault_dir.join(VAULT_LOCK_FILENAME));
+        assert_removed(&session.vault_dir.join(VAULT_TRANSITION_FILENAME));
+        assert!(load_attachments(&session).unwrap().is_empty());
+
+        drop(session);
+        fs::remove_dir_all(&outer).unwrap();
+        assert_removed(&outer);
+    }
+
+    #[test]
+    fn a_note_delete_removes_its_object_under_a_non_ascii_vault_path() {
+        let (outer, vault) = non_ascii_vault("non-ascii-note");
+        let mut session = open_session(&vault.to_string_lossy(), "note passphrase").unwrap();
+        let note = seeded_note("Masaüstü/çğış-𝄞.md", "Masaüstü", "# çğış 𝄞");
+        with_vault_write(&mut session, |session| {
+            store_note(session, note.clone(), None)
+        })
+        .unwrap();
+        let object = note_path(&session.root_dir, &note.id).unwrap();
+        assert!(object.is_file(), "the note object exists before the delete");
+
+        // What the delete-note command runs.
+        with_vault_write(&mut session, |session| remove_note_in(session, &note.id)).unwrap();
+        assert_removed(&object);
+        assert_removed(&journal_path(&session));
+        assert_removed(&session.vault_dir.join(VAULT_LOCK_FILENAME));
+        assert_removed(&session.vault_dir.join(VAULT_TRANSITION_FILENAME));
+
+        drop(session);
+        fs::remove_dir_all(&outer).unwrap();
+        assert_removed(&outer);
     }
 
     /// The cross-implementation gate: this attachment was written by the

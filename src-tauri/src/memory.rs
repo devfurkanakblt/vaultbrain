@@ -714,8 +714,10 @@ pub(crate) fn disconnect(session: &mut VaultSession) -> Result<(), String> {
     c.pairing_id = None;
     c.fingerprint.clear();
     c.queue.clear();
+    // Before saving: if the bearer secret survives, the vault must not record
+    // a disconnect the pipe server would not honor.
     #[cfg(windows)]
-    delete_pairing_material();
+    delete_pairing_material()?;
     save(session, &c)
 }
 
@@ -812,9 +814,27 @@ fn write_pairing_material(fingerprint: &str) -> Result<(), String> {
     write_atomic(&path, &protected)
 }
 #[cfg(windows)]
-fn delete_pairing_material() {
-    if let Ok(path) = pairing_store() {
-        let _ = fs::remove_file(path);
+fn delete_pairing_material() -> Result<(), String> {
+    // Without LOCALAPPDATA no pairing material can have been written.
+    let Ok(path) = pairing_store() else {
+        return Ok(());
+    };
+    remove_pairing_file(&path)
+}
+/// The pipe server authorizes a client by this file alone, so a removal that
+/// did not remove is reported, never ignored. A missing file (never paired)
+/// is not an error. No retry.
+#[cfg(windows)]
+fn remove_pairing_file(path: &Path) -> Result<(), String> {
+    const NOT_REMOVED: &str = "memory pairing material could not be removed";
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(NOT_REMOVED.into()),
+    }
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        _ => Err(NOT_REMOVED.into()),
     }
 }
 
@@ -1717,5 +1737,39 @@ mod tests {
             "params": {"vaultPath": "C:\\\\private"}
         });
         assert!(!request_shape_is_valid(&bad_params));
+    }
+
+    /// A Windows user name may be non-ASCII, and it reaches LOCALAPPDATA,
+    /// where the pairing secret lives.
+    #[cfg(windows)]
+    #[test]
+    fn pairing_material_removal_is_verified_under_a_non_ascii_path() {
+        let outer = std::env::temp_dir().join(format!("vault-brain-pairing-{}", Uuid::new_v4()));
+        let dir = outer.join("Masaüstü").join("çğış-𝄞").join("VaultBrain");
+        let text = dir.to_str().unwrap();
+        assert!(!text.is_ascii());
+        assert!(text.chars().any(|character| u32::from(character) > 0xFFFF));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("memory-client.v1.dpapi");
+        fs::write(&path, b"protected pairing secret").unwrap();
+
+        remove_pairing_file(&path).unwrap();
+        assert!(!path.exists());
+        assert_eq!(
+            fs::symlink_metadata(&path).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        remove_pairing_file(&path).expect("a missing pairing file is not an error");
+
+        // A removal that cannot remove is reported, and nothing is deleted.
+        fs::create_dir(&path).unwrap();
+        assert_eq!(
+            remove_pairing_file(&path).unwrap_err(),
+            "memory pairing material could not be removed"
+        );
+        assert!(path.is_dir());
+
+        fs::remove_dir_all(&outer).unwrap();
+        assert!(!outer.exists());
     }
 }
