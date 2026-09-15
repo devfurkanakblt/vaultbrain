@@ -143,6 +143,39 @@ directory.`, Vite never started, and `keep.js` survived.
   their `node_modules` (and `desktop-dist`) junctions were unlinked with
   `rmdir`, leaving the linked `node_modules` intact.
 
+### CI finding: the entry-point guard skipped the command through a link
+
+The first CI run on PR #72 (`498a699`) failed `node-platform (macos-15)`: the
+four tests that run the real command saw it exit 0 having done nothing.
+`scripts/clean-dist.mjs` ran its CLI only when `path.resolve(process.argv[1])`
+equaled `fileURLToPath(import.meta.url)`. Node resolves links in the main
+module's URL but not in `argv[1]`, and on macOS `os.tmpdir()` (`/var/...`) is a
+link to `/private/var/...`, so the guard was false, the command skipped
+itself, and exit 0 reported a clean that never happened. The same holds for
+any checkout reached through a link, on any platform. Every other job passed,
+`node-platform (windows-latest)` and `typescript` included.
+
+- Fix: the guard compares `fs.realpathSync` of both sides.
+- Test: "the clean command still cleans when run through a linked checkout
+  directory" runs the command through a junction (a symlink on macOS and
+  Linux) to the non-ASCII root, so every platform covers this.
+- RED on this host: with the new test and `scripts/clean-dist.mjs` from
+  `e685460` (old guard), `node --test --test-name-pattern "linked checkout"
+test/clean-dist.test.mjs` gave `pass 0`, `fail 1`
+  (`desktop-dist must be gone when the command runs through a link`).
+- GREEN: with the new guard the same command passed; `node --test
+test/clean-dist.test.mjs test/fs-removal.test.mjs` gave `tests 22`,
+  `pass 22`, `fail 0`, and `npx eslint scripts/clean-dist.mjs
+test/clean-dist.test.mjs` was clean.
+
+Found beyond this plan: `scripts/rust-toolchain.mjs`,
+`scripts/platform-artifacts.mjs` and
+`scripts/release/native-update-acceptance.mjs` use the same
+`path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)` guard, so
+run through a linked checkout they would also skip themselves and exit 0.
+CI checkouts are not linked, and none of them removes a build output, so this
+is recorded, not fixed.
+
 ### Local verification
 
 Run in the ASCII worktree on the Task 2 commit `e685460`.
@@ -151,7 +184,8 @@ Run in the ASCII worktree on the Task 2 commit `e685460`.
 - `npm run build`: PASS.
 - `node --test test/clean-dist.test.mjs`: PASS, 12/12.
 - `npm test`: PASS, `tests 503`, `pass 503`, `fail 0` (was 497 before this
-  plan; six new tests).
+  plan; six new tests). After the entry-point guard fix and its test:
+  `tests 504`, `pass 504`, `fail 0`, and `npm run desktop:build` PASS again.
 - `npm run lint`: PASS.
 - `npm run typecheck`: PASS.
 - `npm run desktop:test`: PASS, 13 files, 145 tests.

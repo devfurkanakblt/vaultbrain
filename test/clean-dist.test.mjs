@@ -234,3 +234,25 @@ test("every desktop-dist build cleans through the verified command and Vite does
   assert.match(vite, /outDir:\s*path\.resolve\(import\.meta\.dirname,\s*"\.\.\/desktop-dist"\)/u);
   assert.match(vite, /emptyOutDir:\s*false/u);
 });
+
+// On macOS os.tmpdir() is itself a link, and Node resolves links in the main
+// module's URL but not in argv[1]: a guard comparing the two as given skipped
+// the whole command and exited 0 having cleaned nothing. Pin that on every
+// platform by running the command through a linked checkout directory.
+test("the clean command still cleans when run through a linked checkout directory", () => {
+  const root = awkwardCheckout();
+  const desktopDist = path.join(root, "desktop-dist");
+  fs.mkdirSync(path.join(desktopDist, "stale-dir"), { recursive: true });
+  fs.writeFileSync(path.join(desktopDist, "stale-dir", "x.txt"), "left by an earlier build");
+  const holder = fs.mkdtempSync(path.join(os.tmpdir(), AWKWARD));
+  const linked = path.join(holder, "linked-checkout");
+  fs.symlinkSync(root, linked, "junction");
+
+  const result = runClean(linked, "desktop-dist");
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(fs.existsSync(desktopDist), false, "desktop-dist must be gone when the command runs through a link");
+
+  removeTree(holder);
+  removeTree(root);
+});

@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -44,8 +45,12 @@ export function cleanDist(output, { remove = removeTree } = {}) {
   );
 }
 
-const entryPoint = process.argv[1] ? path.resolve(process.argv[1]) : undefined;
-if (entryPoint === fileURLToPath(import.meta.url)) {
+// Node resolves links in a main module's import.meta.url but not in argv[1], so
+// comparing the two as given misses every run through a linked directory (on
+// macOS the temporary directory is one) and the command would exit 0 having
+// cleaned nothing. Compare real paths instead.
+const entryPoint = process.argv[1] ? fs.realpathSync(process.argv[1]) : undefined;
+if (entryPoint === fs.realpathSync(fileURLToPath(import.meta.url))) {
   const root = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
   const names = process.argv.slice(2);
   try {
