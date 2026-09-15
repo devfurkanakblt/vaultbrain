@@ -9,7 +9,7 @@ use base64::{
 use chrono::{DateTime, Local, NaiveDate, SecondsFormat, TimeZone, Utc};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use hmac::{Hmac, Mac};
-use rand::{rngs::OsRng, RngCore};
+use rand::{rand_core::UnwrapErr, rngs::SysRng, Rng};
 use regex::Regex;
 use scrypt::{scrypt, Params as ScryptParams};
 use serde::{Deserialize, Serialize};
@@ -905,7 +905,7 @@ fn derive_key(passphrase: &str, salt: &[u8], n: u32) -> Result<Zeroizing<[u8; 32
 fn encrypt(plaintext: &[u8], key: &[u8], aad: &str) -> Result<EncryptedPayload, String> {
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| "invalid AES key")?;
     let mut iv = [0u8; 12];
-    OsRng.fill_bytes(&mut iv);
+    UnwrapErr(SysRng).fill_bytes(&mut iv);
     let nonce = <&Nonce<Aes256Gcm>>::try_from(iv.as_slice()).map_err(|_| "encryption failed")?;
     let mut ciphertext = plaintext.to_vec();
     let tag = cipher
@@ -1835,7 +1835,7 @@ fn open_vault_keys(
     if vault_holds_legacy_material(vault_dir) {
         validate_new_passphrase(passphrase)?;
         let mut salt = [0u8; 16];
-        OsRng.fill_bytes(&mut salt);
+        UnwrapErr(SysRng).fill_bytes(&mut salt);
         let key = derive_key(passphrase, &salt, 65_536)?;
         let manifest = Manifest {
             version: 1,

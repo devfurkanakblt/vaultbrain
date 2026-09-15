@@ -19,7 +19,7 @@ use base64::{
     Engine,
 };
 use chrono::{SecondsFormat, Utc};
-use rand::{rngs::OsRng, RngCore};
+use rand::{rand_core::UnwrapErr, rngs::SysRng, Rng};
 use scrypt::{scrypt, Params as ScryptParams};
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
@@ -421,7 +421,7 @@ pub(crate) fn unwrap_keyring(file: &KeyringFile, passphrase: &str) -> Result<Key
 pub(crate) fn random_key_set() -> KeySet {
     let new_key = || {
         let mut key = Zeroizing::new([0u8; KEY_LENGTH]);
-        OsRng.fill_bytes(key.as_mut());
+        UnwrapErr(SysRng).fill_bytes(key.as_mut());
         key
     };
     KeySet {
@@ -461,9 +461,9 @@ pub(crate) fn wrap_key_set_slot(
         return Err("vault keyring cost N is out of range".into());
     }
     let mut salt = [0u8; 16];
-    OsRng.fill_bytes(&mut salt);
+    UnwrapErr(SysRng).fill_bytes(&mut salt);
     let mut iv = [0u8; 12];
-    OsRng.fill_bytes(&mut iv);
+    UnwrapErr(SysRng).fill_bytes(&mut iv);
     let mut slot = KeyringSlot {
         id: Uuid::new_v4().to_string(),
         kind: "passphrase".into(),
@@ -690,7 +690,7 @@ fn code_checksum(secret: &[u8]) -> String {
 /// rather than silently failing to open anything.
 pub(crate) fn generate_recovery_code() -> Zeroizing<String> {
     let mut secret = [0u8; 32];
-    OsRng.fill_bytes(&mut secret);
+    UnwrapErr(SysRng).fill_bytes(&mut secret);
     let encoded = BASE64_URL.encode(secret);
     let code = format!("{RECOVERY_PREFIX}_{encoded}_{}", code_checksum(&secret));
     secret.zeroize();
