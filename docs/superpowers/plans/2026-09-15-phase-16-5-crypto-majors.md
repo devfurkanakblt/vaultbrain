@@ -95,6 +95,23 @@ Dependabot PRs: this branch supersedes #5 (`aes-gcm`), #7 (`rand`), #9
 (`sha2`) and #11 (`hmac`); it is based on #10 (`ed25519-dalek` 3), which must
 merge first.
 
+### `ed25519-dalek` 2.2.0 -> 3.0.0 (branch base, #10)
+
+Diffed the 2.2.0 and 3.0.0 sources directly (`~/.cargo/registry/src`):
+`VerifyingKey::from_bytes` is byte-identical. `Verifier::verify` now goes
+through `MultipartVerifier::multipart_verify(&[message], signature)`, which
+calls the same `raw_verify::<Sha512>` as 2.2.0 did directly, hashing the same
+message bytes as a one-part list; it stays non-strict (`verify`, not
+`verify_strict`). The signature scalar check is still
+`Scalar::from_canonical_bytes` in both versions, gated the same way behind a
+`legacy_compatibility` feature that is off on both sides.
+`Signature::from_slice`/`from_bytes` (in the `ed25519` crate, 2.2.3 -> 3.0.0)
+only gained `#[must_use]`; the bodies are unchanged. VaultBrain uses none of
+`SigningKey`, PKCS#8, serde or batch verification, and does not enable the
+`rand_core` feature, so ed25519-dalek's own `rand_core` dependency has no
+edge into this upgrade. The three TS-pinned Ed25519 tests (see Task 3 below)
+pass on all three OSes in CI run 34986728228.
+
 ### Task 1: `sha2` 0.11 and `hmac` 0.13
 
 - Commit `296cf5a`.
@@ -102,7 +119,7 @@ merge first.
 - `rust (ubuntu-latest, linux)`: success, 94 tests passed.
 - `rust (macos-15, macos)`: success, 94 tests passed.
 - `rust (windows-latest, windows)`: success, 95 tests passed.
-- The five cross-core vector tests are `ok` on Linux:
+- The five cross-core vector tests are `ok` on Linux, macOS and Windows:
   `audit::tests::audit_entry_hashes_match_the_committed_cross_core_vector`,
   `audit::tests::the_audit_head_mac_matches_the_committed_cross_core_vector`,
   `keyring::tests::the_cross_core_vector_unwraps_to_its_recorded_keyset`,
@@ -125,7 +142,7 @@ merge first.
 - `rust (ubuntu-latest, linux)`: success, 94 tests passed.
 - `rust (macos-15, macos)`: success, 94 tests passed.
 - `rust (windows-latest, windows)`: success, 95 tests passed.
-- The same five cross-core vector tests are `ok` on Linux.
+- The same five cross-core vector tests are `ok` on Linux, macOS and Windows.
 - The `Nonce`/`Tag` `from_slice` -> `TryFrom` change has no observable effect:
   at every call site the old panic was unreachable (a prior length check, or a
   fixed-size local array), and a bad-length input still produces the same
@@ -136,8 +153,8 @@ merge first.
   `getrandom` feature adds `getrandom`/`rand_core 0.10` lockfile edges, which
   are harmless and later folded into Task 3's `rand` bump.
 - `cargo tree -i aes-gcm` after this commit shows `aes-gcm 0.11.1` as a direct
-  dependency only; `digest 0.10.7` no longer has an `aes-gcm`-related path
-  (confirmed by the Task 1 record above, which already excluded `aes-gcm`).
+  dependency only. `aes-gcm` never depended on `digest`, at 0.10.3 or at
+  0.11.1.
 
 ### Task 3: `rand` 0.10
 
@@ -146,7 +163,12 @@ merge first.
 - `rust (ubuntu-latest, linux)`: success, 94 tests passed.
 - `rust (macos-15, macos)`: success, 94 tests passed.
 - `rust (windows-latest, windows)`: success, 95 tests passed.
-- The same five cross-core vector tests are `ok` on Linux.
+- The same five cross-core vector tests are `ok` on Linux, macOS and Windows.
+  The three TS-pinned Ed25519 tests
+  (`tests::a_typescript_signed_package_verifies_in_the_rust_core`,
+  `tests::a_rotated_registry_written_by_the_typescript_core_still_verifies`,
+  `tests::a_tampered_registry_body_fails_verification`) are also `ok` on all
+  three OSes in this run.
 - `UnwrapErr(SysRng).fill_bytes` replaces `OsRng.fill_bytes` at the seven call
   sites (four in `keyring.rs`, two in `lib.rs`, one Windows-only in
   `memory.rs`). `SysRng` is `getrandom` 0.4's direct OS source: the Linux
@@ -194,6 +216,11 @@ worktree has no `node_modules`, so
 `npx prettier --check docs/superpowers/plans/2026-09-15-phase-16-5-crypto-majors.md`
 was run from the main checkout
 (`C:\Users\bekircan\OneDrive\Masaüstü\yazilim\vaultbrain`) against this file
-after the Evidence section was written: it reported only CRLF-vs-LF line
-ending differences, a known limitation of this Windows host, and no other
-formatting issues.
+after the Evidence section was first written: the check failed on wrap-column
+continuation indentation for a few lines, `prettier --write` was run to match
+the doc's own style, and the re-check then passed clean. `--check` was run
+again from the main checkout after this final-review pass and passed clean
+on the first try.
+
+The head commit's CI run for this evidence-doc update will be recorded in
+the PR.
