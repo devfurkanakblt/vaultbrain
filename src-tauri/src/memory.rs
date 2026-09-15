@@ -800,7 +800,7 @@ fn unprotect_current_user(bytes: &[u8]) -> Result<Vec<u8>, String> {
 #[cfg(windows)]
 fn write_pairing_material(fingerprint: &str) -> Result<(), String> {
     let mut secret = [0u8; 32];
-    OsRng.fill_bytes(&mut secret);
+    UnwrapErr(SysRng).fill_bytes(&mut secret);
     let record = serde_json::json!({"version":1,"secret":BASE64_URL.encode(secret),"fingerprint":fingerprint});
     let protected = protect_current_user(
         &serde_json::to_vec(&record).map_err(|_| "memory pairing storage is unavailable")?,
