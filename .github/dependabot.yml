@@ -7,6 +7,14 @@ updates:
     groups:
       npm-development:
         dependency-type: development
+    ignore:
+      # typescript-eslint 8.70.0 requires typescript <6.1.0; stay on 5.x until
+      # typescript-eslint supports 7.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+      # Stay on the 22.x @types/node line to match the Node version CI runs.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: cargo
     directory: /src-tauri
     schedule:
