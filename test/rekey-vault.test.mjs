@@ -57,8 +57,9 @@ function tempDir(label = "rekey") {
 
 /**
  * os.tmpdir() is ASCII on the hosts this runs on, so a vault under it never
- * meets the Node defect src/fs-tree.ts exists for: on Windows, fs.rmSync
- * removes nothing and returns normally when any path component is non-ASCII.
+ * meets the Node defect src/fs-tree.ts exists for: on Windows, Node's
+ * recursive removal helper removes nothing and returns normally when any
+ * path component is non-ASCII.
  */
 function nonAsciiTempDir(label = "rekey") {
   return fs.mkdtempSync(path.join(os.tmpdir(), `vault-brain-${label}-ü-é-`));
@@ -104,7 +105,7 @@ test("a re-key appends one secret-free pending/allowed audit pair", () => {
   assert.equal(serialized.includes(dir), false);
   assert.equal(verifyAudit(dir, next).valid, true);
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // Kills the mutation "only write terminal audit outcomes": after credentials
@@ -120,7 +121,7 @@ test("a safely refused re-key closes its audit pair as denied", () => {
   assert.equal(events[0].key, events[1].key);
   assert.equal(verifyAudit(dir, PASSPHRASE).valid, true);
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // Kills the mutation "treat an interrupted install as a denial": once commit
@@ -147,7 +148,7 @@ test("a post-commit interruption leaves its audit operation pending", () => {
   assert.deepEqual(events.map((entry) => entry.outcome), ["pending"]);
   assert.equal(fs.existsSync(journalPath(dir)), true);
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // Kills the mutation "return success when the terminal audit append fails":
@@ -177,14 +178,14 @@ test("a failed allowed audit append prevents a re-key success report", () => {
   forgetVaultKeys();
   assert.ok(openVaultKeys(dir, next), "the committed vault must still open under the new passphrase");
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("the walk classifies the retention policy, and a re-key preserves it", (t) => {
   const { dir } = seedVault();
   t.after(() => {
     forgetVaultKeys();
-    fs.rmSync(dir, { recursive: true, force: true });
+    removeTree(dir);
   });
   const policyPath = path.join(dir, "documents", "retention.enc");
   const before = fs.readFileSync(policyPath);
@@ -257,7 +258,7 @@ test("the walk classifies every encrypted artifact with the AAD that wrote it", 
     identity: `secondbrain-vault:attachment-chunk:v1:${attachmentId}:0`,
   });
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("plaintext bookkeeping files are not scheduled for re-encryption", () => {
@@ -268,7 +269,7 @@ test("plaintext bookkeeping files are not scheduled for re-encryption", () => {
     assert.equal(scheduled.has(untouched), false, `${untouched} must not be re-encrypted`);
   }
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("an unrecognized file under documents/ fails the walk closed", () => {
@@ -277,7 +278,7 @@ test("an unrecognized file under documents/ fails the walk closed", () => {
 
   assert.throws(() => planRekey(dir), /cannot classify/iu);
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("an unrecognized encrypted file at the vault root fails the walk closed", () => {
@@ -286,7 +287,7 @@ test("an unrecognized encrypted file at the vault root fails the walk closed", (
 
   assert.throws(() => planRekey(dir), /cannot classify/iu);
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // Finding 1 (critical): normalizeVaultName must not run a second time on a
@@ -303,7 +304,7 @@ test("a kv identity that itself ends in .kv is not stripped twice", () => {
   assert.equal(backup.kind, "kv");
   assert.equal(backup.identity, "backup.kv", "the identity is the normalized filename base, stripped once");
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // Finding 3 (important): a leftover atomic-write temp file must be treated
@@ -324,7 +325,7 @@ test("a leftover atomic-write temp file under documents/ is skipped, not schedul
     "a .tmp leftover must never be scheduled for re-encryption",
   );
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("a leftover atomic-write temp file at the vault root is skipped, not scheduled", () => {
@@ -339,7 +340,7 @@ test("a leftover atomic-write temp file at the vault root is skipped, not schedu
     "a .tmp leftover at the vault root must never be scheduled for re-encryption",
   );
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // Finding 4 (important): every classifier branch, exercised by the real
@@ -400,7 +401,7 @@ test("plugin, plugin storage, plugin policy and canvas history all classify with
     identity: `secondbrain-vault:canvas-history:v1:${canvas.id}:1`,
   });
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("sync state files and a sync change all classify with the AAD or ID that wrote them", () => {
@@ -448,7 +449,7 @@ test("sync state files and a sync change all classify with the AAD or ID that wr
     identity: "secondbrain-vault:sync-apply-receipt:v1",
   });
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("an artifact re-encrypted under a new keyset carries the same plaintext", () => {
@@ -477,7 +478,7 @@ test("an artifact re-encrypted under a new keyset carries the same plaintext", (
     );
   }
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // Kills mutation A: changing the `kv` branch's `JSON.stringify(payload, null,
@@ -518,7 +519,7 @@ test("encryptItem reproduces each owner's JSON formatting exactly", () => {
   assert.match(documentRewritten, /^\{"version":1,"iv":"/u, "document envelopes must be compact JSON");
   assert.doesNotMatch(documentRewritten, /\n/u, "document envelopes must not contain any newlines");
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // Kills mutation B: routing the `document` branch through `.toString("utf8")`
@@ -557,7 +558,7 @@ test("an attachment with invalid UTF-8 bytes survives re-encryption byte for byt
   const roundTripped = decryptItem(item, newKeys, rewritten);
   assert.deepEqual(roundTripped, binary, "re-encrypted chunk must round trip byte for byte");
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // Kills mutation C: disabling the `envelope.id !== item.identity` guard in
@@ -593,7 +594,7 @@ test("decryptItem refuses a sync change whose filename does not match its envelo
     /Sync change filename does not match its envelope/u,
   );
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // seedVault() does not produce a sync change, so the round-trip test above
@@ -640,7 +641,7 @@ test("a sync change keeps its ID and its envelope shape across a re-encryption",
   assert.deepEqual(Object.keys(after), ["version", "id", "payload"]);
   assert.match(rewritten.toString("utf8"), /^\{"version":1,"id":"[0-9a-f]{64}","payload":/u);
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 /** SHA-256 of every file in the vault, keyed by POSIX-relative path. */
@@ -714,7 +715,7 @@ test("staging writes a full shadow tree and touches nothing live", () => {
     assert.equal(after[relative], hash, `${relative} must not have changed`);
   }
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("staging refuses when an artifact does not open under the current keyset", () => {
@@ -729,7 +730,7 @@ test("staging refuses when an artifact does not open under the current keyset", 
 
   assertVaultUnchanged(dir, before);
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // A staging tree left in the vault root (e.g. from a previous stageRekey call
@@ -759,7 +760,7 @@ test("a staging directory at the vault root does not break planRekey and is neve
     "no item under .rekey should ever be scheduled as vault content",
   );
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // The three tests below inject a failure PART WAY THROUGH the staging loop.
@@ -767,7 +768,7 @@ test("a staging directory at the vault root does not break planRekey and is neve
 // show that a partially built shadow tree is discarded — the shape where
 // "no partial staging tree survives" means anything at all.
 
-// Kills the mutation "delete the fs.rmSync from stageRekey's catch block":
+// Kills the mutation "delete the removeTree call from stageRekey's catch block":
 // several items stage successfully before the damaged one, so removing the
 // cleanup leaves a real, partially populated .rekey tree that
 // assertVaultUnchanged sees as files that appeared.
@@ -796,7 +797,7 @@ test("a damaged artifact at the end of the list leaves no partial staging tree",
 
   assertVaultUnchanged(dir, before);
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // Kills two mutations at once: replacing the disk read-back with the buffer
@@ -844,7 +845,7 @@ test("the disk read-back catches a staged file that does not carry its plaintext
   assert.equal(writes, targetIndex + 1, "staging must stop at the damaged write, not carry on past it");
   assertVaultUnchanged(dir, before);
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // A full disk partway through the loop: the original ENOSPC must reach the
@@ -883,7 +884,7 @@ test("a mid-list I/O failure aborts staging with the original error and no lefto
   assert.equal(opens, 3, "staging must stop at the failed write, not carry on past it");
   assertVaultUnchanged(dir, before);
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 const NEW_PASSPHRASE = "phase-74-replacement-passphrase";
@@ -927,7 +928,7 @@ test("a committed re-key installs every staged file and clears the staging tree"
     assert.ok(decryptItem(item, newKeys, raw).length >= 0);
   }
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("a crash before the new keyring rolls the re-key back", () => {
@@ -947,7 +948,7 @@ test("a crash before the new keyring rolls the re-key back", () => {
     assert.equal(after[relative], hash, `${relative} must not have changed`);
   }
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("a crash partway through the installs is finished by the next run", () => {
@@ -966,7 +967,7 @@ test("a crash partway through the installs is finished by the next run", () => {
     assert.ok(decryptItem(item, newKeys, raw).length >= 0, `${item.path} must open under the new keyset`);
   }
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("recovery is a no-op on a vault with no journal, and clears an aborted stage", () => {
@@ -978,7 +979,7 @@ test("recovery is a no-op on a vault with no journal, and clears an aborted stag
   assert.equal(recoverRekey(dir), "none");
   assert.equal(fs.existsSync(stagingRoot(dir)), false);
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // The three tests above hand-build the states a crash produces. The two below
@@ -1024,7 +1025,7 @@ test("a real crash on the keyring write rolls back and leaves the old passphrase
   assert.ok(openVaultKeys(dir, PASSPHRASE), "the old passphrase must still open the vault");
   assert.deepEqual(liveHashes(dir), before, "a rolled-back re-key must leave every live file byte-identical");
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // Kills the mutation "install the staged files before writing the keyring",
@@ -1076,7 +1077,7 @@ test("a real crash partway through the installs is finished by the next run", ()
   forgetVaultKeys();
   assert.ok(openVaultKeys(dir, NEW_PASSPHRASE), "the new passphrase must open the finished vault");
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // Kills the mutation "drop the journal validation": a journal whose slotId is
@@ -1094,7 +1095,7 @@ test("a malformed journal refuses recovery instead of touching the vault", () =>
   assert.equal(fs.existsSync(stagedTree(dir)), true, "a refused recovery must not destroy the staged tree");
   assert.deepEqual(liveHashes(dir), before, "a refused recovery must not touch a single live file");
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // Kills the mutation "delete the staged-completeness loop from commitRekey":
@@ -1110,7 +1111,7 @@ test("a staged tree missing a file refuses to commit instead of crossing the com
   const { journal, keyring } = preparedRekey(dir);
   const keyringBefore = readKeyring(dir);
   const missing = journal.files[journal.files.length - 1];
-  fs.rmSync(path.join(stagedTree(dir), ...missing.split("/")));
+  fs.unlinkSync(path.join(stagedTree(dir), ...missing.split("/")));
   const before = liveHashes(dir);
 
   assert.throws(() => commitRekey(dir, journal, keyring), /missing from the staged tree/u);
@@ -1121,11 +1122,11 @@ test("a staged tree missing a file refuses to commit instead of crossing the com
   forgetVaultKeys();
   assert.ok(openVaultKeys(dir, PASSPHRASE), "the old passphrase must still open the vault");
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // Kills the mutation "delete the journal check from stageRekey": the opening
-// rmSync clears the whole staging root, journal included. An operator who
+// removeTree call clears the whole staging root, journal included. An operator who
 // retries the re-key after a crash mid-install instead of recovering would
 // take the journal and the un-installed remainder with it, and the
 // half-committed vault becomes unrecoverable — `recoverRekey` would find no
@@ -1145,7 +1146,7 @@ test("staging refuses while an interrupted re-key is still journaled", () => {
   assert.ok(fs.existsSync(journalPath(dir)), "the journal must survive a refused stage");
   assert.deepEqual(fs.readFileSync(journalPath(dir)), journalBefore, "the journal must be byte-identical");
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // Kills the mutation "unwrap the JSON.parse guard in readJournal": a truncated
@@ -1163,7 +1164,7 @@ test("a truncated journal refuses recovery with the same message a malformed one
   assert.equal(fs.existsSync(stagedTree(dir)), true, "a refused recovery must not destroy the staged tree");
   assert.deepEqual(liveHashes(dir), before, "a refused recovery must not touch a single live file");
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // --- Task 5: the orchestration ------------------------------------------
@@ -1212,7 +1213,7 @@ test("a re-key rewrites every ciphertext and keeps every plaintext", () => {
   assert.equal(loadVaultFile(dir, "health", NEW_PASSPHRASE)[0].value, "0 Rh+");
   assert.equal(verifyAudit(dir, NEW_PASSPHRASE).valid, true);
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("the old passphrase no longer opens a re-keyed vault", () => {
@@ -1223,7 +1224,7 @@ test("the old passphrase no longer opens a re-keyed vault", () => {
   assert.ok(openVaultKeys(dir, NEW_PASSPHRASE));
   assert.throws(() => openVaultKeys(dir, PASSPHRASE), /wrong passphrase/iu);
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // Kills the mutation "drop the same-passphrase refusal": without it the run
@@ -1249,7 +1250,7 @@ test("a re-key to the passphrase already in use is refused unless it is asked fo
   forgetVaultKeys();
   assert.ok(openVaultKeys(dir, PASSPHRASE));
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("attachment identities, sync change IDs and the audit chain survive a re-key", () => {
@@ -1270,7 +1271,7 @@ test("attachment identities, sync change IDs and the audit chain survive a re-ke
   assert.deepEqual(changesAfter, changesBefore);
   assert.equal(verifyAudit(dir, NEW_PASSPHRASE).valid, true);
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("a re-key writes one fresh slot at the current cost and drops slots it cannot open", () => {
@@ -1291,7 +1292,7 @@ test("a re-key writes one fresh slot at the current cost and drops slots it cann
   assert.equal(slots[0].kdf.N, DEFAULT_SCRYPT_N);
   assert.equal(slots[0].label, "primary");
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("--keep-passphrase rotates the keyset under the same passphrase", () => {
@@ -1308,7 +1309,7 @@ test("--keep-passphrase rotates the keyset under the same passphrase", () => {
     assert.notEqual(after[item.path], before[item.path]);
   }
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("every refusal leaves the vault byte-identical and no staging behind", () => {
@@ -1321,7 +1322,7 @@ test("every refusal leaves the vault byte-identical and no staging behind", () =
   assert.equal(fs.existsSync(stagingRoot(dir)), false);
   assert.deepEqual(hashVault(dir), before);
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // This is also the mutation guard for dropping the `prepareRecoveryForRekey`
@@ -1346,7 +1347,7 @@ test("a vault with a recovery slot refuses a re-key given no kit, and is left by
   assert.equal(fs.existsSync(stagingRoot(dir)), false);
   assert.deepEqual(hashVault(dir), before, "a refused re-key must not touch a single live file");
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("a vault with a recovery slot re-keys given a matching kit and code, and both re-open it afterward", () => {
@@ -1376,15 +1377,15 @@ test("a vault with a recovery slot re-keys given a matching kit and code, and bo
   // `keyring recovery restore` would use it after real data loss — simulated
   // here by dropping the keyring and restoring from the (now-rewritten) kit
   // in place, which needs no directory copy.
-  fs.rmSync(path.join(dir, "keyring.json"));
+  fs.unlinkSync(path.join(dir, "keyring.json"));
   forgetVaultKeys();
   const restored = restoreVaultKeyring(dir, kit, created.recoveryCode, "a-restored-passphrase-123");
   assert.ok(restored.slotId);
   forgetVaultKeys();
   assert.ok(openVaultKeys(dir, "a-restored-passphrase-123"), "the recovery kit must still open the re-keyed vault");
 
-  fs.rmSync(dir, { recursive: true, force: true });
-  fs.rmSync(kitDir, { recursive: true, force: true });
+  removeTree(dir);
+  removeTree(kitDir);
 });
 
 // `commitRekey` can fail after the recovery kit is rewritten but before it
@@ -1422,8 +1423,8 @@ test("a failed pre-publication commit still warns when its rewritten recovery ki
     "the rewritten-kit mismatch is not a safe audit denial",
   );
 
-  fs.rmSync(dir, { recursive: true, force: true });
-  fs.rmSync(kitDir, { recursive: true, force: true });
+  removeTree(dir);
+  removeTree(kitDir);
 });
 
 test("a wrong recovery code and a mismatched kit are both refused, non-mutating", () => {
@@ -1458,9 +1459,9 @@ test("a wrong recovery code and a mismatched kit are both refused, non-mutating"
   );
   assert.deepEqual(hashVault(dir), before, "a mismatched kit must not touch a single live file");
 
-  fs.rmSync(dir, { recursive: true, force: true });
-  fs.rmSync(kitDir, { recursive: true, force: true });
-  fs.rmSync(otherRoot, { recursive: true, force: true });
+  removeTree(dir);
+  removeTree(kitDir);
+  removeTree(otherRoot);
 });
 
 test("a vault with no recovery slot re-keys exactly as before, reporting no recovery outcome", () => {
@@ -1471,7 +1472,7 @@ test("a vault with no recovery slot re-keys exactly as before, reporting no reco
   assert.equal(report.recovery, null);
   assert.equal(readKeyring(dir).slots.length, 1);
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("a legacy vault is refused and told to migrate", () => {
@@ -1481,7 +1482,7 @@ test("a legacy vault is refused and told to migrate", () => {
   assert.throws(() => rekeyVault(dir, PASSPHRASE, NEW_PASSPHRASE), /vbrain migrate/u);
   assert.equal(fs.existsSync(path.join(dir, "keyring.json")), false);
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // The report names the split, but only the bytes on disk prove it. Reading
@@ -1505,7 +1506,7 @@ test("a re-key rotates exactly the three content keys and pins exactly the three
     assert.equal(newKeys[name].equals(oldKeys[name]), true, `${name} must have been pinned`);
   }
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("identity rotation renames attachments, preserves canvas history, and starts a clean owner sync epoch", () => {
@@ -1551,7 +1552,7 @@ test("identity rotation renames attachments, preserves canvas history, and start
   const log = new SyncChangeLog(dir, next);
   assert.ok(log.changes().length > 0, "the clean sync epoch must bootstrap current portable content");
   log.close();
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("identity rotation recovery replays post-install identity deletions after a crash", () => {
@@ -1591,7 +1592,7 @@ test("identity rotation recovery replays post-install identity deletions after a
     "recovery must remove the old attachment identity directory too",
   );
   reopened.lock();
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // Phase 16.6: every re-key removal must actually remove under a non-ASCII
@@ -1759,7 +1760,7 @@ test("a re-key re-seals a sync change under the new envelope key without moving 
   assert.deepEqual(reopened.verify().heads, [change.id]);
   reopened.close();
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // --- Merge finding: Critical 1 — main's sync device registry, identity keys
@@ -1835,7 +1836,7 @@ test("planRekey classifies every sync device-registry, identity and epoch-key ar
     identity: "secondbrain-vault:sync-epoch-key:v1:2",
   });
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // A blob store id is content-addressed by its own sealed bytes and keyed by
@@ -1862,7 +1863,7 @@ test("a sync blob is enumerated but never scheduled for re-encryption", () => {
   assert.ok(report.passphraseChanged);
   assert.deepEqual(fs.readFileSync(path.join(blobDir, blobId)), before, "a sync blob must survive byte for byte");
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("a full re-key succeeds on a vault with device init, enroll and revoke, and sync state stays usable", () => {
@@ -1896,7 +1897,7 @@ test("a full re-key succeeds on a vault with device init, enroll and revoke, and
   assert.equal(change.mutation.value.body, "epoch 2 body after re-key");
   log.close();
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // --- Merge finding: Critical 2 — epoch >= 2 sync changes. An epoch 1 change
@@ -1932,7 +1933,7 @@ test("a vault holding an epoch 2 sync change refuses the whole re-key, by design
   forgetVaultKeys();
   assert.ok(openVaultKeys(dir, PASSPHRASE), "a refused re-key must leave the old passphrase working");
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // --- Merge finding: Critical 3 — `legacyChangeIdentity` must survive a later
@@ -1963,7 +1964,7 @@ test("legacyChangeIdentity set by a re-key survives a later passphrase change", 
     "the legacy identity key itself must survive a passphrase change unchanged",
   );
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // --- Merge finding: Important 6 — a failed settle write must not misreport a
@@ -2005,7 +2006,7 @@ test("a failed settle write reports the truth instead of a failure that did not 
   const opened = unwrapSlotKeySet(readKeyring(dir).slots[0], NEW_PASSPHRASE);
   assert.ok(opened.retiring, "an unsettled keyring must still carry the retiring keys");
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // Kills the mutation "skip recovery and go straight to staging": an
@@ -2056,12 +2057,12 @@ test("a file that appears while the re-key stages refuses the commit instead of 
   // Nothing live moved, nothing was committed, and the old passphrase still
   // opens the vault — the racer is the only new file, and it is still sealed
   // under the keyset that is still in force.
-  fs.rmSync(racerPath);
+  fs.unlinkSync(racerPath);
   assertVaultUnchanged(dir, before);
   forgetVaultKeys();
   assert.ok(openVaultKeys(dir, PASSPHRASE), "a refused commit must leave the old passphrase working");
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // The mirror direction: a file the walk enumerated that is gone by the time
@@ -2082,7 +2083,7 @@ test("a file that disappears while the re-key stages also refuses the commit", (
       writes += 1;
       // The lock's own record is write 1, so the last staged artifact is
       // write `items.length + 1`.
-      if (writes === items.length + 1) fs.rmSync(victimPath);
+      if (writes === items.length + 1) fs.unlinkSync(victimPath);
       return result;
     };
 
@@ -2099,7 +2100,7 @@ test("a file that disappears while the re-key stages also refuses the commit", (
   forgetVaultKeys();
   assert.ok(openVaultKeys(dir, PASSPHRASE), "a refused commit must leave the old passphrase working");
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("a re-key finishes an interrupted one instead of starting over", () => {
@@ -2120,7 +2121,7 @@ test("a re-key finishes an interrupted one instead of starting over", () => {
   forgetVaultKeys();
   assert.ok(openVaultKeys(dir, NEW_PASSPHRASE), "the interrupted re-key's passphrase must open the vault");
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // Recovery is intentionally passphrase-free, and therefore cannot sign an
@@ -2136,7 +2137,7 @@ test("resumeRekey finishes an interruption without adding an audit entry", () =>
   assert.equal(resumeRekey(dir), "finished");
   assert.deepEqual(readAudit(dir).filter((entry) => entry.actor === "cli-keyring"), before);
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // A failure past the commit point is the one case where the fail-closed
@@ -2179,7 +2180,7 @@ test("a failure partway through the installs leaves the journal for recovery", (
   assert.match(vault.get(noteId).body, /second revision/u);
   vault.lock();
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // A re-key holds the vault lock for far longer than the 30-second default a
@@ -2255,7 +2256,7 @@ test("a re-key's lock records its own stale window, and a short write honours it
   assert.equal(fs.existsSync(lockPath), false, "a windowless stale record is still reclaimed");
 
   vault.lock();
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // --- Task 6: the `vbrain rekey` command ---------------------------------
@@ -2289,7 +2290,7 @@ test("the CLI re-keys a vault end to end", () => {
   assert.match(vault.get(noteId).body, /second revision/u);
   vault.lock();
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("the CLI refuses a short new passphrase and leaves the vault alone", () => {
@@ -2305,7 +2306,7 @@ test("the CLI refuses a short new passphrase and leaves the vault alone", () => 
   assert.match(result.stderr, /at least 12 characters/u);
   assert.deepEqual(hashVault(dir), before);
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("the CLI never takes the current passphrase from the credential store", () => {
@@ -2319,7 +2320,7 @@ test("the CLI never takes the current passphrase from the credential store", () 
   assert.notEqual(result.status, 0);
   assert.equal(fs.existsSync(stagingRoot(dir)), false);
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // Kills the mutation "delete the CLI's journal check": a vault-opening
@@ -2340,7 +2341,7 @@ test("a vault-opening command refuses while a re-key journal is present", () => 
   assert.match(result.stderr, /interrupted re-key/iu);
   assert.match(result.stderr, /vbrain rekey/u);
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // `lock` only forgets a remembered passphrase in the OS credential store —
@@ -2358,7 +2359,7 @@ test("`lock` is exempt from the journal guard", () => {
   assert.equal(result.status, 0, result.stderr);
   assert.doesNotMatch(result.stderr, /interrupted re-key/iu);
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // `keychain-status` only reads `detectVaultFormat` and envelope versions —
@@ -2374,7 +2375,7 @@ test("`keychain-status` is exempt from the journal guard", () => {
   assert.doesNotMatch(result.stderr, /interrupted re-key/iu);
   assert.match(result.stdout, /Credential store:/u);
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // The `rekey` command itself must stay exempt from that same guard: it is
@@ -2400,7 +2401,7 @@ test("the rekey command itself is exempt from the journal guard and finishes an 
   forgetVaultKeys();
   assert.ok(openVaultKeys(dir, NEW_PASSPHRASE), "the interrupted re-key's passphrase must open the vault");
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // The resume path must ask for nothing. `recoverRekey` needs no passphrase,
@@ -2432,7 +2433,7 @@ test("the rekey command settles an interrupted run without asking for a passphra
   forgetVaultKeys();
   assert.ok(openVaultKeys(dir, NEW_PASSPHRASE), "the interrupted re-key's passphrase must open the vault");
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("the rekey command rolls an interrupted run back and says the original passphrase still stands", () => {
@@ -2460,7 +2461,7 @@ test("the rekey command rolls an interrupted run back and says the original pass
     assert.equal(after[relative], hash, `${relative} must not have changed`);
   }
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 // A malformed journal leaves both `readJournal` and `stageRekey` refusing,
@@ -2484,5 +2485,5 @@ test("the CLI names the actual fix for a malformed re-key journal instead of poi
   assert.match(result.stderr, /delete/iu);
   assert.doesNotMatch(result.stderr, /run recovery before staging/u);
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });

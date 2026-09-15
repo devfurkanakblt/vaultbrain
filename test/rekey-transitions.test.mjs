@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { DocumentVault } from "../dist/documents.js";
+import { removeTree } from "../scripts/fs-tree.mjs";
 import { createRecoveryKit, generateRecoveryCode } from "../dist/keyring-recovery.js";
 import { forgetVaultKeys, openOrCreateVaultKeys, openVaultKeys, readKeyring, zeroKeySet } from "../dist/keyring.js";
 import {
@@ -39,7 +40,7 @@ function assertOpens(dir, passphrase) {
 
 function cleanup(dir) {
   forgetVaultKeys(dir);
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 }
 
 function withInstallInterruption(vaultDir, installNumber, callback) {
@@ -242,6 +243,6 @@ test("a recovery-kit advance interrupted before keyring replacement is reported 
     assert.throws(() => openVaultKeys(dir, NEXT), /authenticate|passphrase|unable/iu);
   } finally {
     cleanup(dir);
-    fs.rmSync(kitDir, { recursive: true, force: true });
+    removeTree(kitDir);
   }
 });

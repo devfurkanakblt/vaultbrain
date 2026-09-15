@@ -7,6 +7,7 @@ import test from "node:test";
 import { normalizeCanvasPath } from "../dist/canvas.js";
 import { decryptDocument, encryptDocument, openDocumentKey } from "../dist/document-crypto.js";
 import { DocumentVault } from "../dist/documents.js";
+import { copyTree, removeTree } from "../scripts/fs-tree.mjs";
 
 const PASSPHRASE = "canvas-vault-test-passphrase";
 
@@ -420,7 +421,7 @@ test("canvas references, rebuilds and unreferenced attachment reports stay deriv
     [canvas.id],
   );
 
-  fs.rmSync(indexPath(dir));
+  fs.unlinkSync(indexPath(dir));
   const rebuilt = new DocumentVault(dir, PASSPHRASE);
   assert.equal(rebuilt.listCanvases()[0].nodeCount, 3);
   assert.deepEqual(
@@ -462,11 +463,11 @@ test("derived layout migration rebuilds once and canvas journal recovery heals a
   assert.equal(fs.readFileSync(indexPath(dir), "utf8"), afterMigration, "a current index is not rebuilt twice");
 
   const crashed = tempVault("journal");
-  fs.rmSync(crashed, { recursive: true, force: true });
-  fs.cpSync(dir, crashed, { recursive: true });
+  removeTree(crashed);
+  copyTree(dir, crashed);
   const stale = tempVault("journal-control");
-  fs.rmSync(stale, { recursive: true, force: true });
-  fs.cpSync(dir, stale, { recursive: true });
+  removeTree(stale);
+  copyTree(dir, stale);
   const updated = vault.putCanvas(
     board({
       id: canvas.id,
@@ -487,8 +488,8 @@ test("derived layout migration rebuilds once and canvas journal recovery heals a
   assert.equal(fs.existsSync(journalPath(crashed)), false);
 
   const unknownScope = tempVault("journal-unknown");
-  fs.rmSync(unknownScope, { recursive: true, force: true });
-  fs.cpSync(stale, unknownScope, { recursive: true });
+  removeTree(unknownScope);
+  copyTree(stale, unknownScope);
   fs.writeFileSync(
     journalPath(unknownScope),
     JSON.stringify({ version: 1, startedAt: new Date().toISOString(), scope: "future-scope", ids: [] }),

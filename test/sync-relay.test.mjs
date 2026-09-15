@@ -8,6 +8,7 @@ import test from "node:test";
 import { SyncBlobStore } from "../dist/sync-blobs.js";
 import { attachmentBlobIds, startSyncRelay, SyncRelayClient } from "../dist/sync-relay.js";
 import { SyncChangeLog, SyncDeviceManager } from "../dist/sync.js";
+import { removeTree } from "../scripts/fs-tree.mjs";
 
 const PASSPHRASE = "relay-test-passphrase";
 const TOKEN = "relay-test-token-that-is-at-least-thirty-two-bytes";
@@ -91,8 +92,8 @@ test("the self-hosted relay stores only authenticated opaque immutable objects",
     await relay.close();
     log.close();
     manager.close();
-    fs.rmSync(vaultDir, { recursive: true, force: true });
-    fs.rmSync(storageDir, { recursive: true, force: true });
+    removeTree(vaultDir);
+    removeTree(storageDir);
   }
 });
 
@@ -114,8 +115,8 @@ test("relay byte and object quotas reject additional data without partial writes
     await relay.close();
     log.close();
     manager.close();
-    fs.rmSync(vaultDir, { recursive: true, force: true });
-    fs.rmSync(storageDir, { recursive: true, force: true });
+    removeTree(vaultDir);
+    removeTree(storageDir);
   }
 });
 
@@ -171,7 +172,7 @@ test("the relay stores blobs only under their own SHA-256 and never lists them",
     assert.deepEqual(fs.readdirSync(path.join(storageDir, vaultId, "blobs")), [id]);
   } finally {
     await relay.close();
-    fs.rmSync(storageDir, { recursive: true, force: true });
+    removeTree(storageDir);
   }
 });
 
@@ -265,8 +266,8 @@ test("a push uploads blobs before the change, and an interrupted pull resumes", 
     await relay.close();
     log.close();
     manager.close();
-    fs.rmSync(vaultDir, { recursive: true, force: true });
-    fs.rmSync(targetDir, { recursive: true, force: true });
-    fs.rmSync(storageDir, { recursive: true, force: true });
+    removeTree(vaultDir);
+    removeTree(targetDir);
+    removeTree(storageDir);
   }
 });

@@ -9,6 +9,7 @@ import { decryptDocument } from "../dist/document-crypto.js";
 import { parsePortableState } from "../dist/portable-state.js";
 import { runPortableRecoveryDrill } from "../scripts/portable-recovery-drill.mjs";
 import { rekeyVault } from "../dist/keyring-rekey.js";
+import { copyTree, removeTree } from "../scripts/fs-tree.mjs";
 
 test("encrypted backup plus relay catch-up restores every portable live object", async () => {
   assert.equal((await runPortableRecoveryDrill()).ok, true);
@@ -27,7 +28,7 @@ test("portable state remains readable after an ordinary content re-key", () => {
     vault = new SyncedDocumentVault(root, "portable-after-passphrase");
     assert.deepEqual(vault.getPortableState("workspace"), state);
     assert.deepEqual(vault.getPortableState("saved-views"), { version: 1, views: [] });
-  } finally { vault?.lock(); fs.rmSync(root, { recursive: true, force: true }); }
+  } finally { vault?.lock(); removeTree(root); }
 });
 
 test("the shared native workspace vector fixes the ciphertext contract", () => {
@@ -60,7 +61,7 @@ test("native disk edits are captured once without creating new storage revisions
     assert.equal(synced.changeLog.resolve("note", note.id).winner.mutation.operation, "delete");
   } finally {
     native?.lock(); synced?.lock();
-    fs.rmSync(root, { recursive: true, force: true });
+    removeTree(root);
   }
 });
 
@@ -72,7 +73,7 @@ test("portable workspace travels to another vault without losing bookmarks", () 
     const to = path.join(root, "to");
     source = new SyncedDocumentVault(from, "portable-test-passphrase", "11111111-1111-4111-8111-111111111111");
     source.lock();
-    fs.cpSync(from, to, { recursive: true });
+    copyTree(from, to);
     source = new SyncedDocumentVault(from, "portable-test-passphrase", "11111111-1111-4111-8111-111111111111");
     const state = { version: 1, bookmarks: [{ id: "note-id", label: "Pinned", createdAt: "2026-09-09T00:00:00Z" }], layouts: [] };
     source.setPortableState("workspace", state);
@@ -84,6 +85,6 @@ test("portable workspace travels to another vault without losing bookmarks", () 
     assert.ok(!fs.readFileSync(path.join(to, "documents", "workspace.enc"), "utf8").includes("Pinned"));
   } finally {
     source?.lock(); target?.lock();
-    fs.rmSync(root, { recursive: true, force: true });
+    removeTree(root);
   }
 });

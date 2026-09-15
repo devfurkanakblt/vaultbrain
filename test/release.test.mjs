@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
@@ -15,6 +15,7 @@ import {
   verifyDownloadedAssets,
   writeReleaseChecksums,
 } from "../scripts/release/release.mjs";
+import { copyTree, removeTree } from "../scripts/fs-tree.mjs";
 
 const REPOSITORY = "devfurkanakblt/vaultbrain";
 const VERSION = "1.2.3";
@@ -127,7 +128,7 @@ test("inspectReleaseArtifacts accepts exactly one safe package and signature for
     assert.equal(artifacts.packages.length, 5);
     assert.ok(readFileSync(path.join(root, "checksums.sha256"), "utf8").includes("VaultBrain_1.2.3_x64-setup.exe"));
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    removeTree(root);
   }
 });
 
@@ -138,7 +139,7 @@ test("inspectReleaseArtifacts rejects missing target signatures, duplicate targe
   const unsafe = temporaryDirectory();
   try {
     releaseFixture(missing);
-    rmSync(path.join(missing, "vault-brain_1.2.3_amd64.deb.sig"));
+    unlinkSync(path.join(missing, "vault-brain_1.2.3_amd64.deb.sig"));
     assert.throws(() => inspectReleaseArtifacts(missing, { version: VERSION }), /linux-x86_64-deb/iu);
 
     releaseFixture(duplicate);
@@ -171,7 +172,7 @@ test("inspectReleaseArtifacts rejects missing target signatures, duplicate targe
     );
   } finally {
     for (const root of [missing, duplicate, unexpected, unsafe]) {
-      rmSync(root, { recursive: true, force: true });
+      removeTree(root);
     }
   }
 });
@@ -206,7 +207,7 @@ test("createLatestManifest produces a complete fixed-HTTPS manifest with bundle-
       /fixed repository/iu,
     );
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    removeTree(root);
   }
 });
 
@@ -230,15 +231,15 @@ test("verifyDownloadedAssets rejects a corrupt downloaded release asset", () => 
       ),
     );
     writeReleaseChecksums(expected);
-    cpSync(expected, downloaded, { recursive: true });
+    copyTree(expected, downloaded);
     writeArtifact(downloaded, names[0], "corrupted installer bytes");
     assert.throws(
       () => verifyDownloadedAssets({ expectedDirectory: expected, downloadedDirectory: downloaded }),
       /checksum mismatch/iu,
     );
   } finally {
-    rmSync(expected, { recursive: true, force: true });
-    rmSync(downloaded, { recursive: true, force: true });
+    removeTree(expected);
+    removeTree(downloaded);
   }
 });
 
@@ -262,15 +263,15 @@ test("verifyDownloadedAssets rejects a corrupt latest manifest or provenance bun
       ),
     );
     writeReleaseChecksums(expected);
-    cpSync(expected, downloaded, { recursive: true });
+    copyTree(expected, downloaded);
     writeArtifact(downloaded, "provenance.intoto.jsonl", "corrupted provenance");
     assert.throws(
       () => verifyDownloadedAssets({ expectedDirectory: expected, downloadedDirectory: downloaded }),
       /checksum mismatch/iu,
     );
   } finally {
-    rmSync(expected, { recursive: true, force: true });
-    rmSync(downloaded, { recursive: true, force: true });
+    removeTree(expected);
+    removeTree(downloaded);
   }
 });
 
@@ -294,14 +295,14 @@ test("verifyDownloadedAssets rejects a modified checksum manifest", () => {
       ),
     );
     writeReleaseChecksums(expected);
-    cpSync(expected, downloaded, { recursive: true });
+    copyTree(expected, downloaded);
     writeArtifact(downloaded, "checksums.sha256", "tampered checksum manifest\n");
     assert.throws(
       () => verifyDownloadedAssets({ expectedDirectory: expected, downloadedDirectory: downloaded }),
       /checksum manifest changed/iu,
     );
   } finally {
-    rmSync(expected, { recursive: true, force: true });
-    rmSync(downloaded, { recursive: true, force: true });
+    removeTree(expected);
+    removeTree(downloaded);
   }
 });

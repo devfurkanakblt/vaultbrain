@@ -132,6 +132,10 @@ here; on a host whose temp directory has a non-ASCII component, the same
 defect this plan fixes for `src/` and `scripts/` could make one of these calls
 silently leak a directory or abort the test process. This is recorded, not
 fixed: the source scan in `test/fs-removal.test.mjs` does not cover `test/`.
+This `test/` exposure was fixed by
+[`2026-09-15-phase-16-6-non-ascii-tests.md`](2026-09-15-phase-16-6-non-ascii-tests.md),
+which moves every test file onto the same `fs-tree` helpers and extends the
+scan to cover `test/`.
 
 Separately: a cleanup error thrown from a `finally` block can now replace the
 body's original error under a non-ASCII path (previously the silent no-op

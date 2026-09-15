@@ -380,6 +380,9 @@ with Phases 12 and 14.
       The follow-up moved the non-build scripts onto `scripts/fs-tree.mjs` and
       extended the source scan to cover `scripts/`; see
       [`docs/superpowers/plans/2026-09-15-phase-16-6-non-ascii-scripts.md`](superpowers/plans/2026-09-15-phase-16-6-non-ascii-scripts.md).
+      A second follow-up moved every test file onto the same helpers and
+      extended the scan to cover `test/`; see
+      [`docs/superpowers/plans/2026-09-15-phase-16-6-non-ascii-tests.md`](superpowers/plans/2026-09-15-phase-16-6-non-ascii-tests.md).
 
 ## Which open phases still need code
 

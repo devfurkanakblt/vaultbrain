@@ -7,6 +7,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { readWindowsInstallerDetails, readsWindowsPaths } from "../scripts/platform-artifacts.mjs";
+import { removeTree } from "../scripts/fs-tree.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const script = path.join(root, "scripts", "platform-artifacts.mjs");
@@ -105,7 +106,7 @@ test("fails when the selected platform's required artifact is absent", () => {
       /Missing required macOS artifact: .+\.app/u,
     );
   } finally {
-    fs.rmSync(bundleDir, { recursive: true, force: true });
+    removeTree(bundleDir);
   }
 });
 
@@ -117,7 +118,7 @@ test("rejects a bundle-id override for Windows because MSI identity is ProductNa
       /--identifier is only supported for macos/u,
     );
   } finally {
-    fs.rmSync(bundleDir, { recursive: true, force: true });
+    removeTree(bundleDir);
   }
 });
 
@@ -127,7 +128,7 @@ test("rejects an app bundle whose executable is not ARM64", () => {
     writeMacArtifacts(bundleDir, { architecture: "x64" });
     assert.throws(() => run(["--platform", "macos", "--bundle-dir", bundleDir]), /expected arm64, found x64/u);
   } finally {
-    fs.rmSync(bundleDir, { recursive: true, force: true });
+    removeTree(bundleDir);
   }
 });
 
@@ -149,7 +150,7 @@ test("writes portable upload and checksum manifests for valid macOS artifacts", 
     assert.match(checksums, /^[a-f0-9]{64} {2}macos\/Vault Brain\.app\.tar\.gz$/mu);
     assert.doesNotMatch(checksums, /checksums\.sha256|upload-artifacts\.json/u);
   } finally {
-    fs.rmSync(bundleDir, { recursive: true, force: true });
+    removeTree(bundleDir);
   }
 });
 
@@ -166,7 +167,7 @@ test("repeated validation produces an identical checksum manifest", () => {
       crypto.createHash("sha256").update(second).digest("hex"),
     );
   } finally {
-    fs.rmSync(bundleDir, { recursive: true, force: true });
+    removeTree(bundleDir);
   }
 });
 
@@ -194,7 +195,7 @@ test("the app archive retains explicit directories and a long nested path", () =
     assert.match(listing, /d.+Vault Brain\.app\/Contents\/Resources\/$/mu);
     assert.match(listing, new RegExp(`Vault Brain\\.app/Contents/Resources/${longDirectory}/note\\.txt`, "u"));
   } finally {
-    fs.rmSync(bundleDir, { recursive: true, force: true });
+    removeTree(bundleDir);
   }
 });
 
@@ -221,6 +222,6 @@ test("the app archive preserves a path longer than the USTAR 255-byte limit", ()
     });
     assert.match(listing, new RegExp(`Vault Brain\\.app/Contents/Resources/${segments.join("/")}/note\\.txt`, "u"));
   } finally {
-    fs.rmSync(bundleDir, { recursive: true, force: true });
+    removeTree(bundleDir);
   }
 });

@@ -121,7 +121,7 @@ test("a failed restore leaves no staging debris under a non-ASCII path", () => {
 
   assert.throws(() => restoreBackup(archive, destination, "not-the-passphrase"), /Unable to unlock/u);
   assert.equal(fs.existsSync(destination), false);
-  // Node's fs.rmSync-based cleanup silently does nothing under a non-ASCII
+  // Node's recursive removal helper silently does nothing under a non-ASCII
   // path on Windows; this asserts the staging directory is actually gone.
   assert.deepEqual(
     fs.readdirSync(outside).filter((name) => name.includes("restoring")),

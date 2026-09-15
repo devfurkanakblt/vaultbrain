@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { DocumentVault } from "../dist/documents.js";
 import { SyncedDocumentVault } from "../dist/sync.js";
+import { removeTree } from "../scripts/fs-tree.mjs";
 
 const PASSPHRASE = "sync-transaction-test-passphrase";
 const DEVICE_A = "11111111-1111-4111-8111-111111111111";
@@ -43,7 +44,7 @@ function pendingPath(vaultDir) {
 
 function closeAndRemove(vault, vaultDir) {
   vault?.lock();
-  fs.rmSync(vaultDir, { recursive: true, force: true });
+  removeTree(vaultDir);
 }
 
 test("missing or invalid device IDs fail before any synchronized storage or log access", () => {
@@ -54,7 +55,7 @@ test("missing or invalid device IDs fail before any synchronized storage or log 
     /device ID must be a lowercase UUID/iu,
   );
   assert.deepEqual(snapshotTree(invalidDir), invalidBefore, "invalid construction must not initialize a vault");
-  fs.rmSync(invalidDir, { recursive: true, force: true });
+  removeTree(invalidDir);
 
   const cases = [
     {

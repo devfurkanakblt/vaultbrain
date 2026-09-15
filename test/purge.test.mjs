@@ -17,9 +17,9 @@ function tempVault(label) {
 
 /**
  * A vault under a deliberately non-ASCII directory name. On Windows with Node
- * v24.11.1, fs.rmSync silently removes nothing when any path component is
- * non-ASCII, so this is the reproduction path for that defect regardless of
- * where the repository checkout itself happens to live.
+ * v24.11.1, the recursive removal helper silently removes nothing when any
+ * path component is non-ASCII, so this is the reproduction path for that
+ * defect regardless of where the repository checkout itself happens to live.
  */
 function nonAsciiTempVault(label) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `vault-brain-purge-${label}-ü-é-`));

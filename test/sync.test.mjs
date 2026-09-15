@@ -14,6 +14,7 @@ import {
   openSyncChange,
   sealSyncChange,
 } from "../dist/sync.js";
+import { copyTree, removeTree } from "../scripts/fs-tree.mjs";
 
 const PASSPHRASE = "sync-test-passphrase";
 const DEVICE_A = "11111111-1111-4111-8111-111111111111";
@@ -72,7 +73,7 @@ test("canonical sync JSON and keyed change IDs are stable without leaking conten
   session.attachmentIdKey.fill(0);
   session.syncChangeKey.fill(0);
   session.syncEnvelopeKey.fill(0);
-  fs.rmSync(vaultDir, { recursive: true, force: true });
+  removeTree(vaultDir);
 });
 
 test("the local log appends an immutable encrypted device chain", () => {
@@ -94,7 +95,7 @@ test("the local log appends an immutable encrypted device chain", () => {
   assert.equal(fs.readdirSync(changeDir).length, 2);
   log.close();
   assert.throws(() => log.changes(), /closed/iu);
-  fs.rmSync(vaultDir, { recursive: true, force: true });
+  removeTree(vaultDir);
 });
 
 test("owner-signed enrollment gives a second device a distinct signing identity", () => {
@@ -118,10 +119,10 @@ test("owner-signed enrollment gives a second device a distinct signing identity"
   ownerLog.close();
 
   const secondDir = tempVault("device-second");
-  fs.rmSync(secondDir, { recursive: true, force: true });
-  fs.cpSync(ownerDir, secondDir, { recursive: true });
-  fs.rmSync(path.join(secondDir, "documents", "sync", "identity", "authority.key.enc"));
-  fs.rmSync(path.join(secondDir, "documents", "sync", "identity", `${DEVICE_A}.key.enc`));
+  removeTree(secondDir);
+  copyTree(ownerDir, secondDir);
+  fs.unlinkSync(path.join(secondDir, "documents", "sync", "identity", "authority.key.enc"));
+  fs.unlinkSync(path.join(secondDir, "documents", "sync", "identity", `${DEVICE_A}.key.enc`));
 
   const secondManager = new SyncDeviceManager(secondDir, PASSPHRASE);
   const request = secondManager.createEnrollmentRequest(
@@ -153,8 +154,8 @@ test("owner-signed enrollment gives a second device a distinct signing identity"
   secondLog.close();
   secondManager.close();
   ownerManager.close();
-  fs.rmSync(ownerDir, { recursive: true, force: true });
-  fs.rmSync(secondDir, { recursive: true, force: true });
+  removeTree(ownerDir);
+  removeTree(secondDir);
 });
 
 test("enrollment freezes the exact verified legacy history before requiring signatures", () => {
@@ -182,7 +183,7 @@ test("enrollment freezes the exact verified legacy history before requiring sign
 
   signedLog.close();
   manager.close();
-  fs.rmSync(vaultDir, { recursive: true, force: true });
+  removeTree(vaultDir);
 });
 
 test("a revoked device cannot append locally or import a withheld post-cutoff change", () => {
@@ -191,10 +192,10 @@ test("a revoked device cannot append locally or import a withheld post-cutoff ch
   ownerManager.initializeOwner("Owner", DEVICE_A, "2026-09-03T09:00:00.000Z");
 
   const secondDir = tempVault("revoke-second");
-  fs.rmSync(secondDir, { recursive: true, force: true });
-  fs.cpSync(ownerDir, secondDir, { recursive: true });
-  fs.rmSync(path.join(secondDir, "documents", "sync", "identity", "authority.key.enc"));
-  fs.rmSync(path.join(secondDir, "documents", "sync", "identity", `${DEVICE_A}.key.enc`));
+  removeTree(secondDir);
+  copyTree(ownerDir, secondDir);
+  fs.unlinkSync(path.join(secondDir, "documents", "sync", "identity", "authority.key.enc"));
+  fs.unlinkSync(path.join(secondDir, "documents", "sync", "identity", `${DEVICE_A}.key.enc`));
   const secondManager = new SyncDeviceManager(secondDir, PASSPHRASE);
   const request = secondManager.createEnrollmentRequest("Second", DEVICE_B, "2026-09-03T09:01:00.000Z");
   ownerManager.enroll(request, "2026-09-03T09:02:00.000Z");
@@ -223,8 +224,8 @@ test("a revoked device cannot append locally or import a withheld post-cutoff ch
   secondLog.close();
   secondManager.close();
   ownerManager.close();
-  fs.rmSync(ownerDir, { recursive: true, force: true });
-  fs.rmSync(secondDir, { recursive: true, force: true });
+  removeTree(ownerDir);
+  removeTree(secondDir);
 });
 
 test("a stolen vault key cannot forge an enrolled device signature", () => {
@@ -256,7 +257,7 @@ test("a stolen vault key cannot forge an enrolled device signature", () => {
   session.key.fill(0);
   log.close();
   manager.close();
-  fs.rmSync(vaultDir, { recursive: true, force: true });
+  removeTree(vaultDir);
 });
 
 test("signed freshness checkpoints reject rollback and selective relay withholding", () => {
@@ -272,9 +273,9 @@ test("signed freshness checkpoints reject rollback and selective relay withholdi
   const firstBundle = ownerManager.exportCheckpoint();
 
   const receiverDir = tempVault("checkpoint-receiver");
-  fs.rmSync(receiverDir, { recursive: true, force: true });
-  fs.cpSync(ownerDir, receiverDir, { recursive: true });
-  fs.rmSync(path.join(receiverDir, "documents", "sync", "identity"), { recursive: true, force: true });
+  removeTree(receiverDir);
+  copyTree(ownerDir, receiverDir);
+  removeTree(path.join(receiverDir, "documents", "sync", "identity"));
 
   const second = ownerLog.append(
     DEVICE_A,
@@ -299,7 +300,7 @@ test("signed freshness checkpoints reject rollback and selective relay withholdi
   assert.equal(imported.id, secondCheckpoint.id);
   receiverManager.verifyCheckpoint(receiverLog.changes());
 
-  fs.rmSync(
+  fs.unlinkSync(
     path.join(receiverDir, "documents", "sync", "changes", `${second.id}.change.enc`),
   );
   assert.throws(
@@ -311,8 +312,8 @@ test("signed freshness checkpoints reject rollback and selective relay withholdi
   receiverLog.close();
   ownerLog.close();
   ownerManager.close();
-  fs.rmSync(ownerDir, { recursive: true, force: true });
-  fs.rmSync(receiverDir, { recursive: true, force: true });
+  removeTree(ownerDir);
+  removeTree(receiverDir);
 });
 
 test("concurrent device edits remain visible and a causal merge resolves them", () => {
@@ -322,8 +323,8 @@ test("concurrent device edits remain visible and a causal merge resolves them", 
   firstLog.close();
 
   const vaultB = tempVault("device-b");
-  fs.rmSync(vaultB, { recursive: true, force: true });
-  fs.cpSync(vaultA, vaultB, { recursive: true });
+  removeTree(vaultB);
+  copyTree(vaultA, vaultB);
   const logA = new SyncChangeLog(vaultA, PASSPHRASE);
   const logB = new SyncChangeLog(vaultB, PASSPHRASE);
   const branchA = logA.append(DEVICE_A, noteMutation(1, 2, "edit from A"), "2026-08-31T10:01:00.000Z");
@@ -349,8 +350,8 @@ test("concurrent device edits remain visible and a causal merge resolves them", 
 
   logA.close();
   logB.close();
-  fs.rmSync(vaultA, { recursive: true, force: true });
-  fs.rmSync(vaultB, { recursive: true, force: true });
+  removeTree(vaultA);
+  removeTree(vaultB);
 });
 
 test("imports fail closed on device forks without writing a partial batch", () => {
@@ -379,7 +380,7 @@ test("imports fail closed on device forks without writing a partial batch", () =
   session.syncChangeKey.fill(0);
   session.syncEnvelopeKey.fill(0);
   log.close();
-  fs.rmSync(vaultDir, { recursive: true, force: true });
+  removeTree(vaultDir);
 });
 
 test("an out-of-order batch is installed parent-first and remains valid after interruption boundaries", () => {
@@ -389,10 +390,10 @@ test("an out-of-order batch is installed parent-first and remains valid after in
   source.append(DEVICE_A, noteMutation(1, 2, "child"), "2026-08-31T12:01:00.000Z");
 
   const targetDir = tempVault("ordered-target");
-  fs.rmSync(targetDir, { recursive: true, force: true });
-  fs.cpSync(sourceDir, targetDir, { recursive: true });
+  removeTree(targetDir);
+  copyTree(sourceDir, targetDir);
   const targetChanges = path.join(targetDir, "documents", "sync", "changes");
-  fs.rmSync(targetChanges, { recursive: true, force: true });
+  removeTree(targetChanges);
   fs.mkdirSync(targetChanges, { recursive: true });
   const target = new SyncChangeLog(targetDir, PASSPHRASE);
   const reversed = source.envelopes().reverse();
@@ -401,8 +402,8 @@ test("an out-of-order batch is installed parent-first and remains valid after in
 
   source.close();
   target.close();
-  fs.rmSync(sourceDir, { recursive: true, force: true });
-  fs.rmSync(targetDir, { recursive: true, force: true });
+  removeTree(sourceDir);
+  removeTree(targetDir);
 });
 
 test("synced document operations automatically emit note, canvas and attachment changes", () => {
@@ -435,15 +436,15 @@ test("synced document operations automatically emit note, canvas and attachment 
   assert.doesNotMatch(disk, /Launch|brief|attachment/u);
 
   vault.lock();
-  fs.rmSync(vaultDir, { recursive: true, force: true });
+  removeTree(vaultDir);
 });
 
 test("plugin packages and security policy changes synchronize and apply", () => {
   const sourceDir = tempVault("plugin-source");
   new SyncedDocumentVault(sourceDir, PASSPHRASE, DEVICE_A).lock();
   const targetDir = tempVault("plugin-target");
-  fs.rmSync(targetDir, { recursive: true, force: true });
-  fs.cpSync(sourceDir, targetDir, { recursive: true });
+  removeTree(targetDir);
+  copyTree(sourceDir, targetDir);
 
   const source = new SyncedDocumentVault(sourceDir, PASSPHRASE, DEVICE_A);
   source.installPlugin({
@@ -475,8 +476,8 @@ test("plugin packages and security policy changes synchronize and apply", () => 
 
   source.lock();
   target.lock();
-  fs.rmSync(sourceDir, { recursive: true, force: true });
-  fs.rmSync(targetDir, { recursive: true, force: true });
+  removeTree(sourceDir);
+  removeTree(targetDir);
 });
 
 test("clean remote changes apply idempotently to the real vault storage", () => {
@@ -492,8 +493,8 @@ test("clean remote changes apply idempotently to the real vault storage", () => 
   source.lock();
 
   const targetDir = tempVault("apply-target");
-  fs.rmSync(targetDir, { recursive: true, force: true });
-  fs.cpSync(sourceDir, targetDir, { recursive: true });
+  removeTree(targetDir);
+  copyTree(sourceDir, targetDir);
 
   source = new SyncedDocumentVault(sourceDir, PASSPHRASE, DEVICE_A);
   source.put({ id: note.id, path: note.path, title: note.title, body: "remote edit", baseRevision: 1 });
@@ -529,8 +530,8 @@ test("clean remote changes apply idempotently to the real vault storage", () => 
 
   source.lock();
   target.lock();
-  fs.rmSync(sourceDir, { recursive: true, force: true });
-  fs.rmSync(targetDir, { recursive: true, force: true });
+  removeTree(sourceDir);
+  removeTree(targetDir);
 });
 
 test("unresolved remote conflicts never mutate live vault storage", () => {
@@ -540,8 +541,8 @@ test("unresolved remote conflicts never mutate live vault storage", () => {
   first.lock();
 
   const secondDir = tempVault("apply-conflict-b");
-  fs.rmSync(secondDir, { recursive: true, force: true });
-  fs.cpSync(firstDir, secondDir, { recursive: true });
+  removeTree(secondDir);
+  copyTree(firstDir, secondDir);
   first = new SyncedDocumentVault(firstDir, PASSPHRASE, DEVICE_A);
   const second = new SyncedDocumentVault(secondDir, PASSPHRASE, DEVICE_B);
   first.put({ id: note.id, path: note.path, body: "from A", baseRevision: 1 });
@@ -568,8 +569,8 @@ test("unresolved remote conflicts never mutate live vault storage", () => {
 
   first.lock();
   second.lock();
-  fs.rmSync(firstDir, { recursive: true, force: true });
-  fs.rmSync(secondDir, { recursive: true, force: true });
+  removeTree(firstDir);
+  removeTree(secondDir);
 });
 
 test("concurrent plugin policies merge only toward stronger restrictions", () => {
@@ -579,8 +580,8 @@ test("concurrent plugin policies merge only toward stronger restrictions", () =>
   first.lock();
 
   const secondDir = tempVault("policy-conflict-b");
-  fs.rmSync(secondDir, { recursive: true, force: true });
-  fs.cpSync(firstDir, secondDir, { recursive: true });
+  removeTree(secondDir);
+  copyTree(firstDir, secondDir);
 
   first = new SyncedDocumentVault(firstDir, PASSPHRASE, DEVICE_A);
   const second = new SyncedDocumentVault(secondDir, PASSPHRASE, DEVICE_B);
@@ -596,8 +597,8 @@ test("concurrent plugin policies merge only toward stronger restrictions", () =>
 
   first.lock();
   second.lock();
-  fs.rmSync(firstDir, { recursive: true, force: true });
-  fs.rmSync(secondDir, { recursive: true, force: true });
+  removeTree(firstDir);
+  removeTree(secondDir);
 });
 
 test("enrollment stores an X25519 agreement key that never leaves the device", () => {
@@ -609,11 +610,11 @@ test("enrollment stores an X25519 agreement key that never leaves the device", (
   // as in the existing owner-signed-enrollment test: copy the vault, then strip
   // the private keys that belong only to the owner's device.
   const peerVault = tempVault("agreement-peer");
-  fs.rmSync(peerVault, { recursive: true, force: true });
-  fs.cpSync(ownerVault, peerVault, { recursive: true });
-  fs.rmSync(path.join(peerVault, "documents", "sync", "identity", "authority.key.enc"));
-  fs.rmSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.key.enc`));
-  fs.rmSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.x25519.key.enc`));
+  removeTree(peerVault);
+  copyTree(ownerVault, peerVault);
+  fs.unlinkSync(path.join(peerVault, "documents", "sync", "identity", "authority.key.enc"));
+  fs.unlinkSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.key.enc`));
+  fs.unlinkSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.x25519.key.enc`));
   const peer = new SyncDeviceManager(peerVault, PASSPHRASE);
   try {
     const request = peer.createEnrollmentRequest("Travel laptop", DEVICE_B);
@@ -753,11 +754,11 @@ test("revoking a device rotates the epoch and locks it out of later changes", ()
   // as in the existing owner-signed-enrollment test: copy the vault, then strip
   // the private keys that belong only to the owner's device.
   const peerVault = tempVault("rotate-peer");
-  fs.rmSync(peerVault, { recursive: true, force: true });
-  fs.cpSync(ownerVault, peerVault, { recursive: true });
-  fs.rmSync(path.join(peerVault, "documents", "sync", "identity", "authority.key.enc"));
-  fs.rmSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.key.enc`));
-  fs.rmSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.x25519.key.enc`));
+  removeTree(peerVault);
+  copyTree(ownerVault, peerVault);
+  fs.unlinkSync(path.join(peerVault, "documents", "sync", "identity", "authority.key.enc"));
+  fs.unlinkSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.key.enc`));
+  fs.unlinkSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.x25519.key.enc`));
   const peer = new SyncDeviceManager(peerVault, PASSPHRASE);
   let registryAfterEnroll;
   try {
@@ -825,11 +826,11 @@ test("revocation refuses to rotate while another active device still holds a ver
   owner.initializeOwner("Owner laptop", DEVICE_A);
 
   const peerVault = tempVault("rotate-legacy-peer");
-  fs.rmSync(peerVault, { recursive: true, force: true });
-  fs.cpSync(ownerVault, peerVault, { recursive: true });
-  fs.rmSync(path.join(peerVault, "documents", "sync", "identity", "authority.key.enc"));
-  fs.rmSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.key.enc`));
-  fs.rmSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.x25519.key.enc`));
+  removeTree(peerVault);
+  copyTree(ownerVault, peerVault);
+  fs.unlinkSync(path.join(peerVault, "documents", "sync", "identity", "authority.key.enc"));
+  fs.unlinkSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.key.enc`));
+  fs.unlinkSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.x25519.key.enc`));
   const peer = new SyncDeviceManager(peerVault, PASSPHRASE);
   try {
     owner.enroll(peer.createEnrollmentRequest("Travel laptop", DEVICE_B));
@@ -884,11 +885,11 @@ test("post-rotation changes are unreadable with the revoked device's epoch keys"
     // as in the existing owner-signed-enrollment test: copy the vault, then strip
     // the private keys that belong only to the owner's device.
     const peerVault = tempVault("rotate-readability-peer");
-    fs.rmSync(peerVault, { recursive: true, force: true });
-    fs.cpSync(vaultDir, peerVault, { recursive: true });
-    fs.rmSync(path.join(peerVault, "documents", "sync", "identity", "authority.key.enc"));
-    fs.rmSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.key.enc`));
-    fs.rmSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.x25519.key.enc`));
+    removeTree(peerVault);
+    copyTree(vaultDir, peerVault);
+    fs.unlinkSync(path.join(peerVault, "documents", "sync", "identity", "authority.key.enc"));
+    fs.unlinkSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.key.enc`));
+    fs.unlinkSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.x25519.key.enc`));
     const peer = new SyncDeviceManager(peerVault, PASSPHRASE);
     try {
       manager.enroll(peer.createEnrollmentRequest("Travel laptop", DEVICE_B));
@@ -952,11 +953,11 @@ test("a checkpoint created before rotation still verifies afterwards", () => {
     // as in the existing owner-signed-enrollment test: copy the vault, then strip
     // the private keys that belong only to the owner's device.
     const peerVault = tempVault("rotate-checkpoint-peer");
-    fs.rmSync(peerVault, { recursive: true, force: true });
-    fs.cpSync(vaultDir, peerVault, { recursive: true });
-    fs.rmSync(path.join(peerVault, "documents", "sync", "identity", "authority.key.enc"));
-    fs.rmSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.key.enc`));
-    fs.rmSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.x25519.key.enc`));
+    removeTree(peerVault);
+    copyTree(vaultDir, peerVault);
+    fs.unlinkSync(path.join(peerVault, "documents", "sync", "identity", "authority.key.enc"));
+    fs.unlinkSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.key.enc`));
+    fs.unlinkSync(path.join(peerVault, "documents", "sync", "identity", `${DEVICE_A}.x25519.key.enc`));
     const peer = new SyncDeviceManager(peerVault, PASSPHRASE);
     try {
       manager.enroll(peer.createEnrollmentRequest("Travel laptop", DEVICE_B));
@@ -1073,7 +1074,7 @@ test("an attachment larger than the old 6 MiB ceiling is captured as blob refere
   assert.deepEqual(vault.getAttachment(info.id).data, data);
 
   vault.lock();
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("an enrolled device stamps a blob attachment change at version 3", () => {
@@ -1098,7 +1099,7 @@ test("an enrolled device stamps a blob attachment change at version 3", () => {
   assert.equal(pick("note", "put").version, 2);
 
   vault.lock();
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("an unenrolled vault keeps writing version 1, blob manifest included", () => {
@@ -1115,5 +1116,5 @@ test("an unenrolled vault keeps writing version 1, blob manifest included", () =
   assert.equal(change.mutation.objectId, info.id);
 
   vault.lock();
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });

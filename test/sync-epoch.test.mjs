@@ -19,6 +19,7 @@ import {
   validateEpochKeyWrap,
   wrapEpochKey,
 } from "../dist/sync-epoch.js";
+import { removeTree } from "../scripts/fs-tree.mjs";
 
 const DEVICE_A = "11111111-1111-4111-8111-111111111111";
 const DEVICE_B = "22222222-2222-4222-8222-222222222222";
@@ -39,7 +40,7 @@ test("closing sync stores wipes retired and legacy key references", () => {
       for (const key of references) assert.deepEqual(key, Buffer.alloc(32), Store.name);
     } finally {
       store.close();
-      fs.rmSync(directory, { recursive: true, force: true });
+      removeTree(directory);
     }
   }
 });
@@ -55,7 +56,7 @@ test("epoch key copies are reused within a sync session and wiped on close", () 
     assert.deepEqual(first, Buffer.alloc(32));
   } finally {
     log.close();
-    fs.rmSync(directory, { recursive: true, force: true });
+    removeTree(directory);
   }
 });
 

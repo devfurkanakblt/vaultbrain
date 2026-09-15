@@ -9,6 +9,7 @@ import { canonicalSyncJson, openSyncChange, sealSyncChange, validateSyncChangeBo
 import { verifySyncChanges } from "../dist/sync.js";
 import { encryptDocument } from "../dist/document-crypto.js";
 import * as syncCompatibility from "../dist/sync.js";
+import { removeTree } from "../scripts/fs-tree.mjs";
 
 const fixtures = path.join(import.meta.dirname, "fixtures", "sync-v1");
 const golden = JSON.parse(fs.readFileSync(path.join(fixtures, "golden.json"), "utf8"));
@@ -74,7 +75,7 @@ test("v1 golden body, keyed ID, opened result, and compatibility barrel are froz
   const note = vault.put({ path: "Fixture.md", body: "fixture" });
   assert.equal(vault.changeLog.resolve("note", note.id).winner?.mutation.revision, 1);
   vault.lock();
-  fs.rmSync(vaultDir, { recursive: true, force: true });
+  removeTree(vaultDir);
 });
 
 test("v1 protocol rejects deterministic adversarial inputs", () => {

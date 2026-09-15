@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { inspectVaultLock, recoverVaultLock } from "../dist/vault-lock.js";
+import { removeTree } from "../scripts/fs-tree.mjs";
 
 function temporaryVault(label) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `vault-lock-${label}-`));
@@ -44,7 +45,7 @@ test("a live same-host process is reported and cannot be recovered", () => {
     assert.throws(() => recoverVaultLock(vaultDir), /still held by a live local process/u);
   } finally {
     child.kill();
-    fs.rmSync(vaultDir, { recursive: true, force: true });
+    removeTree(vaultDir);
   }
 });
 
@@ -58,7 +59,7 @@ test("a proven-dead same-host process is recovered without touching rekey state"
   assert.deepEqual(recoverVaultLock(vaultDir), { recovered: true, state: "dead" });
   assert.equal(inspectVaultLock(vaultDir).state, "unlocked");
   assert.equal(fs.existsSync(path.join(vaultDir, ".rekey", "journal.json")), true);
-  fs.rmSync(vaultDir, { recursive: true, force: true });
+  removeTree(vaultDir);
 });
 
 test("remote and malformed locks fail closed", () => {
@@ -72,7 +73,7 @@ test("remote and malformed locks fail closed", () => {
     assert.equal(inspectVaultLock(vaultDir).state, "malformed");
     assert.throws(() => recoverVaultLock(vaultDir), /malformed/u);
   } finally {
-    fs.rmSync(vaultDir, { recursive: true, force: true });
+    removeTree(vaultDir);
   }
 });
 
@@ -82,7 +83,7 @@ test("a reused live PID is refused even when its recorded acquisition is ancient
     writeLock(vaultDir, recordFor(process.pid, { acquiredAt: "2000-01-01T00:00:00.000Z" }));
     assert.throws(() => recoverVaultLock(vaultDir), /live local process/);
     assert.equal(inspectVaultLock(vaultDir).holder.pid, process.pid);
-  } finally { fs.rmSync(vaultDir, { recursive: true, force: true }); }
+  } finally { removeTree(vaultDir); }
 });
 
 test("concurrent recovery attempts cannot both remove a dead owner lock", async () => {
@@ -100,7 +101,7 @@ test("concurrent recovery attempts cannot both remove a dead owner lock", async 
     const results = await Promise.all([invoke(), invoke()]);
     assert.equal(results.filter(result => result.recovered).length, 1);
     assert.equal(inspectVaultLock(vaultDir).state, "unlocked");
-  } finally { fs.rmSync(vaultDir, { recursive: true, force: true }); }
+  } finally { removeTree(vaultDir); }
 });
 
 test("vault-lock status and recover work while a rekey journal is present", () => {
@@ -115,6 +116,6 @@ test("vault-lock status and recover work while a rekey journal is present", () =
     assert.equal(JSON.parse(runCli(["--vault", vaultDir, "vault-lock", "status"])).state, "unlocked");
     assert.equal(fs.existsSync(path.join(vaultDir, ".rekey", "journal.json")), true);
   } finally {
-    fs.rmSync(vaultDir, { recursive: true, force: true });
+    removeTree(vaultDir);
   }
 });

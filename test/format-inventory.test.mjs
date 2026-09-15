@@ -16,6 +16,7 @@ import { createBackup } from "../dist/backup.js";
 import { createRecoveryKit } from "../dist/keyring-recovery.js";
 import { saveEpochKey } from "../dist/sync-epoch.js";
 import { SyncApplyReceiptStore } from "../dist/sync/transaction.js";
+import { removeTree } from "../scripts/fs-tree.mjs";
 
 function literals(source) {
   const result = [];
@@ -209,6 +210,6 @@ test("real writers produce only catalogued, explicitly rekeyed encrypted files",
     assert.throws(() => planRekey(root), /Uncatalogued|cannot classify/);
   } finally {
     vault?.lock();
-    fs.rmSync(root, { recursive: true, force: true });
+    removeTree(root);
   }
 });

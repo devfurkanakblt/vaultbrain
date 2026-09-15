@@ -18,6 +18,7 @@ import {
   canonicalSyncJson,
   parseAttachmentSnapshot,
 } from "../dist/sync.js";
+import { removeTree } from "../scripts/fs-tree.mjs";
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
 const FIXTURE_PASSPHRASE = "fixture-only-passphrase";
@@ -135,7 +136,7 @@ test("the portable-state writer produces artifacts the re-key plan can classify"
       ],
     );
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
+    removeTree(dir);
   }
 });
 
@@ -229,7 +230,7 @@ test("the committed attachment blob fixture pins the version 3 manifest body", (
 
 test("a second device reassembles the committed attachment from its staged blobs", () => {
   const targetDir = fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-blob-fixture-"));
-  fs.rmSync(targetDir, { recursive: true, force: true });
+  removeTree(targetDir);
   copyTree(path.join(BLOBS_FIXTURE, "target"), targetDir);
   const sourceDir = path.join(BLOBS_FIXTURE, "source");
 
@@ -257,7 +258,7 @@ test("a second device reassembles the committed attachment from its staged blobs
   } finally {
     source.close();
     target.lock();
-    fs.rmSync(targetDir, { recursive: true, force: true });
+    removeTree(targetDir);
   }
 });
 

@@ -7,9 +7,9 @@ import test from "node:test";
 import { copyTree, removeFile, removeTree, surviving } from "../scripts/fs-tree.mjs";
 
 // Deliberately not an ASCII name. Node's own recursive helpers fail here on
-// Windows — fs.rmSync silently removes nothing, fs.cpSync aborts the process
-// with 0xC0000409 — so a build script that reaches for them again fails this
-// file rather than shipping a build over stale output.
+// Windows — the removal helper silently removes nothing, the copy helper
+// aborts the process with 0xC0000409 — so a build script that reaches for
+// them again fails this file rather than shipping a build over stale output.
 const AWKWARD = "fs-tree-ü-é-";
 
 function temporaryRoot() {

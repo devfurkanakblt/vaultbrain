@@ -70,7 +70,7 @@ test("the blob store's remove deletes the blob file under a non-ASCII directory 
 
   store.remove(id);
 
-  // Node's fs.rmSync-based removal silently does nothing under a non-ASCII
+  // Node's recursive removal helper silently does nothing under a non-ASCII
   // path on Windows; this asserts the blob file is actually gone.
   assert.equal(store.has(id), false);
   assert.deepEqual(

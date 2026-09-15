@@ -10,6 +10,7 @@ import { inspect } from "node:util";
 
 import { appendAudit, verifyAudit } from "../dist/audit.js";
 import { DocumentVault } from "../dist/documents.js";
+import { removeTree } from "../scripts/fs-tree.mjs";
 import {
   DEFAULT_SCRYPT_N,
   forgetVaultKeys,
@@ -147,7 +148,7 @@ test("the new passphrase opens the vault and the old one no longer does", () => 
   assert.ok(openVaultKeys(dir, NEW_PASSPHRASE));
   assert.throws(() => openVaultKeys(dir, PASSPHRASE), /wrong passphrase/iu);
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("no object is re-encrypted: notes, attachments and key-value entries survive unchanged", () => {
@@ -182,7 +183,7 @@ test("no object is re-encrypted: notes, attachments and key-value entries surviv
     "the audit key is permanent, so the pre-change chain must still verify",
   );
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("the change raises an old vault's KDF cost to the current default", () => {
@@ -200,7 +201,7 @@ test("the change raises an old vault's KDF cost to the current default", () => {
   assert.equal(slot.kdf.N, DEFAULT_SCRYPT_N);
   assert.notEqual(slot.kdf.salt, oldSalt, "a re-wrap must draw a fresh salt");
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("a slot the current passphrase cannot open is preserved untouched", () => {
@@ -222,7 +223,7 @@ test("a slot the current passphrase cannot open is preserved untouched", () => {
   forgetVaultKeys();
   assert.ok(openVaultKeys(dir, "recovery-slot-passphrase"));
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("every refusal leaves keyring.json byte-identical", () => {
@@ -234,7 +235,7 @@ test("every refusal leaves keyring.json byte-identical", () => {
   assert.throws(() => changeVaultPassphrase(dir, "wrong-current-passphrase", NEW_PASSPHRASE), /wrong passphrase/iu);
 
   assert.deepEqual(fs.readFileSync(path.join(dir, "keyring.json")), before);
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("a legacy vault is refused and pointed at vbrain migrate", () => {
@@ -245,7 +246,7 @@ test("a legacy vault is refused and pointed at vbrain migrate", () => {
   assert.throws(() => changeVaultPassphrase(dir, PASSPHRASE, NEW_PASSPHRASE), /vbrain migrate/u);
   assert.ok(!fs.existsSync(path.join(dir, "keyring.json")), "a refusal must not create a keyring");
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("--allow-same-passphrase re-wraps at the current cost without changing the passphrase", () => {
@@ -260,7 +261,7 @@ test("--allow-same-passphrase re-wraps at the current cost without changing the 
   forgetVaultKeys();
   assert.ok(openVaultKeys(dir, PASSPHRASE));
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("an 11-character new passphrase is refused and a 12-character one is accepted", () => {
@@ -273,7 +274,7 @@ test("an 11-character new passphrase is refused and a 12-character one is accept
   forgetVaultKeys();
   assert.ok(openVaultKeys(dir, "b".repeat(12)));
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("two slots that both open under the current passphrase but carry different keysets are refused", () => {
@@ -293,7 +294,7 @@ test("two slots that both open under the current passphrase but carry different 
     "a refusal must leave the keyring untouched",
   );
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 /** A fake credential store. `failOnStore` makes writes throw, as a locked keychain does. */
@@ -329,7 +330,7 @@ test("a remembered passphrase is replaced with the new one", () => {
     assert.equal(fake.entries.get(accountFor(dir)), NEW_PASSPHRASE);
   } finally {
     setKeychainBackend(undefined);
-    fs.rmSync(dir, { recursive: true, force: true });
+    removeTree(dir);
   }
 });
 
@@ -345,7 +346,7 @@ test("a vault with nothing remembered is left alone", () => {
     assert.equal(fake.entries.size, 0, "nothing may be stored for a vault that had nothing");
   } finally {
     setKeychainBackend(undefined);
-    fs.rmSync(dir, { recursive: true, force: true });
+    removeTree(dir);
   }
 });
 
@@ -367,7 +368,7 @@ test("a store that refuses the write is reported rather than thrown, and never l
     }
   } finally {
     setKeychainBackend(undefined);
-    fs.rmSync(dir, { recursive: true, force: true });
+    removeTree(dir);
   }
 });
 
@@ -404,7 +405,7 @@ test("a failed credential update forgets the stale credential instead of leaving
     assert.equal(fake.entries.has(accountFor(dir)), false, "the stale credential must be gone");
   } finally {
     setKeychainBackend(undefined);
-    fs.rmSync(dir, { recursive: true, force: true });
+    removeTree(dir);
   }
 });
 
@@ -450,7 +451,7 @@ test("a second sequential readSecret rejects rather than exiting 0 when stdin en
     assert.match(result.stderr, /two-rejected:/u);
     assert.match(result.stderr, /end of file/iu);
   } finally {
-    fs.rmSync(probeDir, { recursive: true, force: true });
+    removeTree(probeDir);
   }
 });
 
@@ -480,7 +481,7 @@ test("the CLI changes the passphrase end to end", () => {
   assert.ok(openVaultKeys(dir, NEW_PASSPHRASE));
   assert.throws(() => openVaultKeys(dir, PASSPHRASE), /wrong passphrase/iu);
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("the CLI refuses a short new passphrase and leaves the vault alone", () => {
@@ -499,7 +500,7 @@ test("the CLI refuses a short new passphrase and leaves the vault alone", () => 
   forgetVaultKeys();
   assert.ok(openVaultKeys(dir, PASSPHRASE), "the old passphrase must still work");
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("the CLI never takes the current passphrase from the OS credential store", (t) => {
@@ -512,7 +513,7 @@ test("the CLI never takes the current passphrase from the OS credential store", 
   if (!backend.available() || backend.writable === false) {
     if (originalLocalAppData === undefined) delete process.env.LOCALAPPDATA;
     else process.env.LOCALAPPDATA = originalLocalAppData;
-    if (isolatedLocalAppData) fs.rmSync(isolatedLocalAppData, { recursive: true, force: true });
+    if (isolatedLocalAppData) removeTree(isolatedLocalAppData);
     t.skip("no writable OS credential store is available on this machine");
     return;
   }
@@ -541,10 +542,10 @@ test("the CLI never takes the current passphrase from the OS credential store", 
     assert.ok(openVaultKeys(dir, PASSPHRASE), "the vault must still open under the original passphrase");
   } finally {
     forgetPassphrase(dir);
-    fs.rmSync(dir, { recursive: true, force: true });
+    removeTree(dir);
     if (originalLocalAppData === undefined) delete process.env.LOCALAPPDATA;
     else process.env.LOCALAPPDATA = originalLocalAppData;
-    if (isolatedLocalAppData) fs.rmSync(isolatedLocalAppData, { recursive: true, force: true });
+    if (isolatedLocalAppData) removeTree(isolatedLocalAppData);
   }
 });
 
@@ -567,7 +568,7 @@ test("with stdin closed and no VBRAIN_PASSPHRASE, the command fails loudly inste
   forgetVaultKeys();
   assert.ok(openVaultKeys(dir, PASSPHRASE), "the vault must still open under the original passphrase");
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("the CLI's --allow-same-passphrase re-wraps the keyring end to end", () => {
@@ -585,7 +586,7 @@ test("the CLI's --allow-same-passphrase re-wraps the keyring end to end", () => 
   forgetVaultKeys();
   assert.ok(openVaultKeys(dir, PASSPHRASE), "the vault must still open under the same passphrase");
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("the CLI refuses a legacy vault and names vbrain migrate", () => {
@@ -601,5 +602,5 @@ test("the CLI refuses a legacy vault and names vbrain migrate", () => {
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /vbrain migrate/u);
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });

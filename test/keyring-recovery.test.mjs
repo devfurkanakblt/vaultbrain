@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import { DocumentVault } from "../dist/documents.js";
 import { readAudit, verifyAudit } from "../dist/audit.js";
+import { removeTree } from "../scripts/fs-tree.mjs";
 import {
   DEFAULT_SCRYPT_N,
   KEY_NAMES,
@@ -50,7 +51,7 @@ test("recovery verification opens modern epoch changes using recovered epoch key
     assert.equal(verifyRecoveryKeySet(root, keys), 1);
     fs.renameSync(path.join(dir, `${envelope.id}.change.enc`), path.join(dir, `${"b".repeat(64)}.change.enc`));
     assert.throws(() => verifyRecoveryKeySet(root, keys), /filename/);
-  } finally { zeroKeySet(keys); epochKey.fill(0); fs.rmSync(root, { recursive: true, force: true }); }
+  } finally { zeroKeySet(keys); epochKey.fill(0); removeTree(root); }
 });
 import { changeVaultPassphrase } from "../dist/keyring-passphrase.js";
 import { loadVaultFile, upsertEntry } from "../dist/store.js";

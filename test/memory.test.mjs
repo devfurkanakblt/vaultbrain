@@ -20,6 +20,7 @@ import {
   renderWorkerPrompt,
   redactSecrets,
 } from "../dist/memory/index.js";
+import { removeTree } from "../scripts/fs-tree.mjs";
 
 test("parses only visible post-enrollment user and assistant messages", () => {
   const input = [
@@ -61,7 +62,7 @@ test("batch validation and bootstrap are bounded and do not persist plaintext", 
   assert.ok(Buffer.byteLength(context, "utf8") <= 6000);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "memory-test-"));
   assert.equal(fs.readdirSync(dir).length, 0);
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
 });
 
 test("runner arguments disable ambient hooks and tools without embedding secrets", () => {

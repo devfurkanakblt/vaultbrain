@@ -6,6 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { copyTree, removeFile, removeTree } from "../scripts/fs-tree.mjs";
+
 const DEVICE_A = "11111111-1111-4111-8111-111111111111";
 
 /** Runs the built CLI and returns stdout. Throws on a non-zero exit. */
@@ -30,7 +32,7 @@ test("sync devices list reports the active epoch and per-device state", () => {
 
   assert.match(listed, /epoch 1/u, "the header names the active epoch");
   assert.match(listed, new RegExp(`${DEVICE_A}.*epoch=1.*active`, "u"), "each row carries its epoch and state");
-  fs.rmSync(vaultDir, { recursive: true, force: true });
+  removeTree(vaultDir);
 });
 
 // Important finding: the journal guard (src/cli.ts preAction hook) used to
@@ -70,7 +72,7 @@ test("the journal guard matches the full command path, not just a leaf named \"i
   // not merely a leaf that happens to be named that.
   assert.doesNotThrow(() => runCli(["--vault", vaultDir, "init"]));
 
-  fs.rmSync(vaultDir, { recursive: true, force: true });
+  removeTree(vaultDir);
 });
 
 test("vbrain format prints the frozen version matrix", () => {
@@ -93,8 +95,8 @@ test("vbrain format prints the frozen version matrix", () => {
  */
 function cloneVault(sourceDir, label) {
   const targetDir = tempVault(label);
-  fs.rmSync(targetDir, { recursive: true, force: true });
-  fs.cpSync(sourceDir, targetDir, { recursive: true });
+  removeTree(targetDir);
+  copyTree(sourceDir, targetDir);
   return targetDir;
 }
 
@@ -172,8 +174,8 @@ test("sync export --bundle carries attachment blobs to another vault without a r
   runCli([...target, "docs", "attachment-get", attachmentId, restored], env);
   assert.ok(fs.readFileSync(restored).equals(body), "the bundle carried every attachment byte");
 
-  for (const scrap of [sourceDir, targetDir, bundle]) fs.rmSync(scrap, { recursive: true, force: true });
-  for (const scrap of [file, restored]) fs.rmSync(scrap, { force: true });
+  for (const scrap of [sourceDir, targetDir, bundle]) removeTree(scrap);
+  for (const scrap of [file, restored]) removeFile(scrap);
 });
 
 test("relay push and pull move blobs, and blobs prune and fetch reclaim and restore them", async () => {
@@ -212,7 +214,7 @@ test("relay push and pull move blobs, and blobs prune and fetch reclaim and rest
     assert.match(runCli([...source, "sync", "blobs", "status"], env), /2 present, 0 missing/u);
   } finally {
     await relay.stop();
-    for (const scrap of scraps) fs.rmSync(scrap, { recursive: true, force: true });
+    for (const scrap of scraps) removeTree(scrap);
   }
 });
 
@@ -233,7 +235,7 @@ test("the pre-rename SBRAIN_ environment names still work", () => {
       /VBRAIN_RELAY_TOKEN must contain at least 32 bytes/u,
     );
   } finally {
-    fs.rmSync(vaultDir, { recursive: true, force: true });
+    removeTree(vaultDir);
   }
 });
 
@@ -267,8 +269,8 @@ test("vbrain export writes a plaintext copy, records it, and says what it is", (
   // A second export into the same directory is refused rather than merged.
   assert.throws(() => runCli([...flags, "export", destination], env), /not empty/u);
 
-  fs.rmSync(vaultDir, { recursive: true, force: true });
-  fs.rmSync(outside, { recursive: true, force: true });
+  removeTree(vaultDir);
+  removeTree(outside);
 });
 
 test("vbrain backup and restore carry a vault to a new directory, and refuse a bad archive", () => {
@@ -303,8 +305,8 @@ test("vbrain backup and restore carry a vault to a new directory, and refuse a b
   );
   assert.equal(fs.existsSync(path.join(outside, "wrong")), false);
 
-  fs.rmSync(vaultDir, { recursive: true, force: true });
-  fs.rmSync(outside, { recursive: true, force: true });
+  removeTree(vaultDir);
+  removeTree(outside);
 });
 
 test("vbrain rekey identity rotation verifies a backup and starts a new sync owner", () => {
@@ -341,7 +343,7 @@ test("vbrain rekey identity rotation verifies a backup and starts a new sync own
     );
     assert.match(runCli(["restore", backup, restored], sourceEnv), /Restored \d+ files/u);
   } finally {
-    for (const scrap of [vaultDir, outside, file]) fs.rmSync(scrap, { recursive: true, force: true });
+    for (const scrap of [vaultDir, outside, file]) removeTree(scrap);
   }
 });
 
@@ -380,8 +382,8 @@ test("vbrain purge previews first, then removes the object and its history", () 
   const history = path.join(vaultDir, "documents", "history");
   assert.equal(!fs.existsSync(history) || fs.readdirSync(history).length === 0, true);
 
-  fs.rmSync(vaultDir, { recursive: true, force: true });
-  fs.rmSync(outside, { recursive: true, force: true });
+  removeTree(vaultDir);
+  removeTree(outside);
 });
 
 test("vbrain retention bounds history and reports what it removed", () => {
@@ -417,6 +419,6 @@ test("vbrain retention bounds history and reports what it removed", () => {
   // Asking for a bound without naming one is refused rather than guessed at.
   assert.throws(() => runCli([...flags, "retention", "set"], env), /Use --unlimited/u);
 
-  fs.rmSync(vaultDir, { recursive: true, force: true });
-  fs.rmSync(outside, { recursive: true, force: true });
+  removeTree(vaultDir);
+  removeTree(outside);
 });
