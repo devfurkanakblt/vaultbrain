@@ -377,6 +377,9 @@ with Phases 12 and 14.
       later re-key, and a failed identity rotation leaves a second wrapped keyset
       and sync private keys on disk. The plan is
       [`docs/superpowers/plans/2026-09-14-phase-16-6-non-ascii-vault-removal.md`](superpowers/plans/2026-09-14-phase-16-6-non-ascii-vault-removal.md).
+      The follow-up moved the non-build scripts onto `scripts/fs-tree.mjs` and
+      extended the source scan to cover `scripts/`; see
+      [`docs/superpowers/plans/2026-09-15-phase-16-6-non-ascii-scripts.md`](superpowers/plans/2026-09-15-phase-16-6-non-ascii-scripts.md).
 
 ## Which open phases still need code
 

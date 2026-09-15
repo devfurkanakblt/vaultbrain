@@ -50,7 +50,7 @@ checkout lives under `Masaüstü`, so every script below is exposed on this host
   place.
 - Verify: `node --test test/fs-tree.test.mjs` (write the tests first, see them
   fail on the missing export, then implement), `npx eslint scripts/fs-tree.mjs
-  test/fs-tree.test.mjs`.
+test/fs-tree.test.mjs`.
 
 ## Task 2: Replace the call sites in the six scripts
 
@@ -78,7 +78,7 @@ checkout lives under `Masaüstü`, so every script below is exposed on this host
   - `make-fixtures`, in a throwaway worktree — never the main checkout:
     `git worktree add "<scratch>/fixtures-ü-check" HEAD`, junction/symlink
     `node_modules` from the main checkout, `npm run build`, `node
-    scripts/make-fixtures.mjs`; it must exit 0, and `npm test`'s
+scripts/make-fixtures.mjs`; it must exit 0, and `npm test`'s
     format-conformance file (`node --test test/format-conformance.test.mjs`)
     must pass inside that worktree. If feasible, first run the same command on
     the base commit to record the pre-fix failure. Remove the worktree with
@@ -123,4 +123,72 @@ checkout lives under `Masaüstü`, so every script below is exposed on this host
 
 ## Evidence
 
-_To be filled by Task 4._
+### Task 1 (commit `1b60861`): `removeFile` in `scripts/fs-tree.mjs`
+
+- RED: `node --test test/fs-tree.test.mjs` before implementing `removeFile`
+  failed at import time —
+  `SyntaxError: The requested module '../scripts/fs-tree.mjs' does not
+provide an export named 'removeFile'` (`tests 1`, `pass 0`, `fail 1`).
+- GREEN: after implementing `removeFile`, the same command passed
+  `tests 8`, `pass 8`, `fail 0`.
+- `npx eslint scripts/fs-tree.mjs test/fs-tree.test.mjs` — clean, no output.
+- `test/fs-tree.test.mjs` and `test/fs-removal.test.mjs` run together —
+  17/17 pass, including the pre-existing `src/`-only banned-call scan
+  (untouched at this point in the sequence).
+- `findBannedCalls` (extracted from `test/fs-removal.test.mjs`) run against
+  the reworded `scripts/fs-tree.mjs` returned `[]` — the new header comment
+  does not trip the scan once it is later extended to `scripts/`.
+
+### Task 2 (commit `461f14b`): move the six scripts onto `scripts/fs-tree.mjs`
+
+- `npx eslint` on the six changed scripts — clean, no output.
+- `npm run build` — exit 0.
+- `node --test test/fs-tree.test.mjs test/portable-sync.test.mjs
+test/release.test.mjs test/native-update-acceptance.test.mjs` —
+  `tests 29`, `pass 29`, `fail 0`.
+- `node scripts/sync-recovery-drill.mjs` — exit 0, JSON report with
+  `"ok": true`.
+- `node scripts/benchmark.mjs --notes 100` (smallest valid tier; run without
+  `--assert` since the 1k-tier performance budgets are not meaningful at a
+  100-note sample) — exit 0, no leftover `vault-brain-benchmark-*` directory
+  under the OS temp directory before or after.
+- `make-fixtures`, run only in throwaway git worktrees, never the main
+  checkout (`git -c core.longpaths=true worktree add --detach <path> <ref>`,
+  a one-shot flag needed for the deep scratchpad path; no persisted git
+  config change):
+  - **Pre-fix** worktree at base commit `1b60861`: `node
+scripts/make-fixtures.mjs` crashed, exit 1, with `Error: Sync device
+enrollment is already initialized.` from `writeSyncEpochFixture` — the
+    expected pre-fix failure signal, because the non-ASCII worktree path
+    makes `fs.rmSync` on the checked-in `test/fixtures/sync-epoch-v2`
+    silently remove nothing, so the fixture writer collides with leftover
+    state.
+  - **Post-fix** worktree at this task's commit `461f14b`: `node
+scripts/make-fixtures.mjs` succeeded, exit 0 (`Fixtures written to
+.../fixtures-ü-check-post/test/fixtures`), and `node --test
+test/format-conformance.test.mjs` inside that worktree passed `tests 10`,
+    `pass 10`, `fail 0`.
+  - Both worktrees were removed afterward; `git status test/fixtures --short`
+    in the main checkout showed no output, confirming `make-fixtures` was
+    never run against the main checkout's fixtures.
+- NOT RUN: nothing — every verification step in the brief ran successfully
+  on this host (Windows 11, Node v24.11.1).
+
+### Task 3 (commit `914b3aa`): extend the source scan to `scripts/`
+
+- Non-vacuity check: with an uncommitted `fs.rmSync("x", { recursive: true,
+force: true })` line temporarily appended to `scripts/clean-dist.mjs`,
+  `node --test test/fs-removal.test.mjs` failed, reporting exactly
+  `scripts\clean-dist.mjs:50: fs.rmSync("x", { recursive: true, force: true
+});` — the extended scan names the offending file and line. The line was
+  then reverted (`git checkout -- scripts/clean-dist.mjs`).
+- GREEN on HEAD: `npm run build` — clean; `node --test
+test/fs-removal.test.mjs` — `tests 9`, `pass 9`, `fail 0`, including the
+  new `no source file under src/ or scripts/ calls Node's non-ASCII-unsafe
+recursive removal helpers` test.
+- `npx eslint test/fs-removal.test.mjs` — clean, no output.
+
+### Not part of this documentation task
+
+The full local verification set and the PR's CI run are executed at merge
+time, not as part of Task 4.
