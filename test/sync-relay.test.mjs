@@ -9,6 +9,7 @@ import { SyncBlobStore } from "../dist/sync-blobs.js";
 import { attachmentBlobIds, startSyncRelay, SyncRelayClient } from "../dist/sync-relay.js";
 import { SyncChangeLog, SyncDeviceManager } from "../dist/sync.js";
 import { removeTree } from "../scripts/fs-tree.mjs";
+import { assertOpaqueChangeEnvelope } from "./opaque-envelope.mjs";
 
 const PASSPHRASE = "relay-test-passphrase";
 const TOKEN = "relay-test-token-that-is-at-least-thirty-two-bytes";
@@ -63,11 +64,15 @@ test("the self-hosted relay stores only authenticated opaque immutable objects",
     assert.equal(artifactId, crypto.createHash("sha256").update(JSON.stringify(registry)).digest("hex"));
     assert.deepEqual(await client.downloadArtifacts("registry"), [registry]);
 
-    const storedText = fs
-      .readdirSync(path.join(storageDir, vaultId, "changes"))
-      .map((name) => fs.readFileSync(path.join(storageDir, vaultId, "changes", name), "utf8"))
-      .join("\n");
-    assert.doesNotMatch(storedText, /Relay test|first|second/u);
+    const storedNames = fs.readdirSync(path.join(storageDir, vaultId, "changes"));
+    assert.equal(storedNames.length, 2);
+    for (const name of storedNames) {
+      assertOpaqueChangeEnvelope(
+        fs.readFileSync(path.join(storageDir, vaultId, "changes", name), "utf8"),
+        ["Relay test", JSON.stringify("first"), JSON.stringify("second")],
+        `stored change ${name}`,
+      );
+    }
 
     const wrongId = "0".repeat(64);
     const rejected = await fetch(`${relay.url}/v1/vaults/${vaultId}/changes/${wrongId}`, {
