@@ -14,9 +14,15 @@ component (a Windows user name with `ğ`, say) cleanup would silently leak and
 every recursive copy would kill the test process.
 
 **Measured scope at `8fe108d`.** Outside `test/fs-removal.test.mjs` (whose
-probe strings name the banned calls on purpose): about 300 `rmSync` call sites
-(229 of them `{ recursive: true, force: true }`), 32 recursive `cpSync` calls,
+probe strings name the banned calls on purpose): 263 `rmSync` call sites
+(229 of them `{ recursive: true, force: true }`), 28 recursive `cpSync` calls,
 and one `node:fs/promises` import (`test/package.test.mjs`), across 34 files.
+
+**Out of scope.** `desktop/` sources (`.ts`/`.tsx`, including its Vitest UI
+tests) and root config files are not walked by this plan's scan. A repo-wide
+grep at `054624e` for `rmSync(`/`rmdirSync(`/`cpSync(` across `desktop/` and
+the root config files found none, so they are recorded here as out of scope,
+not fixed.
 
 ## Global Constraints
 
@@ -134,11 +140,11 @@ Six files converted: `test/rekey-vault.test.mjs`,
 `test/keyring.test.mjs`, `test/keyring-recovery.test.mjs`,
 `test/rekey-transitions.test.mjs`.
 
-- `rekey-vault.test.mjs`: 68 `removeTree` conversions, 4 bare `rmSync` →
+- `rekey-vault.test.mjs`: 78 `removeTree` conversions, 4 bare `rmSync` →
   `fs.unlinkSync` (each on a file the test requires to already exist), 3
   comments reworded (checked against `src/keyring-rekey.ts` so the reworded
   text stays accurate).
-- `keyring-passphrase.test.mjs`: 21 `removeTree` conversions.
+- `keyring-passphrase.test.mjs`: 22 `removeTree` conversions.
 - `keyring-create.test.mjs`: 7 `removeTree` conversions; also dropped the
   file's own hand-rolled `copyTree` (a workaround for `fs.cpSync` crashing on
   this host) in favor of the shared `copyTree` from `scripts/fs-tree.mjs`.
@@ -163,10 +169,13 @@ Nine files converted: `test/sync.test.mjs`, `test/sync-relay.test.mjs`,
 `test/sync-apply.test.mjs`, `test/sync-blob-transport.test.mjs`,
 `test/sync-transaction.test.mjs`, `test/sync-epoch.test.mjs`,
 `test/sync-protocol.test.mjs`, `test/sync-blobs.test.mjs`,
-`test/portable-sync.test.mjs`. None of the nine previously imported an
+`test/portable-sync.test.mjs`. Eight of the nine previously imported no
 `fs-tree` helper, so each gained an
 `import { removeTree } from "../scripts/fs-tree.mjs";` (plus `copyTree` where
-the file also called `cpSync`).
+the file also called `cpSync`). `test/sync-blobs.test.mjs` already imported
+`removeTree` from `../dist/fs-tree.js` at `8fe108d` and keeps that import per
+the Global Constraints; only a comment naming the banned calls was reworded
+there, with no removal or copy call sites of its own to convert.
 
 Recounted directly against the commit range
 (`git diff c0bf516 fe693ac | grep -c '^+.*removeTree('`): 64 `removeTree`
@@ -235,12 +244,16 @@ Nineteen files converted: `test/canvas.test.mjs`, `test/cli.test.mjs`,
   `force` rule — every recursive removal in this batch already carried
   `force: true`, or was a no-option single-file `rmSync` converted to
   `fs.unlinkSync` (preserving the throw-on-missing behavior).
+- `test/cli.test.mjs` has one `removeFile` conversion (a bare, no-option
+  `rmSync` on a file the test does not need to still throw on), alongside its
+  `removeTree` and `copyTree` conversions.
 
 - `npm run build` — exit 0.
-- `node --test`, run in five groups plus three `npm run test:*` scripts
+- `node --test`, run in five groups plus four `npm run test:*` scripts
   (native-keychain, release, update-acceptance, platform-artifacts) and a
-  standalone run of `test/fs-removal.test.mjs` itself: 30 + 36 + 44 + 13 + 1
-  - 12 + 4 + 9 + 9 = 158 pass, 0 fail, 0 skipped.
+  standalone run of `test/fs-removal.test.mjs` itself: the five groups summed
+  30 + 36 + 44 + 13 + 1, the four `test:*` scripts summed 12 + 4 + 9 + 9, for
+  158 pass total, 0 fail, 0 skipped.
 - `npm run lint` (`eslint src desktop/src scripts test desktop/vite.config.ts`)
   — clean, no warnings or errors.
 - `test/native-keychain.test.mjs` ran on this host (native credential store
@@ -272,10 +285,24 @@ test/fs-removal.test.mjs` — `tests 9`, `pass 9`, `fail 0`, including the
   1-3 having already moved every call site onto the `fs-tree` helpers.
 - `npx eslint test/fs-removal.test.mjs` — clean, no output.
 
-At the time this evidence was recorded, the Task 4 change was reviewed but
-that review may still have been in progress; the results above are what its
-own report records, and the merge-time verification set (see below) covers
-the file again regardless.
+The Task 4 change's review was complete, with a clean result; the results
+above are what its own report records, and the merge-time verification set
+(see below) covers the file again regardless.
+
+### Post-review follow-up: import source
+
+A whole-branch review after Task 5 found that four files had no `fs-tree`
+import at `8fe108d` but had picked up `import { removeTree } from
+"../dist/fs-tree.js"` instead of `scripts/fs-tree.mjs`, contrary to the
+Global Constraints (that import is only kept where a file already had it at
+the base commit): `test/keyring-passphrase.test.mjs`,
+`test/keyring-recovery.test.mjs`, `test/rekey-transitions.test.mjs`, and
+`test/keyring-create.test.mjs` (whose separate `copyTree` import from
+`scripts/fs-tree.mjs` was merged with `removeTree` into one import line). All
+four were switched to `scripts/fs-tree.mjs` after this review, along with the
+Task 1/2/3 evidence corrections above and the "Out of scope" note. The same
+review also collapsed a duplicate `node:fs` import (named and default) in
+`test/release.test.mjs` into a single named import.
 
 ### NOT RUN
 

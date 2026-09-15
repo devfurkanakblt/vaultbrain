@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import fs from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
@@ -140,7 +139,7 @@ test("inspectReleaseArtifacts rejects missing target signatures, duplicate targe
   const unsafe = temporaryDirectory();
   try {
     releaseFixture(missing);
-    fs.unlinkSync(path.join(missing, "vault-brain_1.2.3_amd64.deb.sig"));
+    unlinkSync(path.join(missing, "vault-brain_1.2.3_amd64.deb.sig"));
     assert.throws(() => inspectReleaseArtifacts(missing, { version: VERSION }), /linux-x86_64-deb/iu);
 
     releaseFixture(duplicate);

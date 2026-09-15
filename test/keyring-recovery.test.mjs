@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import { DocumentVault } from "../dist/documents.js";
 import { readAudit, verifyAudit } from "../dist/audit.js";
-import { removeTree } from "../dist/fs-tree.js";
+import { removeTree } from "../scripts/fs-tree.mjs";
 import {
   DEFAULT_SCRYPT_N,
   KEY_NAMES,

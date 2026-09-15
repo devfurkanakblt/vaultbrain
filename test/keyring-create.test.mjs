@@ -7,10 +7,9 @@ import test from "node:test";
 
 import { appendAudit, verifyAudit } from "../dist/audit.js";
 import { DocumentVault } from "../dist/documents.js";
-import { removeTree } from "../dist/fs-tree.js";
 import { detectVaultFormat, forgetVaultKeys, openOrCreateVaultKeys, openVaultKeys } from "../dist/keyring.js";
 import { loadVaultFile, upsertEntry, vaultFileEnvelopeVersion } from "../dist/store.js";
-import { copyTree } from "../scripts/fs-tree.mjs";
+import { copyTree, removeTree } from "../scripts/fs-tree.mjs";
 
 const FIXTURES = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
 const FIXTURE_PASSPHRASE = "fixture-only-passphrase";

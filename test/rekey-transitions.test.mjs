@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { DocumentVault } from "../dist/documents.js";
-import { removeTree } from "../dist/fs-tree.js";
+import { removeTree } from "../scripts/fs-tree.mjs";
 import { createRecoveryKit, generateRecoveryCode } from "../dist/keyring-recovery.js";
 import { forgetVaultKeys, openOrCreateVaultKeys, openVaultKeys, readKeyring, zeroKeySet } from "../dist/keyring.js";
 import {

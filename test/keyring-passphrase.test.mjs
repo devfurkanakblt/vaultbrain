@@ -10,7 +10,7 @@ import { inspect } from "node:util";
 
 import { appendAudit, verifyAudit } from "../dist/audit.js";
 import { DocumentVault } from "../dist/documents.js";
-import { removeTree } from "../dist/fs-tree.js";
+import { removeTree } from "../scripts/fs-tree.mjs";
 import {
   DEFAULT_SCRYPT_N,
   forgetVaultKeys,
