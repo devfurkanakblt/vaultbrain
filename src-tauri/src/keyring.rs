@@ -11,8 +11,8 @@
 //! job, and doing it here would silently orphan an audit chain.
 
 use aes_gcm::{
-    aead::{AeadInPlace, KeyInit},
-    Aes256Gcm, Nonce, Tag,
+    aead::{AeadInOut, KeyInit, Nonce, Tag},
+    Aes256Gcm,
 };
 use base64::{
     engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD as BASE64_URL},
@@ -373,15 +373,14 @@ fn unwrap_slot(slot: &KeyringSlot, passphrase: &str) -> Result<KeySet, String> {
             .decode(&slot.wrapped.ciphertext)
             .map_err(|_| "invalid base64 in vault keyring ciphertext")?,
     );
+    let nonce = <&Nonce<Aes256Gcm>>::try_from(iv.as_slice())
+        .map_err(|_| "vault keyring iv has an unsupported length".to_string())?;
+    let tag = <&Tag<Aes256Gcm>>::try_from(tag.as_slice())
+        .map_err(|_| "vault keyring authentication tag has an unsupported length".to_string())?;
     let cipher =
         Aes256Gcm::new_from_slice(derived.as_ref()).map_err(|_| "invalid AES key".to_string())?;
     cipher
-        .decrypt_in_place_detached(
-            Nonce::from_slice(&iv),
-            &aad,
-            &mut buffer,
-            Tag::from_slice(&tag),
-        )
+        .decrypt_inout_detached(nonce, &aad, buffer.as_mut_slice().into(), tag)
         .map_err(|_| "vault keyring slot did not authenticate".to_string())?;
     parse_key_set(&buffer)
 }
@@ -489,8 +488,10 @@ pub(crate) fn wrap_key_set_slot(
     let mut buffer = Zeroizing::new(plaintext.as_bytes().to_vec());
     let cipher =
         Aes256Gcm::new_from_slice(derived.as_ref()).map_err(|_| "invalid AES key".to_string())?;
+    let nonce = <&Nonce<Aes256Gcm>>::try_from(iv.as_slice())
+        .map_err(|_| "wrapping the vault keyset failed".to_string())?;
     let tag = cipher
-        .encrypt_in_place_detached(Nonce::from_slice(&iv), &aad, &mut buffer)
+        .encrypt_inout_detached(nonce, &aad, buffer.as_mut_slice().into())
         .map_err(|_| "wrapping the vault keyset failed".to_string())?;
     slot.wrapped.auth_tag = BASE64.encode(tag);
     slot.wrapped.ciphertext = BASE64.encode(&*buffer);
@@ -1256,8 +1257,9 @@ mod tests {
         let iv = decode_base64(&slot.wrapped.iv, 12, 12, "iv").unwrap();
         let mut buffer = Zeroizing::new(plaintext.as_bytes().to_vec());
         let cipher = Aes256Gcm::new_from_slice(derived.as_ref()).unwrap();
+        let nonce = <&Nonce<Aes256Gcm>>::try_from(iv.as_slice()).unwrap();
         let tag = cipher
-            .encrypt_in_place_detached(Nonce::from_slice(&iv), &aad, &mut buffer)
+            .encrypt_inout_detached(nonce, &aad, buffer.as_mut_slice().into())
             .unwrap();
         slot.wrapped.auth_tag = BASE64.encode(tag);
         slot.wrapped.ciphertext = BASE64.encode(&*buffer);

@@ -1,6 +1,6 @@
 use aes_gcm::{
-    aead::{AeadInPlace, KeyInit},
-    Aes256Gcm, Nonce, Tag,
+    aead::{AeadInOut, KeyInit, Nonce, Tag},
+    Aes256Gcm,
 };
 use base64::{
     engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD as BASE64_URL},
@@ -870,8 +870,7 @@ impl Drop for VaultWriteGuard {
 }
 
 fn verifier(key: &[u8]) -> Result<String, String> {
-    let mut mac =
-        <HmacSha256 as hmac::KeyInit>::new_from_slice(key).map_err(|_| "invalid HMAC key")?;
+    let mut mac = HmacSha256::new_from_slice(key).map_err(|_| "invalid HMAC key")?;
     mac.update(KEY_CHECK_CONTEXT.as_bytes());
     Ok(hex_lower(&mac.finalize().into_bytes()))
 }
@@ -907,9 +906,10 @@ fn encrypt(plaintext: &[u8], key: &[u8], aad: &str) -> Result<EncryptedPayload, 
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| "invalid AES key")?;
     let mut iv = [0u8; 12];
     OsRng.fill_bytes(&mut iv);
+    let nonce = <&Nonce<Aes256Gcm>>::try_from(iv.as_slice()).map_err(|_| "encryption failed")?;
     let mut ciphertext = plaintext.to_vec();
     let tag = cipher
-        .encrypt_in_place_detached(Nonce::from_slice(&iv), aad.as_bytes(), &mut ciphertext)
+        .encrypt_inout_detached(nonce, aad.as_bytes(), ciphertext.as_mut_slice().into())
         .map_err(|_| "encryption failed")?;
     Ok(EncryptedPayload {
         version: 1,
@@ -935,14 +935,13 @@ fn decrypt(payload: &EncryptedPayload, key: &[u8], aad: &str) -> Result<Vec<u8>,
     if iv.len() != 12 || tag.len() != 16 {
         return Err("invalid encrypted payload dimensions".into());
     }
+    let nonce = <&Nonce<Aes256Gcm>>::try_from(iv.as_slice())
+        .map_err(|_| "invalid encrypted payload dimensions")?;
+    let tag = <&Tag<Aes256Gcm>>::try_from(tag.as_slice())
+        .map_err(|_| "invalid encrypted payload dimensions")?;
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| "invalid AES key")?;
     cipher
-        .decrypt_in_place_detached(
-            Nonce::from_slice(&iv),
-            aad.as_bytes(),
-            &mut ciphertext,
-            Tag::from_slice(&tag),
-        )
+        .decrypt_inout_detached(nonce, aad.as_bytes(), ciphertext.as_mut_slice().into(), tag)
         .map_err(|_| "wrong passphrase or authenticated data was modified")?;
     Ok(ciphertext)
 }
@@ -5224,8 +5223,7 @@ fn attachment_chunk_aad(id: &str, index: usize) -> String {
 }
 
 fn attachment_id(key: &[u8], data: &[u8]) -> Result<String, String> {
-    let mut mac =
-        <HmacSha256 as hmac::KeyInit>::new_from_slice(key).map_err(|_| "invalid HMAC key")?;
+    let mut mac = HmacSha256::new_from_slice(key).map_err(|_| "invalid HMAC key")?;
     mac.update(b"secondbrain-vault:attachment-id:v1\0");
     mac.update(data);
     Ok(hex_lower(&mac.finalize().into_bytes()))
