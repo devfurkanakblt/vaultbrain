@@ -114,7 +114,7 @@ test("removeFile handed a directory throws rather than removing it", () => {
 // name, or reached through "node:fs/promises") are the defect this module
 // exists to route around. This scan fails on any host — including Linux CI,
 // which cannot reproduce the underlying Windows defect — if a source file
-// under src/, scripts/, or test/ still calls one of them, so a new call site
+// under src/, scripts/, test/, or desktop/ still calls one of them, so a new call site
 // cannot slip back in silently. src/fs-tree.ts and scripts/fs-tree.mjs get no
 // exemption: neither must use them, even to explain the defect each works
 // around, so their own comments avoid spelling the banned names. The single
@@ -127,8 +127,8 @@ test("removeFile handed a directory throws rather than removing it", () => {
 // it emits DEP0147, returns normally, and leaves the directory), and neither
 // a "node:fs/promises" import nor a named `{ rm }`/`{ cp }` import from "fs"
 // is caught by matching only qualified calls like "fs.rm(". findBannedCalls
-// below is exported for a probe test to pin against, and is the same
-// function the source scan runs.
+// below is pinned by a probe test in this file, and is the same function
+// the source scan runs.
 function findBannedCalls(text) {
   const offenses = [];
 
@@ -240,22 +240,35 @@ test("findBannedCalls matches every probe that names a banned removal, and none 
   }
 });
 
+// Third-party code is not ours to scan: a node_modules directory is skipped
+// wherever it appears. Build output needs no rule of its own — dist/ and
+// desktop-dist/ sit at the repository root, outside every scanned tree.
+const SKIPPED_DIRECTORY_NAMES = new Set(["node_modules"]);
+
 function listFilesWithExtensions(dir, extensions) {
   const out = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) out.push(...listFilesWithExtensions(full, extensions));
-    else if (entry.isFile() && extensions.some((extension) => entry.name.endsWith(extension))) out.push(full);
+    if (entry.isDirectory()) {
+      if (!SKIPPED_DIRECTORY_NAMES.has(entry.name)) out.push(...listFilesWithExtensions(full, extensions));
+    } else if (entry.isFile() && extensions.some((extension) => entry.name.endsWith(extension))) out.push(full);
   }
   return out;
 }
 
-test("no source file under src/, scripts/, or test/ calls Node's non-ASCII-unsafe recursive removal helpers", () => {
+test("no source file under src/, scripts/, test/, or desktop/ calls Node's non-ASCII-unsafe recursive removal helpers", () => {
   const repoRoot = path.join(import.meta.dirname, "..");
   const trees = [
     { dir: path.join(repoRoot, "src"), extensions: [".ts"] },
     { dir: path.join(repoRoot, "scripts"), extensions: [".mjs", ".cjs", ".js"] },
     { dir: path.join(repoRoot, "test"), extensions: [".mjs", ".cjs", ".js"] },
+    // desktop/src is mostly webview code with no Node runtime, but its Vitest
+    // files run under Node and desktop/vite.config.ts is loaded by Node, so a
+    // banned call there would really run.
+    {
+      dir: path.join(repoRoot, "desktop"),
+      extensions: [".ts", ".tsx", ".mts", ".cts", ".mjs", ".cjs", ".js", ".jsx"],
+    },
   ];
   // The one exemption in the whole scan: this file's own MUST_MATCH probes
   // above must spell the banned calls verbatim to exercise findBannedCalls.
@@ -263,7 +276,10 @@ test("no source file under src/, scripts/, or test/ calls Node's non-ASCII-unsaf
   const offenses = [];
 
   for (const { dir, extensions } of trees) {
-    for (const file of listFilesWithExtensions(dir, extensions)) {
+    const files = listFilesWithExtensions(dir, extensions);
+    // An emptied tree or renamed extensions must not pass as "no offenses".
+    assert.ok(files.length > 0, `the scan found no files under ${path.relative(repoRoot, dir)}`);
+    for (const file of files) {
       const relativePath = path.relative(repoRoot, file).split(path.sep).join("/");
       if (relativePath === exemptRelativePath) continue;
       const text = fs.readFileSync(file, "utf8");
