@@ -15,6 +15,7 @@ import {
   sealSyncChange,
 } from "../dist/sync.js";
 import { copyTree, removeTree } from "../scripts/fs-tree.mjs";
+import { assertOpaqueEncryptedFile } from "./opaque-envelope.mjs";
 
 const PASSPHRASE = "sync-test-passphrase";
 const DEVICE_A = "11111111-1111-4111-8111-111111111111";
@@ -433,7 +434,11 @@ test("synced document operations automatically emit note, canvas and attachment 
   assert.equal(vault.changeLog.applied("canvas", canvas.id).operation, "delete");
   assert.equal(vault.changeLog.applied("attachment", attachment.id).operation, "delete");
   const disk = fs.readFileSync(path.join(vaultDir, "documents", "sync", "applied.enc"), "utf8");
-  assert.doesNotMatch(disk, /Launch|brief|attachment/u);
+  assertOpaqueEncryptedFile(
+    disk,
+    ["Plans/Launch.md", "Boards/Launch.canvas", "brief.txt", "private attachment", JSON.stringify("attachment")],
+    "applied.enc",
+  );
 
   vault.lock();
   removeTree(vaultDir);

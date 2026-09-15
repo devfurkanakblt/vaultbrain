@@ -7,6 +7,7 @@ import test from "node:test";
 import { DocumentVault } from "../dist/documents.js";
 import { SyncedDocumentVault } from "../dist/sync.js";
 import { removeTree } from "../scripts/fs-tree.mjs";
+import { assertOpaqueEncryptedFile } from "./opaque-envelope.mjs";
 
 const PASSPHRASE = "sync-transaction-test-passphrase";
 const DEVICE_A = "11111111-1111-4111-8111-111111111111";
@@ -37,6 +38,32 @@ function snapshotTree(root) {
   visit(root);
   return [...entries].sort(([left], [right]) => left.localeCompare(right));
 }
+
+// Every distinctive plaintext the recovery scenarios write. Each contains a
+// space, dot, dash, colon or quote, none of which base64 ciphertext can hold.
+const SCENARIO_PLAINTEXTS = [
+  "new note secret",
+  "legacy note secret",
+  "updated note secret",
+  "New.md",
+  "Legacy.md",
+  "New.canvas",
+  "Legacy.canvas",
+  "new attachment secret",
+  "legacy attachment secret",
+  "new.txt",
+  "legacy.txt",
+  "transaction-plugin",
+  "Transaction plugin",
+  "Exercises recoverable plugin capture.",
+  "notes:metadata",
+  "api.notice('plugin secret');",
+  "api.notice('legacy plugin secret');",
+  "Batch/One.md",
+  "Batch/Two.md",
+  "batch one secret",
+  "batch two secret",
+];
 
 function pendingPath(vaultDir) {
   return path.join(vaultDir, "documents", "sync", "pending-local.enc");
@@ -429,10 +456,13 @@ for (const scenarioName of [
         faultInjector: faultAt(phase),
       });
       assert.throws(() => scenario.mutate(crashed), new RegExp(`Injected ${phase}`, "u"), phase);
-      const encryptedIntent = fs.existsSync(pendingPath(scenario.vaultDir))
-        ? fs.readFileSync(pendingPath(scenario.vaultDir), "utf8")
-        : "";
-      assert.doesNotMatch(encryptedIntent, /secret|Legacy|Batch/iu);
+      if (fs.existsSync(pendingPath(scenario.vaultDir))) {
+        assertOpaqueEncryptedFile(
+          fs.readFileSync(pendingPath(scenario.vaultDir), "utf8"),
+          SCENARIO_PLAINTEXTS,
+          `${scenarioName} ${phase} pending intent`,
+        );
+      }
       crashed.lock();
       crashed = undefined;
 
