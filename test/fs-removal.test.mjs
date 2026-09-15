@@ -114,7 +114,7 @@ test("removeFile handed a directory throws rather than removing it", () => {
 // name, or reached through "node:fs/promises") are the defect this module
 // exists to route around. This scan fails on any host — including Linux CI,
 // which cannot reproduce the underlying Windows defect — if a source file
-// under src/, scripts/, or test/ still calls one of them, so a new call site
+// under src/, scripts/, test/, or desktop/ still calls one of them, so a new call site
 // cannot slip back in silently. src/fs-tree.ts and scripts/fs-tree.mjs get no
 // exemption: neither must use them, even to explain the defect each works
 // around, so their own comments avoid spelling the banned names. The single
@@ -240,22 +240,35 @@ test("findBannedCalls matches every probe that names a banned removal, and none 
   }
 });
 
+// Third-party code is not ours to scan: a node_modules directory is skipped
+// wherever it appears. Build output needs no rule of its own — dist/ and
+// desktop-dist/ sit at the repository root, outside every scanned tree.
+const SKIPPED_DIRECTORY_NAMES = new Set(["node_modules"]);
+
 function listFilesWithExtensions(dir, extensions) {
   const out = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) out.push(...listFilesWithExtensions(full, extensions));
-    else if (entry.isFile() && extensions.some((extension) => entry.name.endsWith(extension))) out.push(full);
+    if (entry.isDirectory()) {
+      if (!SKIPPED_DIRECTORY_NAMES.has(entry.name)) out.push(...listFilesWithExtensions(full, extensions));
+    } else if (entry.isFile() && extensions.some((extension) => entry.name.endsWith(extension))) out.push(full);
   }
   return out;
 }
 
-test("no source file under src/, scripts/, or test/ calls Node's non-ASCII-unsafe recursive removal helpers", () => {
+test("no source file under src/, scripts/, test/, or desktop/ calls Node's non-ASCII-unsafe recursive removal helpers", () => {
   const repoRoot = path.join(import.meta.dirname, "..");
   const trees = [
     { dir: path.join(repoRoot, "src"), extensions: [".ts"] },
     { dir: path.join(repoRoot, "scripts"), extensions: [".mjs", ".cjs", ".js"] },
     { dir: path.join(repoRoot, "test"), extensions: [".mjs", ".cjs", ".js"] },
+    // desktop/src is mostly webview code with no Node runtime, but its Vitest
+    // files run under Node and desktop/vite.config.ts is loaded by Node, so a
+    // banned call there would really run.
+    {
+      dir: path.join(repoRoot, "desktop"),
+      extensions: [".ts", ".tsx", ".mts", ".cts", ".mjs", ".cjs", ".js", ".jsx"],
+    },
   ];
   // The one exemption in the whole scan: this file's own MUST_MATCH probes
   // above must spell the banned calls verbatim to exercise findBannedCalls.
