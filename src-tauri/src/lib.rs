@@ -895,7 +895,7 @@ fn derive_key(passphrase: &str, salt: &[u8], n: u32) -> Result<Zeroizing<[u8; 32
         65_536 => 16,
         _ => return Err("unsupported scrypt work factor".into()),
     };
-    let params = ScryptParams::new(log_n, 8, 1, 32).map_err(|error| error.to_string())?;
+    let params = ScryptParams::new(log_n, 8, 1).map_err(|error| error.to_string())?;
     let mut key = Zeroizing::new([0u8; 32]);
     scrypt(passphrase.as_bytes(), salt, &params, key.as_mut())
         .map_err(|error| format!("key derivation failed: {error}"))?;
