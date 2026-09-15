@@ -224,3 +224,59 @@ on the first try.
 
 The head commit's CI run for this evidence-doc update will be recorded in
 the PR.
+
+## Follow-up: `scrypt` 0.12, `rand` trim, `verifier`/`attachment_id` vector
+
+Branch `chore/phase-16-5-scrypt-and-rust-followups`, on `main` after #57. It
+supersedes Dependabot #60 (`scrypt` 0.11.0 -> 0.12.0), whose `rust` jobs failed
+because `Params::new` lost its output-length argument. The same constraints
+apply: no fixture under `test/fixtures/` changes (one new file is added),
+`Cargo.lock` changes only through cargo, and compile, clippy and Rust tests
+are judged by CI.
+
+### `scrypt` 0.11.0 -> 0.12.0
+
+- `Params::new(log_n, r, p, len)` became `Params::new(log_n, r, p)` at the two
+  call sites (`derive_slot_key` in `keyring.rs`, `derive_key` in `lib.rs`). The
+  derived length was always the length of the output buffer handed to
+  `scrypt()`, a 32-byte array at both sites; 0.11 only range-checked `len`
+  (10..=64) and stored it for the PHC hasher. `scrypt()` itself has the same
+  signature and output-length check in both versions.
+- Validation only loosened: 0.12 drops the `log_n < 16 * r` rule. The call
+  sites still enforce their own bounds (`validate_kdf` in `keyring.rs`, the
+  N = 32768/65536 match in `lib.rs`).
+- The algorithm is unchanged: PBKDF2-HMAC-SHA-256 in, ROMix, PBKDF2 out.
+  0.12 moves BlockMix into SSE2/SIMD128/soft backends behind a
+  `shuffle_in`/`shuffle_out` word reordering, and its own test checks each
+  backend against the soft one. The bytes are proven by
+  `keyring::tests::the_cross_core_vector_unwraps_to_its_recorded_keyset`
+  (N = 2^14) and the new document key vector below (N = 32768, the
+  `lib.rs` path).
+- 0.12 has no default features (0.11 defaulted to `simple` + `std`), so
+  `password-hash`, `base64ct`, `pbkdf2 0.12`, `hmac 0.12`, `salsa20 0.10`,
+  `cipher 0.4`, `inout 0.1` and `rand_core 0.6` leave the lockfile; `scrypt`
+  now reaches `pbkdf2 0.13`/`salsa20 0.11`. The lockfile equals the one on
+  Dependabot's `dependabot/cargo/src-tauri/scrypt-0.12.0` branch.
+
+### `rand` default features
+
+`rand = { version = "0.10.2", default-features = false, features = ["sys_rng"] }`.
+Every use is `UnwrapErr(SysRng).fill_bytes`; `SysRng` needs `sys_rng`, and
+`rand_core`, `UnwrapErr` and `Rng` are re-exported unconditionally. `chacha20`
+leaves the lockfile. The OS source and the panic-on-failure behavior recorded
+in Task 3 are unchanged.
+
+### `verifier` and `attachment_id` known answers
+
+`test/fixtures/document-key-vector.json` (written by
+`scripts/make-document-key-vector.mjs`) pins the legacy manifest scrypt key
+for a fixed passphrase and salt at N = 32768, its `verifier`, and the
+attachment IDs of three inputs (text, a single NUL byte, all 256 byte values).
+`tests::the_document_key_vector_matches_the_typescript_core` checks
+`derive_key`, `verifier` and `attachment_id` in the Rust core;
+`test/document-key-vector.test.mjs` unlocks a legacy vault built from the
+vector with `DocumentVault` and attaches the same inputs, so the TypeScript
+values come from production code, and a flipped verifier must fail to
+unlock. This closes the gap noted under "HMAC and the `KeyInit` change".
+
+CI results for this branch are recorded in its PR.

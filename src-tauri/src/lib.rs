@@ -895,7 +895,7 @@ fn derive_key(passphrase: &str, salt: &[u8], n: u32) -> Result<Zeroizing<[u8; 32
         65_536 => 16,
         _ => return Err("unsupported scrypt work factor".into()),
     };
-    let params = ScryptParams::new(log_n, 8, 1, 32).map_err(|error| error.to_string())?;
+    let params = ScryptParams::new(log_n, 8, 1).map_err(|error| error.to_string())?;
     let mut key = Zeroizing::new([0u8; 32]);
     scrypt(passphrase.as_bytes(), salt, &params, key.as_mut())
         .map_err(|error| format!("key derivation failed: {error}"))?;
@@ -6306,6 +6306,37 @@ mod tests {
         let state: WorkspaceState = serde_json::from_slice(&plain).unwrap();
         assert_eq!(serde_json::to_value(state).unwrap(), vector["value"]);
         assert!(decrypt(&payload, &key, SAVED_VIEWS_AAD).is_err());
+    }
+
+    /// Known answers for the legacy manifest key derivation, `verifier` and
+    /// `attachment_id`. The TypeScript half is `test/document-key-vector.test.mjs`,
+    /// which reaches the same values through `DocumentVault`.
+    #[test]
+    fn the_document_key_vector_matches_the_typescript_core() {
+        let vector: Value =
+            serde_json::from_str(include_str!("../../test/fixtures/document-key-vector.json"))
+                .unwrap();
+        let salt = BASE64
+            .decode(vector["kdf"]["salt"].as_str().unwrap())
+            .unwrap();
+        let n = u32::try_from(vector["kdf"]["N"].as_u64().unwrap()).unwrap();
+        let key = derive_key(vector["passphrase"].as_str().unwrap(), &salt, n).unwrap();
+        assert_eq!(BASE64.encode(key.as_ref()), vector["key"].as_str().unwrap());
+        assert_eq!(
+            verifier(key.as_ref()).unwrap(),
+            vector["verifier"].as_str().unwrap()
+        );
+
+        let attachments = vector["attachments"].as_array().unwrap();
+        assert_eq!(attachments.len(), 3);
+        for (index, attachment) in attachments.iter().enumerate() {
+            let data = BASE64.decode(attachment["data"].as_str().unwrap()).unwrap();
+            assert_eq!(
+                attachment_id(key.as_ref(), &data).unwrap(),
+                attachment["id"].as_str().unwrap(),
+                "attachment {index}"
+            );
+        }
     }
 
     fn temporary_vault(label: &str) -> PathBuf {

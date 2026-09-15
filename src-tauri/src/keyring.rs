@@ -295,8 +295,7 @@ fn slot_aad(slot: &KeyringSlot) -> Result<Vec<u8>, String> {
 fn derive_slot_key(passphrase: &str, kdf: &SlotKdf) -> Result<Zeroizing<[u8; KEY_LENGTH]>, String> {
     let log_n = validate_kdf(kdf)?;
     let salt = decode_base64(&kdf.salt, 16, 64, "salt")?;
-    let params =
-        ScryptParams::new(log_n, kdf.r, kdf.p, KEY_LENGTH).map_err(|error| error.to_string())?;
+    let params = ScryptParams::new(log_n, kdf.r, kdf.p).map_err(|error| error.to_string())?;
     let mut key = Zeroizing::new([0u8; KEY_LENGTH]);
     scrypt(passphrase.as_bytes(), &salt, &params, key.as_mut())
         .map_err(|error| format!("key derivation failed: {error}"))?;

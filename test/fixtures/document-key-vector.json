@@ -1,0 +1,27 @@
+{
+  "note": "Deterministic cross-core document key vector: the legacy manifest scrypt key, its verifier, and attachment IDs under that key. Dummy key material; never a real vault.",
+  "passphrase": "vector-only-passphrase",
+  "kdf": {
+    "name": "scrypt",
+    "N": 32768,
+    "r": 8,
+    "p": 1,
+    "salt": "MzMzMzMzMzMzMzMzMzMzMw=="
+  },
+  "key": "nBjIrXkyiT8rHqRjigmxn3GNEw8PWetsFbMFEPGziFM=",
+  "verifier": "94bf717ec55cb9439755e8954ecf068e22cfe2f3b9f1221f2de4a640c5c77802",
+  "attachments": [
+    {
+      "data": "dmVjdG9yLW9ubHkgYXR0YWNobWVudAo=",
+      "id": "d08c68527e92ea91923f5e3f1ac35511f7c8f87a414c232fa4ee7bd27c2de101"
+    },
+    {
+      "data": "AA==",
+      "id": "c81c958a01e5d15ccce76963f744c2eb7edd425a016cbe8f7e6a17bf710558ac"
+    },
+    {
+      "data": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0BBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWltcXV5fYGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn+AgYKDhIWGh4iJiouMjY6PkJGSk5SVlpeYmZqbnJ2en6ChoqOkpaanqKmqq6ytrq+wsbKztLW2t7i5uru8vb6/wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nna29zd3t/g4eLj5OXm5+jp6uvs7e7v8PHy8/T19vf4+fr7/P3+/w==",
+      "id": "23c3ea15375d8e9228c4709a5a65b1bb2779af16921f3a77df64317837a7b731"
+    }
+  ]
+}
