@@ -78,4 +78,122 @@ upgrade, one commit per crate family.
 
 ## Evidence
 
-_To be filled by Task 4._
+Base: `4b8c6ed` (Dependabot #10, `ed25519-dalek` 2.2.0 -> 3.0.0), plan commit
+`9b69b74`. All three commits below are on branch
+`chore/phase-16-5-crypto-majors`, PR #57. Every run listed is `success` with
+all 11 jobs green (also typescript, codeql, secret-scan, node-platform on
+macOS/Windows, native-keychain on all three OSes). Clippy ran as
+`cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D
+warnings` on every `rust` job and produced no `warning:` or `error[` lines in
+any of the nine job logs checked. `git diff origin/main <commit> --
+test/fixtures` is empty for every commit (checked against `origin/main` at
+`8fe108d`; the worktree's own `git status` shows long-path `test/fixtures`
+files as changed only because of a Windows checkout limitation, not a real
+diff).
+
+Dependabot PRs: this branch supersedes #5 (`aes-gcm`), #7 (`rand`), #9
+(`sha2`) and #11 (`hmac`); it is based on #10 (`ed25519-dalek` 3), which must
+merge first.
+
+### Task 1: `sha2` 0.11 and `hmac` 0.13
+
+- Commit `296cf5a`.
+- CI run [34969211274](https://github.com/devfurkanakblt/vaultbrain/actions/runs/34969211274).
+- `rust (ubuntu-latest, linux)`: success, 94 tests passed.
+- `rust (macos-15, macos)`: success, 94 tests passed.
+- `rust (windows-latest, windows)`: success, 95 tests passed.
+- The five cross-core vector tests are `ok` on Linux:
+  `audit::tests::audit_entry_hashes_match_the_committed_cross_core_vector`,
+  `audit::tests::the_audit_head_mac_matches_the_committed_cross_core_vector`,
+  `keyring::tests::the_cross_core_vector_unwraps_to_its_recorded_keyset`,
+  `keyring::tests::the_legacy_vector_round_trips_through_this_core_byte_for_byte`,
+  `tests::shared_portable_workspace_vector_opens_in_native_core`.
+- `cargo tree -i digest@0.11.3` in `src-tauri`: only `hmac 0.13.0`, `sha2
+0.11.0` and `ed25519-dalek 3.0.0` (via `curve25519-dalek 5.0.0`) resolve to
+  `digest` 0.11. `digest 0.10.7` is still present, pulled by `scrypt 0.11.0`
+  (through `hmac 0.12.1`/`pbkdf2 0.12.2`/`sha2 0.10.9`) and by
+  `tauri-codegen 2.6.3`; neither is used directly by VaultBrain code, and
+  neither is in scope for this branch. The plan's original expectation that
+  `digest` 0.11 would be the only version, and its guess that `aes-gcm` 0.10
+  pulled in `digest` 0.10, were both wrong: `aes-gcm` 0.10 never depended on
+  `digest`.
+
+### Task 2: `aes-gcm` 0.11
+
+- Commit `2895ed6`.
+- CI run [34984266648](https://github.com/devfurkanakblt/vaultbrain/actions/runs/34984266648).
+- `rust (ubuntu-latest, linux)`: success, 94 tests passed.
+- `rust (macos-15, macos)`: success, 94 tests passed.
+- `rust (windows-latest, windows)`: success, 95 tests passed.
+- The same five cross-core vector tests are `ok` on Linux.
+- The `Nonce`/`Tag` `from_slice` -> `TryFrom` change has no observable effect:
+  at every call site the old panic was unreachable (a prior length check, or a
+  fixed-size local array), and a bad-length input still produces the same
+  existing error string as before. `aes-gcm` 0.11's size limits changed
+  (decrypt buffer max `P_MAX = 2^36-32` vs. the old `C_MAX = 2^36+16`, AAD max
+  `2^61-1` vs. the old `2^36`); only buffers of roughly 64 GiB or more are
+  affected, well outside anything VaultBrain handles. `aes-gcm`'s default
+  `getrandom` feature adds `getrandom`/`rand_core 0.10` lockfile edges, which
+  are harmless and later folded into Task 3's `rand` bump.
+- `cargo tree -i aes-gcm` after this commit shows `aes-gcm 0.11.1` as a direct
+  dependency only; `digest 0.10.7` no longer has an `aes-gcm`-related path
+  (confirmed by the Task 1 record above, which already excluded `aes-gcm`).
+
+### Task 3: `rand` 0.10
+
+- Commit `4901e00`.
+- CI run [34986728228](https://github.com/devfurkanakblt/vaultbrain/actions/runs/34986728228).
+- `rust (ubuntu-latest, linux)`: success, 94 tests passed.
+- `rust (macos-15, macos)`: success, 94 tests passed.
+- `rust (windows-latest, windows)`: success, 95 tests passed.
+- The same five cross-core vector tests are `ok` on Linux.
+- `UnwrapErr(SysRng).fill_bytes` replaces `OsRng.fill_bytes` at the seven call
+  sites (four in `keyring.rs`, two in `lib.rs`, one Windows-only in
+  `memory.rs`). `SysRng` is `getrandom` 0.4's direct OS source: the Linux
+  `getrandom` syscall falling back to `/dev/urandom` only on `ENOSYS`/`EPERM`,
+  `getentropy` on macOS, and `ProcessPrng` on Windows — the same Windows
+  system CSPRNG the prior `getrandom` 0.2.17 reached via `BCryptGenRandom`.
+  Failure still panics; only the message text changed, from `Error: ...` to
+  `rand_core::UnwrapErr: failed to unwrap: ...`. `rand`'s default features
+  (`std_rng`, `thread_rng`) pull in `chacha20` even though VaultBrain does not
+  use it; this is recorded here as a possible later trim, not done in this
+  branch.
+- `cargo tree -d` after this commit: the crypto-relevant duplicates left are
+  `sha2 0.10.9`/`digest 0.10.7`/`hmac 0.12.1`/`block-buffer 0.10.4`/
+  `crypto-common 0.1.7` (all via `scrypt 0.11.0` and `tauri-codegen 2.6.3`),
+  `cipher 0.4.4`/`inout 0.1.4` (via `scrypt -> salsa20 0.10.2`), `rand_core
+0.6.4` (via `scrypt -> password-hash 0.5.0`), and `getrandom 0.2.17`/`0.3.4`
+  (via `password-hash` and `tauri` respectively). `rand 0.8.8`, `rand_chacha
+0.3.1`, `ppv-lite86` and `zerocopy` are gone from the lockfile.
+
+### Remaining `digest`/`sha2`/`hmac` 0.10-line crates
+
+After all three tasks, `digest 0.10.7`, `sha2 0.10.9` and `hmac 0.12.1` remain
+in the lockfile, reached through `scrypt 0.11.0` (via `pbkdf2`/
+`password-hash`), `tauri-codegen 2.6.3`, and `wry 0.55.1` (an Android-only
+target dependency of `tauri-runtime-wry`, so a host `cargo tree` run on
+Linux/macOS/Windows does not show it). None of these three crates is used
+directly by VaultBrain code; the direct dependency versions are `digest`
+0.11, `sha2` 0.11 and `hmac` 0.13 throughout.
+
+### HMAC and the `KeyInit` change
+
+HMAC key initialization after the upgrade goes through `hmac` 0.13's RFC 2104
+any-length `HmacCore::new_from_slice`. The plugin `key_id` hex output stays
+byte-identical, pinned by the existing test
+`a_typescript_signed_package_verifies_in_the_rust_core`. There is no
+known-answer test pinning `verifier` (`lib.rs` around line 872) or
+`attachment_id` (`lib.rs` around line 5226) directly, but HMAC itself is
+covered by the audit cross-core vectors above.
+
+### `cargo fmt`/`prettier`
+
+`cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` passed locally
+before each of the three commits (recorded in each task report). This
+worktree has no `node_modules`, so
+`npx prettier --check docs/superpowers/plans/2026-09-15-phase-16-5-crypto-majors.md`
+was run from the main checkout
+(`C:\Users\bekircan\OneDrive\Masaüstü\yazilim\vaultbrain`) against this file
+after the Evidence section was written: it reported only CRLF-vs-LF line
+ending differences, a known limitation of this Windows host, and no other
+formatting issues.
