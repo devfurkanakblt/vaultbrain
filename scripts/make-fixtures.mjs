@@ -28,6 +28,7 @@ import {
   parseAttachmentSnapshot,
   sealSyncChange,
 } from "../dist/sync.js";
+import { copyTree, removeFile, removeTree } from "./fs-tree.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixtures = path.resolve(here, "..", "test", "fixtures");
@@ -35,7 +36,7 @@ export const FIXTURE_PASSPHRASE = "fixture-only-passphrase";
 
 function writeCanvasFixture() {
   const canvasDir = path.join(fixtures, "documents-canvas-v1");
-  fs.rmSync(canvasDir, { recursive: true, force: true });
+  removeTree(canvasDir);
   fs.mkdirSync(canvasDir, { recursive: true });
   const canvasVault = new DocumentVault(canvasDir, FIXTURE_PASSPHRASE);
   const note = canvasVault.put({
@@ -70,7 +71,7 @@ function writeCanvasFixture() {
     ],
     edges: [{ id: "edge", fromNode: "contract", toNode: "text", toEnd: "arrow" }],
   });
-  fs.rmSync(path.join(canvasDir, ".sbrain.lock"), { force: true });
+  removeFile(path.join(canvasDir, ".sbrain.lock"));
 }
 
 /**
@@ -81,7 +82,7 @@ function writeCanvasFixture() {
  */
 function writeSyncEpochFixture() {
   const dir = path.join(fixtures, "sync-epoch-v2");
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
   fs.mkdirSync(dir, { recursive: true });
 
   const ownerId = "11111111-1111-4111-8111-111111111111";
@@ -105,11 +106,11 @@ function writeSyncEpochFixture() {
   // copy of the owner's freshly initialized vault, in a temporary directory,
   // with the owner's private keys stripped -- it never gets committed.
   const peerDir = fs.mkdtempSync(path.join(os.tmpdir(), "secondbrain-fixture-peer-"));
-  fs.rmSync(peerDir, { recursive: true, force: true });
-  fs.cpSync(dir, peerDir, { recursive: true });
-  fs.rmSync(path.join(peerDir, "documents", "sync", "identity", "authority.key.enc"));
-  fs.rmSync(path.join(peerDir, "documents", "sync", "identity", `${ownerId}.key.enc`));
-  fs.rmSync(path.join(peerDir, "documents", "sync", "identity", `${ownerId}.x25519.key.enc`));
+  removeTree(peerDir);
+  copyTree(dir, peerDir);
+  fs.unlinkSync(path.join(peerDir, "documents", "sync", "identity", "authority.key.enc"));
+  fs.unlinkSync(path.join(peerDir, "documents", "sync", "identity", `${ownerId}.key.enc`));
+  fs.unlinkSync(path.join(peerDir, "documents", "sync", "identity", `${ownerId}.x25519.key.enc`));
 
   const log = new SyncChangeLog(dir, FIXTURE_PASSPHRASE);
   const peer = new SyncDeviceManager(peerDir, FIXTURE_PASSPHRASE);
@@ -132,7 +133,7 @@ function writeSyncEpochFixture() {
     log.close();
     manager.close();
     peer.close();
-    fs.rmSync(peerDir, { recursive: true, force: true });
+    removeTree(peerDir);
   }
 }
 
@@ -155,7 +156,7 @@ function writeSyncEpochFixture() {
  */
 function writeAttachmentBlobFixture() {
   const dir = path.join(fixtures, "sync-attachment-blobs-v3");
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
   const sourceDir = path.join(dir, "source");
   const targetDir = path.join(dir, "target");
   fs.mkdirSync(sourceDir, { recursive: true });
@@ -174,10 +175,10 @@ function writeAttachmentBlobFixture() {
     properties: { status: "frozen" },
   });
   vault.lock();
-  fs.rmSync(path.join(sourceDir, ".sbrain.lock"), { force: true });
+  removeFile(path.join(sourceDir, ".sbrain.lock"));
 
   // The receiving device: the same vault, before the attachment exists.
-  fs.cpSync(sourceDir, targetDir, { recursive: true });
+  copyTree(sourceDir, targetDir);
 
   // 1.5 MiB of deterministic bytes -> exactly two 1 MiB chunks, so the
   // recorded SHA-256 is stable across regenerations even though every sealed
@@ -191,7 +192,7 @@ function writeAttachmentBlobFixture() {
   vault = new SyncedDocumentVault(sourceDir, FIXTURE_PASSPHRASE, ownerId);
   const info = vault.putAttachment(data, "frozen-blob.bin", "application/octet-stream");
   vault.lock();
-  fs.rmSync(path.join(sourceDir, ".sbrain.lock"), { force: true });
+  removeFile(path.join(sourceDir, ".sbrain.lock"));
 
   // Normalize the attachment change body to version 3 and re-seal. Nothing references its
   // ID -- it is the newest change on the device chain -- so replacing the file
@@ -215,7 +216,7 @@ function writeAttachmentBlobFixture() {
     session.syncEnvelopeKey.fill(0);
   }
   const changesDir = path.join(sourceDir, "documents", "sync", "changes");
-  fs.rmSync(path.join(changesDir, `${previousId}.change.enc`));
+  fs.unlinkSync(path.join(changesDir, `${previousId}.change.enc`));
   fs.writeFileSync(path.join(changesDir, `${envelope.id}.change.enc`), JSON.stringify(envelope), { mode: 0o600 });
 
   // Read the fixture back through the ordinary reader, so a broken generator
@@ -247,8 +248,8 @@ function writeAttachmentBlobFixture() {
       2,
     )}\n`,
   );
-  fs.rmSync(path.join(sourceDir, ".sbrain.lock"), { force: true });
-  fs.rmSync(path.join(targetDir, ".sbrain.lock"), { force: true });
+  removeFile(path.join(sourceDir, ".sbrain.lock"));
+  removeFile(path.join(targetDir, ".sbrain.lock"));
 }
 
 if (process.argv.includes("--blobs-only")) {
@@ -285,7 +286,7 @@ function encryptLegacy(plaintext, passphrase) {
 }
 
 const legacyDir = path.join(fixtures, "kv-envelope-v0");
-fs.rmSync(legacyDir, { recursive: true, force: true });
+removeTree(legacyDir);
 fs.mkdirSync(legacyDir, { recursive: true });
 const legacyPlaintext = [
   "# @desc: Dummy blood type for format tests",
@@ -302,7 +303,7 @@ fs.writeFileSync(
 );
 
 const documentDir = path.join(fixtures, "documents-v1");
-fs.rmSync(documentDir, { recursive: true, force: true });
+removeTree(documentDir);
 fs.mkdirSync(documentDir, { recursive: true });
 const vault = new DocumentVault(documentDir, FIXTURE_PASSPHRASE);
 vault.putMany([
@@ -328,7 +329,7 @@ vault.putMany([
  * fixture is the gate that catches either one drifting.
  */
 const attachmentDir = path.join(fixtures, "documents-attachments-v1");
-fs.rmSync(attachmentDir, { recursive: true, force: true });
+removeTree(attachmentDir);
 fs.mkdirSync(attachmentDir, { recursive: true });
 const attachmentVault = new DocumentVault(attachmentDir, FIXTURE_PASSPHRASE);
 attachmentVault.putMany([
@@ -349,7 +350,7 @@ attachmentVault.putAttachment(
   "frozen-payload.bin",
   "application/octet-stream",
 );
-fs.rmSync(path.join(attachmentDir, ".sbrain.lock"), { force: true });
+removeFile(path.join(attachmentDir, ".sbrain.lock"));
 
 writeCanvasFixture();
 writeSyncEpochFixture();
@@ -357,7 +358,7 @@ writeAttachmentBlobFixture();
 
 function writeKeyringFixture() {
   const dir = path.join(fixtures, "keyring-v2");
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
   fs.mkdirSync(dir, { recursive: true });
 
   const vault = new DocumentVault(dir, FIXTURE_PASSPHRASE);
@@ -374,7 +375,7 @@ function writeKeyringFixture() {
   appendAudit(dir, { actor: "cli-direct-write", file: "health", key: "BLOOD_TYPE" }, FIXTURE_PASSPHRASE);
 
   migrateToKeyring(dir, FIXTURE_PASSPHRASE);
-  fs.rmSync(path.join(dir, ".sbrain.lock"), { force: true });
+  removeFile(path.join(dir, ".sbrain.lock"));
 }
 writeKeyringFixture();
 
