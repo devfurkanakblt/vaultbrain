@@ -399,6 +399,16 @@ with Phases 12 and 14.
       A third follow-up found no banned call under `desktop/` and extended the
       scan to cover `desktop/`; see
       [`docs/superpowers/plans/2026-09-15-phase-16-6-non-ascii-desktop.md`](superpowers/plans/2026-09-15-phase-16-6-non-ascii-desktop.md).
+      A fourth follow-up proved the Rust core's removals work under a non-ASCII
+      path on the Windows runner, made a failed removal of the memory pairing
+      secret fail `disconnect` instead of reporting success, and stopped the
+      lock-transition reclaim from spinning forever on an unremovable stale file;
+      see
+      [`docs/superpowers/plans/2026-09-15-phase-16-6-rust-non-ascii-removal.md`](superpowers/plans/2026-09-15-phase-16-6-rust-non-ascii-removal.md).
+      A fifth follow-up replaced Vite's `emptyOutDir`, which left stale files in
+      `desktop-dist/` under a non-ASCII path, with the verified `clean-dist`
+      script; see
+      [`docs/superpowers/plans/2026-09-15-phase-16-6-desktop-dist-clean.md`](superpowers/plans/2026-09-15-phase-16-6-desktop-dist-clean.md).
 
 ## Which open phases still need code
 
