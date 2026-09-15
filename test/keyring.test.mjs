@@ -181,7 +181,7 @@ test("forgetVaultKeys drops the cached keyset", () => {
   seedKeyring(vault, PASSPHRASE);
   assert.ok(openVaultKeys(vault, PASSPHRASE));
 
-  fs.rmSync(path.join(vault, "keyring.json"));
+  fs.unlinkSync(path.join(vault, "keyring.json"));
   forgetVaultKeys(vault);
   assert.equal(openVaultKeys(vault, PASSPHRASE), null);
 });
@@ -298,7 +298,7 @@ test("a keyed grant file throws a clear error when the keyring is missing", () =
   );
 
   // Delete the keyring and forget the cached keys.
-  fs.rmSync(path.join(vault, "keyring.json"));
+  fs.unlinkSync(path.join(vault, "keyring.json"));
   forgetVaultKeys(vault);
 
   // Loading the keyed grant file without a keyring must throw with a clear message.
@@ -314,7 +314,7 @@ test("a keyed key-value file throws a clear error when the keyring is missing", 
   assert.equal(vaultFileEnvelopeVersion(vault, "health"), 2);
 
   // Delete the keyring and forget the cached keys.
-  fs.rmSync(path.join(vault, "keyring.json"));
+  fs.unlinkSync(path.join(vault, "keyring.json"));
   forgetVaultKeys(vault);
 
   // Loading the keyed key-value file without a keyring must throw with a clear message.
@@ -468,7 +468,7 @@ test("DocumentVault.lock() drops the module-level keyset cache, not just its own
   // The observable proxy for "the cache no longer holds this vault's keys":
   // delete keyring.json, then openVaultKeys must re-read the file (and so
   // return null) instead of serving a cached keyset.
-  fs.rmSync(path.join(vault, "keyring.json"));
+  fs.unlinkSync(path.join(vault, "keyring.json"));
   assert.equal(openVaultKeys(vault, PASSPHRASE), null);
 });
 
