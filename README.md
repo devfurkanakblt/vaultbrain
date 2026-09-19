@@ -460,6 +460,11 @@ desktop application prunes to the same bound the command line set.
 > 100k gates pass" as a statement about unlock, search, note open and
 > backlinks — not about save latency. The cause and the plan are Phase 17 in
 > [`docs/ROADMAP.md`](docs/ROADMAP.md).
+>
+> Those figures are the TypeScript library — the CLI and MCP path. The
+> desktop saves through the Rust core, whose `save_index` rewrites the whole
+> index the same way, and **that path is not measured yet.** Measuring it is
+> the first item of Phase 17.
 
 ```bash
 npm run benchmark          # 1,000 notes  — the everyday regression gate

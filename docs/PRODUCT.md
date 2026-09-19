@@ -111,6 +111,17 @@ the implementation is what has to change. See Phase 17 in
 [`ROADMAP.md`](ROADMAP.md) and finding 11 of
 [`CLI-AUDIT-2026-09-19.md`](CLI-AUDIT-2026-09-19.md).
 
+**What those figures do and do not cover.** They are the TypeScript library in
+`src/documents.ts`, which is what the CLI and the MCP server use. Every other
+budget in this table is a desktop interaction, and the desktop's note lifecycle
+runs in the Rust core: `save_note` reaches `save_index` in
+`src-tauri/src/lib.rs`, which rewrites the whole index exactly as the
+TypeScript path does. **The desktop save path has the same defect and is not
+measured yet** — there is no Rust-side benchmark. Establishing that
+measurement is the first item of Phase 17, ahead of any change to either
+implementation, because designing against an unmeasured target is the mistake
+finding 11 exists to record.
+
 Acknowledging a save before its data is durable is explicitly not an acceptable
 way to meet this number.
 
