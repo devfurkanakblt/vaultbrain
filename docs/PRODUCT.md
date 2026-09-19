@@ -96,11 +96,19 @@ regresses, at the 1k, 10k and 100k tiers.
 
 **Incremental save acknowledgement is not met.** A single-note save
 re-serializes and re-encrypts the entire index, so the cost scales with the
-vault rather than with the edit: 14.1 ms p95 at 200 notes, 27.1 ms at 1,000,
-843.9 ms at 4,000 (Windows, Node 22.20.0). I/O is not the bottleneck — an
-atomic write plus fsync of the same index blob is 2.4 ms at 659 KiB and 6.2 ms
-at 2.6 MiB. The budget stays as written; the implementation is what has to
-change. See Phase 17 in [`ROADMAP.md`](ROADMAP.md) and finding 11 of
+vault rather than with the edit. Measured by the `performance-budgets` CI job:
+
+| Vault        | save p50 | save p95 | Budget  |
+| ------------ | -------: | -------: | ------- |
+| 1,000 notes  |  14.2 ms |  16.6 ms | met     |
+| 10,000 notes | 105.8 ms | 141.7 ms | missed  |
+
+The budget is specified at 100,000 notes, where the encrypted index is roughly
+120 MiB; growth is linear in index size, so the miss widens well past 10,000.
+I/O is not the dominant cost — an atomic write plus fsync of the same index
+blob is 2.5 ms at 1.2 MiB and 7.2 ms at 4.9 MiB. The budget stays as written;
+the implementation is what has to change. See Phase 17 in
+[`ROADMAP.md`](ROADMAP.md) and finding 11 of
 [`CLI-AUDIT-2026-09-19.md`](CLI-AUDIT-2026-09-19.md).
 
 Acknowledging a save before its data is durable is explicitly not an acceptable

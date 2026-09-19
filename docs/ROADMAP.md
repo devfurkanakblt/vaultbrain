@@ -417,12 +417,41 @@ Found by adding the measurement the 2026-09-19 CLI review asked for
 "incremental save acknowledgement < 20 ms" budget in [`PRODUCT.md`](PRODUCT.md)
 is missed, and the cost grows with the vault rather than with the edit.
 
-Measured on Windows / Node 22.20.0: 200 notes 14.1 ms p95, 1,000 notes 27.1 ms
-p95, 4,000 notes 843.9 ms p95. I/O is not the bottleneck — an atomic write plus
-fsync of the same index blob is 2.4 ms at 659 KiB and 6.2 ms at 2.6 MiB. The
-cost is `saveIndex` in `src/documents.ts` re-serializing and re-encrypting the
-whole index on every save. While that holds, no small optimisation reaches
-< 20 ms at 100,000 notes; the write architecture is what has to change.
+Measured by the `performance-budgets` CI job: 1,000 notes 14.2 ms p50 /
+16.6 ms p95 (met); 10,000 notes 105.8 ms p50 / 141.7 ms p95 (missed by about
+seven times). The budget is specified at 100,000 notes, where the encrypted
+index is roughly 120 MiB.
+
+### Where the time goes
+
+Profiled on Windows / Node 22.20.0, p50 per save, with the corpus the
+benchmark builds:
+
+| Notes  | save | rewrite | other | index size |
+| -----: | ---: | ------: | ----: | ---------: |
+|  1,000 |  19.0 ms |   6.2 ms | 12.7 ms |  1.2 MiB |
+|  2,000 |  27.9 ms |  12.1 ms | 15.8 ms |  2.4 MiB |
+|  4,000 |  45.0 ms |  23.8 ms | 21.2 ms |  4.9 MiB |
+|  8,000 | 120.4 ms |  62.2 ms | 58.3 ms |  9.8 MiB |
+| 16,000 | 142.7 ms | 113.1 ms | 29.6 ms | 19.8 MiB |
+
+`rewrite` is `JSON.stringify` + `encryptDocument` + atomic write and fsync of
+the whole index — what this phase removes from the save path. It grows linearly
+with index size and is 33% of the save at 1,000 notes, 79% at 16,000.
+
+`other` is everything else a save does: the journal, the link and backlink
+maps, resolved-source refresh, canvas reference refresh. This phase does **not**
+address it, and at small vaults it is the larger half. Two consequences worth
+holding on to before the design is written:
+
+- Removing the rewrite alone does not obviously reach < 20 ms at 100,000 notes.
+  It is necessary, and it may not be sufficient.
+- `other` needs its own measurement at 100k before Phase 17 is declared done;
+  it may turn out to hold a term that scales too.
+
+The index is roughly 1.2 MiB per 1,000 notes, so the rewrite at 100,000 notes
+is a ~120 MiB serialise-and-encrypt on every keystroke-batch save. That is the
+part no small optimisation rescues.
 
 ### Now — measure honestly, do not claim the target
 
