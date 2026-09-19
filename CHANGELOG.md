@@ -60,6 +60,9 @@ are closed. Regressions live in `test/cli-audit-2026-09-19.test.mjs` and
   surface is key-value only. Markdown documents have no discovery or resolve
   tool, and grants are scoped by file/key/action/expiry rather than by
   note/field.
+- Added: [`docs/CONTEXT-FORMAT-DECISION-2026-09-19.md`](docs/CONTEXT-FORMAT-DECISION-2026-09-19.md),
+  rejecting a bespoke `.ctx` context file format and adopting three of its
+  semantics as Phase 18 candidates instead.
 
 - Changed: the CLI now rejects extra positional arguments instead of silently
   ignoring them, e.g. `vbrain get file key extra` now exits non-zero with

@@ -410,6 +410,22 @@ with Phases 12 and 14.
       script; see
       [`docs/superpowers/plans/2026-09-15-phase-16-6-desktop-dist-clean.md`](superpowers/plans/2026-09-15-phase-16-6-desktop-dist-clean.md).
 
+## Phase 18 candidates — context semantics (not scheduled)
+
+Adopted from the context-format evaluation in
+[`docs/CONTEXT-FORMAT-DECISION-2026-09-19.md`](CONTEXT-FORMAT-DECISION-2026-09-19.md),
+which rejected a bespoke `.ctx` file format and kept three of its semantics.
+Candidates only: nothing here is counted against an open phase.
+
+- [ ] Temporal supersession: `valid-from`, `valid-until` and `supersedes` as
+      reserved frontmatter properties, indexed and filterable
+- [ ] `priority` property weighted by the search ranker
+- [ ] Budget-aware context assembly at the MCP layer, if and when grant-controlled
+      Markdown discovery/resolve tools are added
+
+The first two depend on the `[key:value]` property filter from finding 9 of
+[`docs/CLI-AUDIT-2026-09-19.md`](CLI-AUDIT-2026-09-19.md) and should follow it.
+
 ## Which open phases still need code
 
 A classification of every unchecked item above, so a reader can tell implementation
