@@ -39,6 +39,7 @@
     "benchmark": "npm run build && node scripts/benchmark.mjs --notes 1000 --assert",
     "benchmark:10k": "npm run build && node scripts/benchmark.mjs --notes 10000 --assert",
     "benchmark:100k": "npm run build && node scripts/benchmark.mjs --notes 100000 --assert",
+    "benchmark:budgets": "npm run build && node scripts/benchmark.mjs --notes 1000 --assert --enforce-open-budgets && node scripts/benchmark.mjs --notes 10000 --assert --enforce-open-budgets",
     "recovery:drill": "npm run build && node scripts/sync-recovery-drill.mjs",
     "fixtures": "npm run build && node scripts/make-fixtures.mjs",
     "desktop:dev": "vite --config desktop/vite.config.ts",
