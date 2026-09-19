@@ -2,7 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { DEFAULT_ASSETS_DIR } from "./canvas.js";
 import { DocumentVault } from "./documents.js";
-import { writeFileAtomic } from "./fs-safe.js";
+import { resolvePhysicalPath, writeFileAtomic } from "./fs-safe.js";
+import { rewriteWikiLinks } from "./markdown.js";
 
 export type VaultExportIssueSeverity = "warning" | "error";
 
@@ -131,8 +132,12 @@ export function exportVault(
   options: VaultExportOptions = {}
 ): VaultExportReport {
   const startedAt = new Date().toISOString();
-  const source = path.resolve(vaultDir);
-  const destination = path.resolve(destinationDirectory);
+  // Physical, not lexical: the containment check below is the only thing
+  // standing between a locked vault and plaintext copies of its own contents
+  // sitting inside it, and a junction or symlink above the destination defeats
+  // a string comparison completely.
+  const source = resolvePhysicalPath(vaultDir);
+  const destination = resolvePhysicalPath(destinationDirectory);
   const assetsDir = (options.assetsDir ?? DEFAULT_ASSETS_DIR).trim().replace(/\\/gu, "/");
   if (!assetsDir || assetsDir.split("/").some((part) => !part || part === "." || part === "..")) {
     throw new Error("The export assets directory must be a relative path label.");
@@ -140,7 +145,18 @@ export function exportVault(
   if (isInside(source, destination) || isInside(destination, source)) {
     throw new Error("A plaintext export must be written outside the vault it exports.");
   }
+  // Re-checked after the destination directory is created and every ancestor
+  // therefore exists, so a path whose parents were not yet on disk during the
+  // first check cannot be resolved into the vault afterwards.
+  function assertStillOutside(): void {
+    const physical = resolvePhysicalPath(destination);
+    if (isInside(source, physical) || isInside(physical, source)) {
+      throw new Error("A plaintext export must be written outside the vault it exports.");
+    }
+  }
   assertEmptyDestination(destination);
+  fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+  assertStillOutside();
 
   const vault = new DocumentVault(source, passphrase);
   const issues: VaultExportIssue[] = [];
@@ -193,12 +209,47 @@ export function exportVault(
     }
   }
 
+  // Every output path is settled before one note or canvas is written. A note
+  // renamed for portability has to be renamed in the links that point at it
+  // too, and a link can point forwards: deciding names as we went meant the
+  // first note's links were rewritten against a map that did not yet know
+  // where the last note would land.
   const notes = vault.list();
+  const noteTargets = new Map<string, { relative: string; adjusted: boolean }>();
+  for (const note of notes) noteTargets.set(note.id, allocator.allocate(note.path));
+  const canvases = vault.listCanvases();
+  const canvasTargets = new Map<string, { relative: string; adjusted: boolean }>();
+  for (const canvas of canvases) canvasTargets.set(canvas.id, allocator.allocate(canvas.path));
+
+  /** Note id to the exported path, for the canvas file nodes that name one. */
+  const exportedNotePaths = new Map<string, string>();
+  for (const [id, target] of noteTargets) exportedNotePaths.set(id, target.relative);
+
+  /**
+   * The exported link target for a wikilink, or undefined to leave it alone.
+   *
+   * Resolution is the vault's own, so a link is rewritten only when it really
+   * pointed at a note, and only when that note's exported path differs from
+   * the one the author wrote. The replacement is the full exported path
+   * without its extension: a basename would be ambiguous exactly in the case
+   * that forced the rename.
+   */
+  function rewriteTarget(target: string): string | undefined {
+    const resolved = vault.resolveLink(target);
+    if (!resolved) return undefined;
+    const exported = exportedNotePaths.get(resolved.id);
+    if (!exported || exported === resolved.path) return undefined;
+    return exported.replace(/\.md$/iu, "");
+  }
+
   let notesWritten = 0;
   for (const note of notes) {
+    const { relative, adjusted } = noteTargets.get(note.id)!;
     try {
-      const { relative, adjusted } = allocator.allocate(note.path);
-      writeFileAtomic(path.join(destination, ...relative.split("/")), vault.exportMarkdown(note.id));
+      const markdown = rewriteWikiLinks(vault.exportMarkdown(note.id), (link) =>
+        rewriteTarget(link.target)
+      );
+      writeFileAtomic(path.join(destination, ...relative.split("/")), markdown);
       notesWritten += 1;
       if (adjusted) {
         issues.push({
@@ -206,7 +257,9 @@ export function exportVault(
           code: "note-path-adjusted",
           path: relative,
           reference: note.path,
-          message: `Note was written as '${relative}' because '${note.path}' is not a portable file path.`,
+          message:
+            `Note was written as '${relative}' because '${note.path}' is not a portable file path. ` +
+            "Links pointing at it were rewritten to match.",
         });
       }
     } catch (error) {
@@ -214,14 +267,22 @@ export function exportVault(
     }
   }
 
-  const canvases = vault.listCanvases();
   let canvasesWritten = 0;
   for (const canvas of canvases) {
+    const { relative, adjusted } = canvasTargets.get(canvas.id)!;
     try {
-      const { relative, adjusted } = allocator.allocate(canvas.path);
+      // Text nodes carry wikilinks of their own, and the file nodes are
+      // re-pointed by `exportedNotePaths` inside `exportCanvas`.
+      const serialized = vault.exportCanvas(canvas.id, assetsDir, exportedAssetPaths, exportedNotePaths);
+      const document = JSON.parse(serialized) as { nodes: Array<Record<string, unknown>> };
+      for (const node of document.nodes) {
+        if (node.type === "text" && typeof node.text === "string") {
+          node.text = rewriteWikiLinks(node.text, (link) => rewriteTarget(link.target));
+        }
+      }
       writeFileAtomic(
         path.join(destination, ...relative.split("/")),
-        vault.exportCanvas(canvas.id, assetsDir, exportedAssetPaths)
+        `${JSON.stringify(document, null, 2)}\n`
       );
       canvasesWritten += 1;
       if (adjusted) {

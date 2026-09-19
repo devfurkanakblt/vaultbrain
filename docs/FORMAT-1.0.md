@@ -417,6 +417,27 @@ AAD: the header itself, as `headerAad(version, kdf)` above (not a fixed
 string — this is the one artifact whose AAD is structural rather than a
 constant). Legacy (version 0) payloads carry no AAD.
 
+### `schemaCatalog` — `schema.enc`
+
+`reads: [0, 1, 2]`, `writes: [2]`. Defined in `src/schema.ts`. The encrypted
+discovery catalog: key names and descriptions with every value stripped, which
+`list`, `search`, `timeline` and MCP discovery read.
+
+Version 2 is the same `KeyedEncryptedPayload` shape as `*.kv.enc`, sealed with
+the keyring's `kv` key and the identity `schema:catalog`. That identity is not
+simply `schema` because a key-value file may legitimately be called `schema`
+and would then be stored as `schema.kv.enc` under that same name;
+`normalizeVaultName` rejects `:`, so no vault file can collide with it.
+
+Versions 0 and 1 are catalogs earlier releases sealed with a key derived
+directly from the passphrase. They remain readable, and `vbrain index`,
+`vbrain migrate` and `vbrain passphrase change` each rewrite them under the
+keyring. That rewrite is not cosmetic: a passphrase-derived catalog is the one
+artifact a passphrase change cannot carry, because re-wrapping the keyring
+carries only what the keyring seals. `planRekey` refuses a vault still holding
+one, naming `vbrain index` as the fix, rather than failing later with a bare
+authentication error.
+
 ### `documentManifest` — `documents/manifest.json`
 
 `reads: [1, 2]`, `writes: [1, 2]`. Defined in `src/document-crypto.ts`, with

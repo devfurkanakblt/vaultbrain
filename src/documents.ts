@@ -30,6 +30,7 @@ import {
 import { resolveInside } from "./safety.js";
 import { applyFrontmatter, parseFrontmatter, stringifyFrontmatter } from "./frontmatter.js";
 import { withVaultLock } from "./vault-lock.js";
+import { matchesQuery, parseQuery, type QueryFields } from "./search-query.js";
 import {
   AAD,
   attachmentChunkAad,
@@ -118,17 +119,10 @@ export interface NoteDocument {
  * written to disk: the index has to stay in the layout the desktop core reads,
  * and a second copy of every body would double what unlock has to decrypt.
  */
-interface SearchFields {
+interface SearchFields extends QueryFields {
   /** Guards the memo: a rewritten note must not keep stale search text. */
   revision: number;
-  title: string;
-  aliases: string[];
-  tags: string[];
-  path: string;
   properties: string;
-  /** Everything except the body, joined — what most queries actually hit. */
-  head: string;
-  body: string;
 }
 
 interface IndexedNote extends NoteDocument {
@@ -480,6 +474,33 @@ function normalizeProperties(properties: Record<string, PropertyValue> | undefin
   return structuredClone(normalized);
 }
 
+/**
+ * Flattens typed properties into `key` and `key:value` labels the query
+ * language can test exactly, so `[status:done]` asks about the property rather
+ * than about the text "status done" appearing somewhere in the serialized
+ * blob. Nested objects contribute their leaves under the top-level key; the
+ * count is capped so one note with a huge property map cannot make every
+ * search that touches it expensive.
+ */
+const MAX_PROPERTY_PAIRS = 256;
+
+function collectPropertyPairs(
+  key: string,
+  value: PropertyValue,
+  pairs: string[],
+): void {
+  if (pairs.length >= MAX_PROPERTY_PAIRS) return;
+  if (Array.isArray(value)) {
+    for (const item of value) collectPropertyPairs(key, item, pairs);
+    return;
+  }
+  if (value !== null && typeof value === "object") {
+    for (const item of Object.values(value)) collectPropertyPairs(key, item, pairs);
+    return;
+  }
+  pairs.push(`${key}:${normalizeText(String(value))}`);
+}
+
 function searchFields(note: NoteDocument): SearchFields {
   const revision = note.revision;
   const title = normalizeText(note.title);
@@ -487,15 +508,27 @@ function searchFields(note: NoteDocument): SearchFields {
   const tags = note.tags.map(normalizeText);
   const notePath = normalizeText(note.path);
   const properties = normalizeText(JSON.stringify(note.properties));
+  const propertyKeys: string[] = [];
+  const propertyPairs: string[] = [];
+  for (const [rawKey, value] of Object.entries(note.properties)) {
+    const key = normalizeText(rawKey);
+    propertyKeys.push(key);
+    collectPropertyPairs(key, value, propertyPairs);
+  }
   return {
     revision,
     title,
     aliases,
     tags,
     path: notePath,
+    basename: normalizeText(path.posix.basename(note.path, ".md")),
+    propertyKeys,
+    propertyPairs,
     properties,
     head: `${title}\n${aliases.join(" ")}\n${tags.join(" ")}\n${notePath}\n${properties}`,
     body: normalizeText(note.body),
+    createdAt: Date.parse(note.createdAt),
+    updatedAt: Date.parse(note.updatedAt),
   };
 }
 
@@ -1678,7 +1711,8 @@ export class DocumentVault {
   exportCanvas(
     reference: string,
     assetsDir = DEFAULT_ASSETS_DIR,
-    exportedAssetPaths?: ReadonlyMap<string, string>
+    exportedAssetPaths?: ReadonlyMap<string, string>,
+    exportedNotePaths?: ReadonlyMap<string, string>
   ): string {
     const safeAssetsDir = assetsDir.trim().replace(/\\/gu, "/");
     const assetParts = safeAssetsDir.split("/");
@@ -1690,7 +1724,12 @@ export class DocumentVault {
     ) {
       throw new Error("Canvas export assets directory must be a relative path label.");
     }
-    return serializeJsonCanvas(this.getCanvas(reference), safeAssetsDir, exportedAssetPaths);
+    return serializeJsonCanvas(
+      this.getCanvas(reference),
+      safeAssetsDir,
+      exportedAssetPaths,
+      exportedNotePaths
+    );
   }
 
   private loadPluginById(id: string): PluginPackage {
@@ -2205,21 +2244,14 @@ export class DocumentVault {
   }
 
   search(query: string, limit = 20): SearchHit[] {
-    const chunks = query.match(/-?"[^"]+"|-?\S+/gu) ?? [];
-    const tags: string[] = [];
-    const paths: string[] = [];
-    const required: string[] = [];
-    const excluded: string[] = [];
-    for (let chunk of chunks) {
-      const negative = chunk.startsWith("-");
-      if (negative) chunk = chunk.slice(1);
-      if (chunk.startsWith('"') && chunk.endsWith('"')) chunk = chunk.slice(1, -1);
-      const normalized = normalizeText(chunk);
-      if (normalized.startsWith("tag:")) tags.push(normalized.slice(4).replace(/^#/u, ""));
-      else if (normalized.startsWith("path:")) paths.push(normalized.slice(5));
-      else if (negative) excluded.push(normalized);
-      else if (normalized) required.push(normalized);
-    }
+    // The grammar lives in `search-query.ts`; see it for what is supported.
+    // This used to recognize `tag:` and `path:` and treat every other operator
+    // as literal text, which silently answered a different question than the
+    // one asked — and it stripped a leading `-` before deciding what kind of
+    // term it had, so `-tag:red` became a *required* tag filter rather than an
+    // exclusion.
+    const parsed = parseQuery(query);
+    const required = parsed.scoringTerms;
 
     // A query whose terms appear in every note matches the whole vault, so the
     // result set is bounded as it is built: scoring keeps only the best `limit`
@@ -2243,30 +2275,7 @@ export class DocumentVault {
     candidates: for (let noteIndex = 0; noteIndex < notes.length; noteIndex++) {
       const note = notes[noteIndex];
       const fields = this.searchFieldsFor(note);
-      const head = fields.head;
-      const body = fields.body;
-      if (tags.length > 0) {
-        for (let tagIndex = 0; tagIndex < tags.length; tagIndex++) {
-          if (!fields.tags.includes(tags[tagIndex])) continue candidates;
-        }
-      }
-      if (paths.length > 0) {
-        for (let pathIndex = 0; pathIndex < paths.length; pathIndex++) {
-          if (!fields.path.includes(paths[pathIndex])) continue candidates;
-        }
-      }
-      if (excluded.length > 0) {
-        for (let termIndex = 0; termIndex < excluded.length; termIndex++) {
-          const term = excluded[termIndex];
-          if (head.includes(term) || body.includes(term)) continue candidates;
-        }
-      }
-      if (required.length > 0) {
-        for (let termIndex = 0; termIndex < required.length; termIndex++) {
-          const term = required[termIndex];
-          if (!head.includes(term) && !body.includes(term)) continue candidates;
-        }
-      }
+      if (!matchesQuery(parsed, fields)) continue candidates;
 
       let score = 0;
       for (let termIndex = 0; termIndex < required.length; termIndex++) {
@@ -2386,6 +2395,24 @@ export class DocumentVault {
       }
       throw error;
     }
+  }
+
+  /**
+   * The note a wikilink target names, by the vault's own resolution rules —
+   * exact path, then basename, then title or alias, and only when exactly one
+   * note owns the label.
+   *
+   * Exposed so callers that rewrite links (the plaintext exporter) decide what
+   * a link points at the same way the index decided, rather than
+   * reimplementing the rules and drifting from them.
+   */
+  resolveLink(target: string): NoteSummary | undefined {
+    const found = this.resolveLinkTargetInIndex(this.loadIndex(), {
+      raw: target,
+      target,
+      embed: false,
+    });
+    return found ? summary(found) : undefined;
   }
 
   outgoing(reference: string): OutgoingLink[] {

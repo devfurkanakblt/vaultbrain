@@ -135,6 +135,19 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
     domains: ["keyedEnvelope"],
     rekey: reencrypt,
   },
+  schemaCatalog: {
+    pattern: new RegExp("^schema[.]enc$", "u"),
+    path: "schema.enc",
+    persistence: "persistent",
+    protection: "encrypted",
+    // Versions 0 and 1 are catalogs earlier releases sealed with a key derived
+    // straight from the passphrase. They stay readable so an existing vault
+    // keeps working; the next `vbrain index` rewrites them under the keyring.
+    reads: [0, 1, 2],
+    writes: [2],
+    domains: ["keyedEnvelope"],
+    rekey: reencrypt,
+  },
   documentManifest: {
     pattern: new RegExp("^documents/manifest\\.json$", "u"),
     path: "documents/manifest.json",

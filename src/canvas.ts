@@ -378,16 +378,26 @@ export function parseJsonCanvas(text: string): { nodes: CanvasNode[]; edges: Can
  * has to give the second one a different name; without the map this node would
  * name the first one's file and the canvas would quietly point at the wrong
  * bytes.
+ *
+ * `exportedNotePaths` does the same for note nodes. A note whose vault path is
+ * not a portable filename is written under a different name, and a node still
+ * carrying the vault path would point at a file the export does not contain —
+ * the identity extension that could have repaired it is exactly what this
+ * function drops on the way out.
  */
 export function serializeJsonCanvas(
   canvas: CanvasDocument,
   assetsDir = DEFAULT_ASSETS_DIR,
-  exportedAssetPaths?: ReadonlyMap<string, string>
+  exportedAssetPaths?: ReadonlyMap<string, string>,
+  exportedNotePaths?: ReadonlyMap<string, string>
 ): string {
   const nodes = canvas.nodes.map((node) => {
     if (node.type !== "file") return { ...node };
-    const { noteId: _noteId, attachmentId, ...rest } = node;
-    if (!attachmentId) return { ...rest };
+    const { noteId, attachmentId, ...rest } = node;
+    if (!attachmentId) {
+      const exported = noteId ? exportedNotePaths?.get(noteId) : undefined;
+      return exported ? { ...rest, file: exported } : { ...rest };
+    }
     const exported = exportedAssetPaths?.get(attachmentId);
     return { ...rest, file: exported ?? path.posix.join(assetsDir, path.posix.basename(node.file)) };
   });

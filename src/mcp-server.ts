@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { buildSchema, readSchema, searchSchema, filterNotesByDate } from "./schema.js";
-import { loadVaultFile, storeNote } from "./store.js";
+import { generateAutoKey, loadVaultFile, storeNote } from "./store.js";
 import { appendAudit, clearAuditKeyCache } from "./audit.js";
 import {
   consumeApproval,
@@ -16,6 +16,7 @@ import {
   type GrantFile,
 } from "./grants.js";
 import { redactValue, type RedactionLevel } from "./redaction.js";
+import { withVaultLock } from "./vault-lock.js";
 
 /**
  * What a governed resolution produced. Split out from the tool handler so the
@@ -237,29 +238,41 @@ export async function startMcpServer(vaultDir: string, configuredAgent: string):
         .describe("explicit key for a fact (e.g. 'IBAN'); omit for a freeform journal note"),
     },
     async ({ category, value, desc, key }) => {
-      const decision = permit("store", category, key);
+      // The key is decided before permission is asked, not after. Asking with
+      // the caller's `key` left undefined and only then generating a
+      // `NOTE_...` name meant a grant scoped to one exact key still admitted a
+      // write under a name that scope never covered. A journal note therefore
+      // needs a scope that actually matches the generated name — `NOTE_*` or
+      // `*` — which is the permission the owner is really being asked for.
+      const usedKey = key && key.trim() ? key.trim() : generateAutoKey();
+      const decision = permit("store", category, usedKey);
       if (!decision.allowed) {
         appendAudit(
           vaultDir,
-          { actor: "mcp-agent-write", file: category, key: key ?? "", agent, outcome: "denied" },
+          { actor: "mcp-agent-write", file: category, key: usedKey, agent, outcome: "denied" },
           passphrase,
         );
         return text(decision.reason, true);
       }
-      const usedKey = storeNote(vaultDir, category, value, desc, passphrase, key);
-      buildSchema(vaultDir, passphrase); // keep the encrypted catalog current
-      appendAudit(
-        vaultDir,
-        {
-          actor: "mcp-agent-write",
-          file: category,
-          key: usedKey,
-          agent,
-          grant: decision.grantId,
-          outcome: "allowed",
-        },
-        passphrase,
-      );
+      // One transaction: the entry, the catalog refresh that makes it
+      // discoverable, and the audit line that records it must not interleave
+      // with another writer's.
+      withVaultLock(vaultDir, () => {
+        storeNote(vaultDir, category, value, desc, passphrase, usedKey);
+        buildSchema(vaultDir, passphrase); // keep the encrypted catalog current
+        appendAudit(
+          vaultDir,
+          {
+            actor: "mcp-agent-write",
+            file: category,
+            key: usedKey,
+            agent,
+            grant: decision.grantId,
+            outcome: "allowed",
+          },
+          passphrase,
+        );
+      });
       return text(`Stored under ${category}.${usedKey} (encrypted, indexed, audited).`);
     },
   );

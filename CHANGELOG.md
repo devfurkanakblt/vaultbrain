@@ -5,6 +5,62 @@ Versioning once the encrypted storage format reaches 1.0.
 
 ## Unreleased
 
+### Security and data integrity — 2026-09-19 CLI/MCP review
+
+All eleven findings in [`docs/CLI-AUDIT-2026-09-19.md`](docs/CLI-AUDIT-2026-09-19.md)
+are closed. Regressions live in `test/cli-audit-2026-09-19.test.mjs` and
+`test/search-query.test.mjs`.
+
+- Fixed: concurrent key-value writes silently lost data. `upsertEntry` and the
+  catalog rebuild now hold the vault lock across the whole read-modify-write;
+  atomically replacing a file is not enough when two processes each read the
+  same starting state. Eight parallel `vbrain add` calls used to leave one key.
+- Fixed: a single-use owner approval could be spent once per racing process,
+  breaking the "one yes answers one resolution" guarantee. Every grant
+  mutation now runs under the vault lock.
+- Fixed: `store_note` asked permission before deciding the key, so a grant
+  scoped to one exact key still admitted an auto-named `NOTE_...` write. The
+  key is now resolved first, and a `store` scope never covers an unnamed key.
+  A journal note now requires a scope covering the generated name (`NOTE_*`
+  or `*`).
+- Fixed: the discovery catalog was sealed with a passphrase-derived key, so
+  `vbrain passphrase change` left `list`, `search`, `timeline` and MCP
+  discovery failing to authenticate while `get` still worked. It is now sealed
+  with the keyring `kv` key; `index`, `migrate` and `passphrase change` rewrite
+  a legacy catalog.
+- Fixed: `schema.enc` was missing from the encrypted-artifact inventory, so
+  `vbrain rekey` refused any vault that had ever run `add` ("cannot classify
+  schema.enc"). It is catalogued, classified and documented in
+  `docs/FORMAT-1.0.md`.
+- Fixed: the export containment check was lexical, so a junction or symlink
+  above the destination let a plaintext export land inside the vault it
+  exports. Destinations are now resolved physically.
+- Fixed: an export that renamed a note for filesystem portability left every
+  link to it dangling. Output paths are allocated before anything is written,
+  and note links, canvas file nodes and canvas text links are rewritten to
+  match. Links inside code spans are left alone.
+- Fixed: `vbrain audit --json` exited 0 on a broken audit chain while the text
+  form exited 2, and `vbrain sync apply` exited 0 when a conflict blocked it.
+  Exit codes now describe the result, not the output format, and are
+  documented in the README.
+
+### Search
+
+- Changed: the query language now implements the product contract. Added `OR`
+  and `AND`, `term*` prefix matching, `file:` filters, `[key]` and
+  `[key:value]` property filters, and `created:`/`updated:` date filters.
+  Fixed: `-` now negates whichever term it is attached to — `-tag:red`
+  excluded nothing and was treated as a required tag filter. The grammar lives
+  in `src/search-query.ts` and is documented in the README. Result ordering is
+  unchanged.
+
+### Documentation
+
+- Changed: the README and `docs/PRODUCT.md` now state that the shipped MCP
+  surface is key-value only. Markdown documents have no discovery or resolve
+  tool, and grants are scoped by file/key/action/expiry rather than by
+  note/field.
+
 - Changed: the CLI now rejects extra positional arguments instead of silently
   ignoring them, e.g. `vbrain get file key extra` now exits non-zero with
   `error: too many arguments for 'get'. Expected 2 arguments but got 3: ...`.

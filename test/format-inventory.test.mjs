@@ -11,6 +11,7 @@ import { SyncDeviceManager, SyncedDocumentVault } from "../dist/sync.js";
 import { openDocumentKey } from "../dist/document-crypto.js";
 import { writePortableState } from "../dist/portable-state.js";
 import { saveVaultFile } from "../dist/store.js";
+import { buildSchema } from "../dist/schema.js";
 import { addGrant } from "../dist/grants.js";
 import { createBackup } from "../dist/backup.js";
 import { createRecoveryKit } from "../dist/keyring-recovery.js";
@@ -119,6 +120,10 @@ test("real writers produce only catalogued, explicitly rekeyed encrypted files",
     vault.lock();
     saveVaultFile(root, "catalogue", [{ key: "value", value: "key-value", desc: "fixture" }], "format-inventory-passphrase");
     addGrant(root, { agent: "catalogue-agent", scopes: [{ file: "*", keys: ["*"], actions: ["discover"], redact: "none" }] }, "format-inventory-passphrase");
+    // The discovery catalog every `vbrain add` refreshes. Leaving it out of
+    // this fixture is how it stayed outside the re-key inventory long enough
+    // to make an ordinary vault un-re-keyable.
+    buildSchema(root, "format-inventory-passphrase");
     const portable = openDocumentKey(root, "format-inventory-passphrase");
     writePortableState(portable, "workspace", { version: 1, bookmarks: [], layouts: [] });
     writePortableState(portable, "saved-views", { version: 1, views: [] });
@@ -162,6 +167,7 @@ test("real writers produce only catalogued, explicitly rekeyed encrypted files",
         .map((file) => {
           if (/^[^/]+\.kv\.enc$/u.test(file)) return "kv";
           if (file === "grants.enc") return "grants";
+          if (file === "schema.enc") return "catalog";
           if (file === "documents/manifest.json") return "manifest";
           if (file === "documents/index.enc") return "index";
           if (file === "documents/workspace.enc") return "workspace";
@@ -192,7 +198,7 @@ test("real writers produce only catalogued, explicitly rekeyed encrypted files",
     );
     assert.deepEqual(
       [...observedFamilies].sort(),
-      ["attachment-chunk", "attachment-manifest", "canvas", "canvas-history", "grants", "index", "kv", "manifest", "note", "note-history", "plugin", "plugin-store", "sync-agreement", "sync-applied", "sync-authority", "sync-blob", "sync-change", "sync-checkpoint", "sync-device", "sync-epoch", "sync-pending", "sync-receipt", "sync-registry", "views", "workspace"],
+      ["attachment-chunk", "attachment-manifest", "canvas", "canvas-history", "catalog", "grants", "index", "kv", "manifest", "note", "note-history", "plugin", "plugin-store", "sync-agreement", "sync-applied", "sync-authority", "sync-blob", "sync-change", "sync-checkpoint", "sync-device", "sync-epoch", "sync-pending", "sync-receipt", "sync-registry", "views", "workspace"],
     );
     const planned = new Set(planRekey(root).map((item) => item.path));
     const files = fs.readdirSync(root, { recursive: true }).filter((file) => file.endsWith(".enc"));

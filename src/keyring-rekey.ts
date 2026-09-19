@@ -67,6 +67,7 @@ import {
 import { CHANGE_AAD_PREFIX, changeEncryptionKey } from "./sync/protocol.js";
 import { APPLY_RECEIPT_AAD, LOCAL_TRANSACTION_AAD } from "./sync/transaction.js";
 import { withVaultLock } from "./vault-lock.js";
+import { SCHEMA_CATALOG_IDENTITY, SCHEMA_FILENAME, schemaNeedsKeyringMigration } from "./schema.js";
 
 export const STAGING_DIRNAME = ".rekey";
 
@@ -280,6 +281,23 @@ export function planRekey(vaultDir: string): RekeyItem[] {
     if (entry.name === "grants.enc") {
       artifactForPath(entry.name);
       items.push({ path: entry.name, kind: "kv", identity: "grants" });
+      continue;
+    }
+    if (entry.name === SCHEMA_FILENAME) {
+      artifactForPath(entry.name);
+      // An ordinary `vbrain add` writes an entry and then refreshes this
+      // catalog, so leaving it out of the inventory made a re-key impossible
+      // on any vault that had ever been used. A catalog an earlier release
+      // sealed with the passphrase itself cannot be re-sealed under the `kv`
+      // key without being rebuilt first, so say so instead of failing later
+      // with a bare authentication error.
+      if (schemaNeedsKeyringMigration(vaultDir)) {
+        throw new Error(
+          "Refusing to re-key: schema.enc predates keyring sealing. Run 'vbrain index' to rebuild the " +
+            "catalog under the vault keyring, then re-key.",
+        );
+      }
+      items.push({ path: entry.name, kind: "kv", identity: SCHEMA_CATALOG_IDENTITY });
       continue;
     }
     if (entry.name.endsWith(".enc")) {
