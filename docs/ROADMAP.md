@@ -476,13 +476,56 @@ replayed against a different snapshot without failing authentication.
 - [x] Measurement spans compaction rather than excluding the slow samples it
       produces — the threshold is exercised by
       `test/index-log.test.mjs`
-- [x] No acknowledged save is lost across a crash or concurrent writers
+- [x] No acknowledged save is lost across a crash or concurrent writers.
+      Checked off once on crash evidence alone. The concurrent-writer half was
+      false in the TypeScript core and is covered by
+      `test/concurrent-sessions.test.mjs` below.
 - [x] Unlock stays within budget with a log present
 - [x] A vault written by one core is read correctly by the other, log included
       (`test/cross-core-index-log.test.mjs` drives both binaries over one vault)
 - [x] Both cores meet the budget at 100,000 notes, the size it is written for
 - [ ] Promote `performance-budgets` to a required status check — a repository
       setting, and the last thing holding this phase open
+
+### The session cache, and what the acceptance list missed
+
+Phase 17 gave the Rust core `refresh_session_index`: before every write it
+compares the snapshot's size and modification time and, when nothing replaced
+it, applies only the log records appended since. That was written as an
+optimisation — it removed a full decrypt per save — but it is also what makes a
+write see the previous lock holder's work.
+
+The TypeScript core never got it. `loadIndex()` returned the session's cached
+index unconditionally, so a session's first read of the index was its only one.
+A second process could save a note, and the first session's next save would
+commit on top of a state that no longer existed: the note object stayed on disk
+and the index stopped referencing it. Reproduced with two real processes, and
+the note was unreachable afterwards.
+
+The vault lock was never the missing piece. It was always taken, and it
+serialises the writes correctly. What was missing is re-reading what the
+previous holder left behind once the lock changes hands.
+
+This was not a Phase 17 regression — the unconditional cache is older than the
+change log, and the whole-snapshot rewrite it replaced lost the same note the
+same way. What Phase 17 did was fix it in one core and leave the other, which
+is the cross-implementation divergence Phase 13 exists to prevent, and the
+acceptance list above said "no acknowledged save is lost across a crash or
+concurrent writers" on crash evidence alone.
+
+`src/documents.ts` now carries the same stamp comparison and log tail.
+`test/concurrent-sessions.test.mjs` drives a second Node process against one
+vault and covers the four shapes: a save that compacted, a save that only
+reached the log, a removal, and a read with no write of its own. All four fail
+without the change.
+
+One difference from the Rust core is deliberate and stays: TypeScript refreshes
+in `loadIndex()`, which covers reads as well as writes, because it is the one
+place every write path passes through — the TypeScript core has no single
+`with_vault_write` choke point to hang it on, and touching each write site
+individually is the version of this that misses one. Rust refreshes on writes
+only, so a long-lived Rust session can still serve a stale read. Named here
+rather than left to be rediscovered.
 
 ### What is left
 

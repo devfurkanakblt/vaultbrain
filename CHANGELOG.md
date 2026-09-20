@@ -27,6 +27,16 @@ Saving one note no longer costs a pass over the whole vault, in either core.
   record that does not survive a crash is reclaimed by the PID liveness check,
   so it is written and not fsynced — as the TypeScript implementation of the
   same lock always has been.
+- Fixed: a `DocumentVault` session returned its cached index unconditionally,
+  so a session's first read of the index was its only one. A note saved by
+  another process afterwards was invisible to it, and the session's next save
+  committed on top of a state that no longer existed — the note object stayed
+  on disk and the index stopped referencing it, so an acknowledged save became
+  unreachable. `loadIndex()` now compares the snapshot's size and modification
+  time and tails the log for records appended since, which is what the Rust
+  core's `refresh_session_index` already did. The vault lock was never the
+  missing piece; re-reading what the previous holder left behind was.
+  `test/concurrent-sessions.test.mjs` covers it with a real second process.
 - Added: `npm run benchmark:rust`, a save-path benchmark for the desktop core,
   and its tier in the `performance-budgets` CI job. Every budget in
   `PRODUCT.md` is a desktop interaction, and until now only the TypeScript
