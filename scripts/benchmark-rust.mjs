@@ -22,7 +22,7 @@ function argument(name, fallback) {
 const tiers = argument("--notes", "1000,10000")
   .split(",")
   .map((value) => Number.parseInt(value.trim(), 10));
-const saves = argument("--saves", "50");
+const saves = argument("--saves", "200");
 const strict = process.argv.includes("--enforce-open-budgets");
 
 let failed = false;
