@@ -777,6 +777,23 @@ agent may discover, `store_note` needs a `store` action, and `resolve_key`
 additionally records who asked, under which grant, how much came back, and
 whether the answer was allowed, denied or held for approval.
 
+The three value-free tools answer with one entry per line, each naming its own
+file so the next `resolve_key` call cannot take a key from the wrong one:
+
+```text
+health/DOCTOR_NAME — family doctor
+health/BLOOD_TYPE — blood type
+health/NOTE_20260920_212739_0e78eb198dd6 — 2026-09-20T21:27:39.000Z — checkup summary
+```
+
+Discovery is the largest thing this server puts into a context — it lists
+every key the agent may see, on every conversation that browses the vault —
+so the format is chosen for what it costs a model to read. It used to be
+pretty-printed JSON, which spent about a third of its characters on
+indentation and quoting; on a 250-key vault that made listing one key cost
+more than handing over that key, its description and its value would have,
+which inverts the reason an agent discovers before it resolves.
+
 `store_note` covers both shapes: pass an explicit `key` for a fact that
 should overwrite itself (like `IBAN`), or omit it for a freeform journal
 note — it gets an auto-generated, timestamp-prefixed key (`NOTE_20260830_...`)
