@@ -606,6 +606,16 @@ export function compactDocumentIndex(vaultDir: string, passphrase: string): bool
 export class DocumentVault {
   private readonly session: DocumentKeySession;
   private indexCache?: DocumentIndex;
+  /**
+   * Size and modification time of the snapshot `indexCache` was read from.
+   *
+   * The cache used to be returned unconditionally, which made a session's
+   * first read of the index its only one: anything another process wrote
+   * afterwards was invisible, and the session's next save committed on top of
+   * a state that no longer existed. Mirrors `index_stamp` in
+   * `src-tauri/src/lib.rs`, which the Rust core compares for the same reason.
+   */
+  private indexStamp?: string;
   /** The snapshot generation the in-memory index belongs to. */
   private logGeneration = 0;
   /** Lines already in the log, header included; 0 until a snapshot is read. */
@@ -679,6 +689,7 @@ export class DocumentVault {
     this.session.legacyChangeIdentityKey?.fill(0);
     forgetVaultKeys(this.vaultDir);
     this.indexCache = undefined;
+    this.indexStamp = undefined;
     this.notesCache = undefined;
     this.retentionCache = undefined;
     this.searchCache = new WeakMap();
@@ -758,10 +769,17 @@ export class DocumentVault {
 
   private loadIndex(): DocumentIndex {
     this.assertUnlocked();
-    if (this.indexCache) return this.indexCache;
+    if (this.indexCache) {
+      const refreshed = this.refreshIndexCache();
+      if (refreshed) return refreshed;
+    }
     const indexPath = this.indexPath();
     if (!fs.existsSync(indexPath)) return this.rebuildIndex();
     assertNotSymlink(indexPath);
+    // Stamped before the content is read, never after. A snapshot that lands
+    // between the two would otherwise be recorded as the origin of the bytes
+    // this call is about to read, and the stale copy would never refresh.
+    const stamp = this.readIndexStamp();
     const payload = JSON.parse(
       readTextFileLimited(indexPath, 512 * 1024 * 1024, "Document index")
     ) as DocumentPayload;
@@ -781,8 +799,65 @@ export class DocumentVault {
     if (typeof index.notes !== "object") throw new Error("Unsupported or invalid document index.");
     this.applyIndexLog(index);
     this.indexCache = index;
+    this.indexStamp = stamp;
     if (!this.readJournal()) return index;
     return withVaultLock(this.vaultDir, () => this.recoverFromJournal(index) ?? index);
+  }
+
+  /**
+   * Identifies the snapshot currently on disk, or `undefined` when there is
+   * none to identify. Size and modification time, exactly what the Rust core
+   * compares; neither core reads the file to decide whether it changed.
+   */
+  private readIndexStamp(): string | undefined {
+    try {
+      const stat = fs.statSync(this.indexPath());
+      return `${stat.size}:${stat.mtimeMs}`;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Brings the cached index up to date with what another session has written.
+   *
+   * Returns the cache when the snapshot behind it is still the current one,
+   * with any records appended since folded in; returns `undefined` when the
+   * snapshot itself was replaced and the index has to be read again.
+   *
+   * Every write path reaches this through `loadIndex()` inside the vault lock,
+   * so nothing can land between the check and the write it guards. Reads reach
+   * it without the lock, which is safe for the same reasons a cold open is: a
+   * snapshot is replaced atomically, and a torn final log line is discarded
+   * rather than trusted.
+   */
+  private refreshIndexCache(): DocumentIndex | undefined {
+    const index = this.indexCache;
+    if (!index) return undefined;
+    const stamp = this.readIndexStamp();
+    if (!stamp || stamp !== this.indexStamp) return undefined;
+    if (this.logGeneration === 0) return index;
+    const log = readIndexLog(
+      this.session.rootDir,
+      this.session.readKeys,
+      this.logGeneration,
+      this.logLines,
+    );
+    // The log this session was appending to is gone, or belongs to a
+    // generation this session does not hold. Either way the records it held
+    // are unaccounted for, so the snapshot is re-read rather than guessed at.
+    // A compaction normally changes the snapshot too and is caught above; this
+    // covers the case where it did not, such as a filesystem whose timestamp
+    // resolution is coarser than the gap between two writes.
+    if (log.lines < this.logLines) return undefined;
+    for (const record of log.records) this.applyIndexLogRecord(index, record);
+    if (log.records.length > 0) {
+      this.notesCache = undefined;
+      this.clearBodyOccurrenceCache();
+    }
+    this.logLines = log.lines;
+    this.logBytes = log.bytes;
+    return index;
   }
 
   private journalPath(): string {
@@ -1118,6 +1193,9 @@ export class DocumentVault {
     removeIndexLog(this.session.rootDir);
     this.logLines = 0;
     this.logBytes = 0;
+    // The snapshot this session now holds is the one it just wrote, so a later
+    // refresh compares against it rather than against whatever it replaced.
+    this.indexStamp = this.readIndexStamp();
   }
 
   /**
