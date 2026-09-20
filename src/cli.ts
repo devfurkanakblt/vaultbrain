@@ -9,10 +9,12 @@ import {
   listVaultFiles,
   loadVaultFile,
   storeNote,
+  upsertEntries,
   upsertEntry,
   vaultFileEnvelopeVersion,
 } from "./store.js";
 import { buildSchema, readSchema, searchSchema, filterNotesByDate } from "./schema.js";
+import { parseKV } from "./format.js";
 import { appendAudit, readAudit, verifyAudit } from "./audit.js";
 import { getPassphrase, readSecret } from "./passphrase.js";
 import {
@@ -176,10 +178,60 @@ program
   });
 
 program
-  .command("add <file> <keyval>")
+  .command("add <file> [keyval]")
   .description('add or update a key, e.g. vbrain add health DOCTOR_NEXT_APPOINTMENT="2026-09-15"')
-  .requiredOption("--desc <description>", "short, NON-sensitive description of what this key holds")
+  .option("--desc <description>", "short, NON-sensitive description of what this key holds")
+  .option("--from <path>", "read many entries from a plain .kv file instead of one KEY=value")
   .action(async (file, keyval, opts) => {
+    const dir = program.opts().vault;
+
+    if (opts.from) {
+      if (keyval) {
+        console.error("Pass either one KEY=value or --from <file.kv>, not both.");
+        process.exit(1);
+      }
+      // The same format `vbrain export` writes and the encrypted file holds,
+      // so a bulk import reads what the vault already speaks rather than a
+      // second syntax invented for this command.
+      const source = readTextFileLimited(opts.from, 64 * 1024 * 1024, "Bulk entry file");
+      const parsed = parseKV(source);
+      if (!parsed.length) {
+        console.error(`No entry found in ${opts.from}. Expected lines of KEY="value", optionally preceded by '# @desc: ...'.`);
+        process.exit(1);
+      }
+      const passphrase = await getPassphrase({ vaultDir: dir });
+      // One lock, one read-modify-write, one schema rebuild. Nothing is
+      // written unless every entry validates.
+      const result = upsertEntries(
+        dir,
+        file,
+        parsed.map((entry) => ({ key: entry.key, value: entry.value, desc: entry.desc })),
+        passphrase,
+      );
+      // The audit chain records each key, because "250 keys were written" is
+      // not an answer to "when did this key get into my vault".
+      for (const entry of parsed) {
+        appendAudit(dir, { actor: "cli-direct-write", file, key: entry.key }, passphrase);
+      }
+      buildSchema(dir, passphrase);
+      console.log(
+        `Stored ${parsed.length} entr${parsed.length === 1 ? "y" : "ies"} in ${file}.kv.enc (encrypted): ${result.added} new, ${result.replaced} replaced.`,
+      );
+      console.log(`Encrypted, value-free schema refreshed.`);
+      console.log(
+        `${opts.from} is plain text and still on disk. Remove it once you have confirmed the import.`,
+      );
+      return;
+    }
+
+    if (!keyval) {
+      console.error('Expected KEY="value", or --from <file.kv> for many entries.');
+      process.exit(1);
+    }
+    if (!opts.desc) {
+      console.error("--desc is required when adding a single key.");
+      process.exit(1);
+    }
     const eq = keyval.indexOf("=");
     if (eq === -1) {
       console.error('Expected KEY="value" format.');
@@ -189,8 +241,7 @@ program
     let value = keyval.slice(eq + 1).trim();
     if (value.startsWith('"') && value.endsWith('"')) value = value.slice(1, -1);
 
-    const passphrase = await getPassphrase({ vaultDir: program.opts().vault });
-    const dir = program.opts().vault;
+    const passphrase = await getPassphrase({ vaultDir: dir });
     upsertEntry(dir, file, key, value, opts.desc, passphrase);
     appendAudit(dir, { actor: "cli-direct-write", file, key }, passphrase);
     buildSchema(dir, passphrase);

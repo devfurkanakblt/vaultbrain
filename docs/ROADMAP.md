@@ -558,6 +558,39 @@ Candidates only: nothing here is counted against an open phase.
 The first two depend on the `[key:value]` property filter from finding 9 of
 [`docs/CLI-AUDIT-2026-09-19.md`](CLI-AUDIT-2026-09-19.md) and should follow it.
 
+### An in-process session, deferred with a reason
+
+Profiling `vbrain add` found that about 610 ms of its 620 is fixed cost paid
+once per process: Node startup and the module graph (289 ms, measured as
+`vbrain --help`, which touches no vault), and the scrypt keyring unwrap
+(~324 ms). The entry itself costs about 4 ms, and the schema rebuild another 4.
+
+Two designs answer that. Bulk entry — one process, one keyring unwrap, one
+schema rebuild — is implemented: `vbrain add <file> --from <path.kv>` took
+2.1 s for 250 keys against 158 s one command at a time.
+
+The other is a long-lived session that keeps the keyring open and accepts
+commands over a pipe, which would bring an interactive or scripted single add
+down to the same few milliseconds. It is **not** scheduled, and the reason is
+not effort:
+
+- It keeps an unwrapped keyring in memory across time. The longest-lived
+  process today is the MCP server, and even that reads its passphrase from the
+  environment and re-reads the grant policy from disk on every call.
+- It needs answers this project does not have yet for who may connect to the
+  socket, how long a session stays open, what an inactivity lock means here,
+  what a crash leaves behind, and how it composes with `vault-lock`.
+- The desktop core already solved those questions for its own session. Solving
+  them a second time in the TypeScript CLI adds a security surface rather than
+  reusing one.
+
+The scrypt cost is deliberate — key-derivation work is a security parameter,
+and lowering it is not the fix. Reducing how many times it is paid is, and
+bulk entry does that for the case that was actually slow.
+
+- [ ] In-process session for the CLI, if and when interactive single-key entry
+      is shown to matter more than the added surface
+
 ## Which open phases still need code
 
 A classification of every unchecked item above, so a reader can tell implementation
