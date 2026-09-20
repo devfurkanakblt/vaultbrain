@@ -66,6 +66,14 @@ are closed. Regressions live in `test/cli-audit-2026-09-19.test.mjs` and
   at 10,000 (missed by about seven times). Every run that misses it prints
   `BUDGET MISS` with the number, and the pass line says so rather than claiming
   a clean run.
+- Changed: the save-latency figures are now labelled as what they are — the
+  TypeScript library, which is the CLI and MCP path. The desktop saves through
+  the Rust core, whose `save_index` rewrites the whole index the same way, and
+  that path has no benchmark at all. Measuring it is now the first step of
+  Phase 17, ahead of any change to either implementation. The change log will
+  also have to be a shared format: both cores write `index.enc`, so a log only
+  one of them understands would be a correctness bug, not just a missed
+  optimisation.
 - Fixed: the first published figures for this measurement were wrong. A
   843.9 ms p95 at 4,000 notes was reported in the README, `PRODUCT.md`,
   `ROADMAP.md` and the audit record; that sample was taken while the test
