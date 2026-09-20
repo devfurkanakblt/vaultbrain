@@ -19,6 +19,7 @@ import {
 } from "./keyring.js";
 import { withVaultLock } from "./vault-lock.js";
 import { appendKeyringAudit, appendKeyringAuditWithKey, newKeyringAuditKey } from "./keyring-audit.js";
+import { buildSchema, schemaNeedsKeyringMigration } from "./schema.js";
 
 /**
  * NIST SP 800-63B's floor for a user-chosen secret. It applies to the new
@@ -162,6 +163,26 @@ export function changeVaultPassphrase(
           }
         } finally {
           zeroKeySet(check);
+        }
+      }
+
+      // A catalog an earlier release sealed with the passphrase itself cannot
+      // survive this call: re-wrapping the keyring carries every
+      // keyring-sealed artifact, and that one is not keyring-sealed. Rebuild
+      // it here, while the passphrase that opens it is still the current one,
+      // so the change does not leave `list`, `search` and MCP discovery
+      // failing to authenticate against a catalog only the old passphrase can
+      // read. Nothing has been written yet, so a failure here leaves the vault
+      // exactly as it was.
+      if (schemaNeedsKeyringMigration(vaultDir)) {
+        try {
+          buildSchema(vaultDir, currentPassphrase);
+        } catch (error) {
+          throw new Error(
+            "This vault's catalog predates keyring sealing and could not be rebuilt, so changing the " +
+              "passphrase would leave it unreadable. Run 'vbrain index' first, then retry.",
+            { cause: error },
+          );
         }
       }
 

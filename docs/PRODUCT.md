@@ -58,6 +58,15 @@ References:
 - Local-model path for zero-network workflows
 - Redacted tool results and user confirmation policies for sensitive classes
 
+**Delivered scope (0.2.0):** the MCP surface is key-value only — `list_keys`,
+`find_key`, `resolve_key`, `store_note` and `find_notes_in_range`, over the
+`*.kv.enc` categories and their value-free catalog. Grants are scoped by
+file, key pattern, action and expiry. Note- and field-level scoping, and any
+discovery or resolve path for Markdown documents, are not built: an agent
+cannot reach a note created by `vbrain docs put` or the Obsidian importer.
+The list above is the target contract; this paragraph is what ships today.
+See [`CLI-AUDIT-2026-09-19.md`](CLI-AUDIT-2026-09-19.md), finding 10.
+
 ### Portability and ecosystem
 
 - Lossless Markdown/frontmatter import and export

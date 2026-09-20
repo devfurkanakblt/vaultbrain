@@ -19,11 +19,55 @@ export interface MarkdownAnalysis {
   headings: MarkdownHeading[];
 }
 
+/**
+ * The one wikilink grammar. `analyzeMarkdown` reads with it and
+ * `rewriteWikiLinks` writes with it, so a link the index counted can never be
+ * a link the exporter fails to recognize.
+ */
+const LINK_SOURCE = String.raw`(!)?\[\[([^\]|#^]+)(?:#([^\]|^]+))?(?:\^([^\]|]+))?(?:\|([^\]]+))?\]\]`;
+/** Fenced blocks and inline spans, where a `[[...]]` is text and not a link. */
+const CODE_SOURCE = "```[\\s\\S]*?```|~~~[\\s\\S]*?~~~|`[^`\\n]*`";
+
 function withoutCode(markdown: string): string {
-  return markdown
-    .replace(/```[\s\S]*?```/gu, " ")
-    .replace(/~~~[\s\S]*?~~~/gu, " ")
-    .replace(/`[^`\n]*`/gu, " ");
+  return markdown.replace(new RegExp(CODE_SOURCE, "gu"), " ");
+}
+
+/** The source text for a link, with `target` swapped and everything else kept. */
+export function formatWikiLink(link: WikiLink, target: string): string {
+  const heading = link.heading ? `#${link.heading}` : "";
+  const block = link.block ? `^${link.block}` : "";
+  const alias = link.alias ? `|${link.alias}` : "";
+  return `${link.embed ? "!" : ""}[[${target}${heading}${block}${alias}]]`;
+}
+
+/**
+ * Rewrites link targets in place, leaving code spans and every link the
+ * callback declines untouched.
+ *
+ * An export that renames a file has to rename the links pointing at it too, or
+ * the exported vault is a set of notes with a broken web between them. The
+ * callback returns the new target, or undefined to keep the link exactly as
+ * the author wrote it.
+ */
+export function rewriteWikiLinks(
+  markdown: string,
+  rewrite: (link: WikiLink) => string | undefined,
+): string {
+  const pattern = new RegExp(`(${CODE_SOURCE})|${LINK_SOURCE}`, "gu");
+  return markdown.replace(pattern, (raw: string, code: string | undefined, ...rest: unknown[]) => {
+    if (code !== undefined) return raw;
+    const [bang, target, heading, block, alias] = rest as Array<string | undefined>;
+    const link: WikiLink = {
+      raw,
+      target: (target ?? "").trim(),
+      heading: heading?.trim(),
+      block: block?.trim(),
+      alias: alias?.trim(),
+      embed: Boolean(bang),
+    };
+    const replacement = rewrite(link);
+    return replacement === undefined ? raw : formatWikiLink(link, replacement);
+  });
 }
 
 /**
@@ -79,7 +123,7 @@ function slugifyHeading(value: string): string {
 export function analyzeMarkdown(markdown: string): MarkdownAnalysis {
   const visible = withoutCode(markdown);
   const links: WikiLink[] = [];
-  const linkPattern = /(!)?\[\[([^\]|#^]+)(?:#([^\]|^]+))?(?:\^([^\]|]+))?(?:\|([^\]]+))?\]\]/gu;
+  const linkPattern = new RegExp(LINK_SOURCE, "gu");
   for (const match of visible.matchAll(linkPattern)) {
     links.push({
       raw: match[0],

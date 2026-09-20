@@ -14,6 +14,7 @@ import { assertNotSymlink, readTextFileLimited, writeFileAtomic } from "./fs-saf
 import { openOrCreateVaultKey, openVaultReadKeys } from "./keyring.js";
 import { isRedactionLevel, type RedactionLevel } from "./redaction.js";
 import { normalizeVaultName, resolveInside } from "./safety.js";
+import { withVaultLock } from "./vault-lock.js";
 
 /**
  * Per-agent scoped grants.
@@ -72,6 +73,12 @@ export interface AccessRequest {
   action: GrantAction;
   /** Omitted for a vault-wide discovery call. */
   file?: string;
+  /**
+   * The exact key the operation will touch. Omitting it asks the broader
+   * question "is anything here reachable", which narrows a listing; it never
+   * authorizes a write. A caller about to store something must decide the key
+   * first and name it here.
+   */
   key?: string;
   now?: Date;
 }
@@ -89,6 +96,34 @@ export interface GrantDecision {
 }
 
 const GRANTS_FILENAME = "grants.enc";
+/**
+ * See `KV_WRITE_WAIT_MS` in store.ts. Approval traffic is the most contended
+ * path in the vault - every held resolution reads and rewrites this one file -
+ * so a writer waits rather than reporting a failure the owner cannot act on.
+ */
+const GRANTS_WAIT_MS = 15_000;
+
+/**
+ * Runs a read-modify-write of the grant file under the vault lock.
+ *
+ * Every mutation here is a decision taken on what the file said a moment ago:
+ * which grants exist, whether an approval is still unspent. Without a lock
+ * spanning both halves two processes read the same file, each act on it, and
+ * the second silently overwrites the first - which for `consumeApproval` means
+ * one owner "yes" can be spent once per racing process, and the single-use
+ * guarantee this module exists to provide does not hold.
+ *
+ * The keyring is resolved first so the scrypt unwrap does not run inside the
+ * lock; `withVaultLock` is reentrant, so nesting these is safe. It is resolved
+ * only when a policy already exists, because `openOrCreateVaultKey` creates a
+ * keyring on a vault that has none — and `consumeApproval` answers false on an
+ * ungoverned vault without writing anything, so warming it there would bring a
+ * keyring into existence as a side effect of a question.
+ */
+function withGrantsLock<T>(vaultDir: string, passphrase: string, operation: () => T): T {
+  if (grantsExist(vaultDir)) openOrCreateVaultKey(vaultDir, passphrase, "kv")?.fill(0);
+  return withVaultLock(vaultDir, operation, { waitMs: GRANTS_WAIT_MS });
+}
 const MAX_GRANTS = 100;
 const MAX_SCOPES = 50;
 const MAX_REQUESTS = 200;
@@ -193,45 +228,49 @@ export interface NewGrant {
 }
 
 export function addGrant(vaultDir: string, input: NewGrant, passphrase: string): AgentGrant {
-  const file = loadGrants(vaultDir, passphrase) ?? emptyGrantFile();
-  if (!input.scopes.length || input.scopes.length > MAX_SCOPES) {
-    throw new Error(`A grant needs between 1 and ${MAX_SCOPES} scopes.`);
-  }
-  if (input.expiresAt && Number.isNaN(new Date(input.expiresAt).getTime())) {
-    throw new Error(`Invalid expiry: ${input.expiresAt}`);
-  }
-  const grant: AgentGrant = {
-    id: crypto.randomUUID(),
-    agent: normalizeAgent(input.agent),
-    scopes: input.scopes.map(normalizeScope),
-    createdAt: new Date().toISOString(),
-    expiresAt: input.expiresAt ? new Date(input.expiresAt).toISOString() : null,
-    confirm: input.confirm ?? "never",
-    revokedAt: null,
-    ...(input.note ? { note: input.note.trim().slice(0, 240) } : {}),
-  };
-  saveGrants(vaultDir, { ...file, grants: [...file.grants, grant] }, passphrase);
-  return grant;
+  return withGrantsLock(vaultDir, passphrase, () => {
+    const file = loadGrants(vaultDir, passphrase) ?? emptyGrantFile();
+    if (!input.scopes.length || input.scopes.length > MAX_SCOPES) {
+      throw new Error(`A grant needs between 1 and ${MAX_SCOPES} scopes.`);
+    }
+    if (input.expiresAt && Number.isNaN(new Date(input.expiresAt).getTime())) {
+      throw new Error(`Invalid expiry: ${input.expiresAt}`);
+    }
+    const grant: AgentGrant = {
+      id: crypto.randomUUID(),
+      agent: normalizeAgent(input.agent),
+      scopes: input.scopes.map(normalizeScope),
+      createdAt: new Date().toISOString(),
+      expiresAt: input.expiresAt ? new Date(input.expiresAt).toISOString() : null,
+      confirm: input.confirm ?? "never",
+      revokedAt: null,
+      ...(input.note ? { note: input.note.trim().slice(0, 240) } : {}),
+    };
+    saveGrants(vaultDir, { ...file, grants: [...file.grants, grant] }, passphrase);
+    return grant;
+  });
 }
 
 export function revokeGrant(vaultDir: string, id: string, passphrase: string): AgentGrant {
-  const file = loadGrants(vaultDir, passphrase);
-  if (!file) throw new Error("This vault has no grants to revoke.");
-  const grant = file.grants.find((entry) => entry.id === id || entry.id.startsWith(id));
-  if (!grant) throw new Error(`No grant matches: ${id}`);
-  if (grant.revokedAt) return grant;
-  const revoked: AgentGrant = { ...grant, revokedAt: new Date().toISOString() };
-  saveGrants(
-    vaultDir,
-    {
-      ...file,
-      grants: file.grants.map((entry) => (entry.id === grant.id ? revoked : entry)),
-      // A revoked grant must not leave a usable approval behind.
-      requests: file.requests.filter((request) => request.agent !== grant.agent),
-    },
-    passphrase,
-  );
-  return revoked;
+  return withGrantsLock(vaultDir, passphrase, () => {
+    const file = loadGrants(vaultDir, passphrase);
+    if (!file) throw new Error("This vault has no grants to revoke.");
+    const grant = file.grants.find((entry) => entry.id === id || entry.id.startsWith(id));
+    if (!grant) throw new Error(`No grant matches: ${id}`);
+    if (grant.revokedAt) return grant;
+    const revoked: AgentGrant = { ...grant, revokedAt: new Date().toISOString() };
+    saveGrants(
+      vaultDir,
+      {
+        ...file,
+        grants: file.grants.map((entry) => (entry.id === grant.id ? revoked : entry)),
+        // A revoked grant must not leave a usable approval behind.
+        requests: file.requests.filter((request) => request.agent !== grant.agent),
+      },
+      passphrase,
+    );
+    return revoked;
+  });
 }
 
 export function listGrants(vaultDir: string, passphrase: string): AgentGrant[] {
@@ -252,7 +291,17 @@ export function matchesKey(pattern: string, key: string): boolean {
 function scopeCovers(scope: GrantScope, request: AccessRequest): boolean {
   if (!scope.actions.includes(request.action)) return false;
   if (scope.file !== "*" && request.file !== undefined && scope.file !== request.file) return false;
-  if (request.key === undefined) return true;
+  if (request.key === undefined) {
+    // A write is never authorized against an unnamed key. Treating an absent
+    // key as "every pattern matches" let a caller ask permission before it had
+    // decided what to write, and then write a key no scope covered; the key
+    // patterns an owner typed are the whole point of a store scope, so the
+    // only safe answer to "may I write something, I will tell you what later"
+    // is no. Discovery and resolve keep answering the broader question — is
+    // there any key here this agent may touch — which is what narrows a
+    // listing rather than authorizing an operation.
+    return request.action !== "store";
+  }
   return scope.keys.some((pattern) => matchesKey(pattern, request.key!));
 }
 
@@ -323,29 +372,31 @@ export function requestConfirmation(
   input: { agent: string; file: string; key: string },
   passphrase: string,
 ): ConfirmationRequest {
-  const file = loadGrants(vaultDir, passphrase);
-  if (!file) throw new Error("This vault has no grant policy.");
-  const now = new Date();
-  const agent = normalizeAgent(input.agent);
-  const open = file.requests.find(
-    (request) =>
-      request.agent === agent &&
-      request.file === input.file &&
-      request.key === input.key &&
-      new Date(request.expiresAt).getTime() > now.getTime(),
-  );
-  if (open) return open;
-  const request: ConfirmationRequest = {
-    id: crypto.randomUUID(),
-    agent,
-    file: input.file,
-    key: input.key,
-    requestedAt: now.toISOString(),
-    expiresAt: new Date(now.getTime() + APPROVAL_TTL_MS).toISOString(),
-    approvedAt: null,
-  };
-  saveGrants(vaultDir, { ...file, requests: [...pruneRequests(file.requests, now), request] }, passphrase);
-  return request;
+  return withGrantsLock(vaultDir, passphrase, () => {
+    const file = loadGrants(vaultDir, passphrase);
+    if (!file) throw new Error("This vault has no grant policy.");
+    const now = new Date();
+    const agent = normalizeAgent(input.agent);
+    const open = file.requests.find(
+      (request) =>
+        request.agent === agent &&
+        request.file === input.file &&
+        request.key === input.key &&
+        new Date(request.expiresAt).getTime() > now.getTime(),
+    );
+    if (open) return open;
+    const request: ConfirmationRequest = {
+      id: crypto.randomUUID(),
+      agent,
+      file: input.file,
+      key: input.key,
+      requestedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + APPROVAL_TTL_MS).toISOString(),
+      approvedAt: null,
+    };
+    saveGrants(vaultDir, { ...file, requests: [...pruneRequests(file.requests, now), request] }, passphrase);
+    return request;
+  });
 }
 
 function pruneRequests(requests: ConfirmationRequest[], now: Date): ConfirmationRequest[] {
@@ -359,33 +410,37 @@ export function pendingRequests(vaultDir: string, passphrase: string): Confirmat
 }
 
 export function approveRequest(vaultDir: string, id: string, passphrase: string): ConfirmationRequest {
-  const file = loadGrants(vaultDir, passphrase);
-  if (!file) throw new Error("This vault has no grant policy.");
-  const now = new Date();
-  const request = pruneRequests(file.requests, now).find((entry) => entry.id === id || entry.id.startsWith(id));
-  if (!request) throw new Error(`No pending request matches: ${id}`);
-  const approved: ConfirmationRequest = {
-    ...request,
-    approvedAt: now.toISOString(),
-    expiresAt: new Date(now.getTime() + APPROVAL_TTL_MS).toISOString(),
-  };
-  saveGrants(
-    vaultDir,
-    {
-      ...file,
-      requests: pruneRequests(file.requests, now).map((entry) => (entry.id === request.id ? approved : entry)),
-    },
-    passphrase,
-  );
-  return approved;
+  return withGrantsLock(vaultDir, passphrase, () => {
+    const file = loadGrants(vaultDir, passphrase);
+    if (!file) throw new Error("This vault has no grant policy.");
+    const now = new Date();
+    const request = pruneRequests(file.requests, now).find((entry) => entry.id === id || entry.id.startsWith(id));
+    if (!request) throw new Error(`No pending request matches: ${id}`);
+    const approved: ConfirmationRequest = {
+      ...request,
+      approvedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + APPROVAL_TTL_MS).toISOString(),
+    };
+    saveGrants(
+      vaultDir,
+      {
+        ...file,
+        requests: pruneRequests(file.requests, now).map((entry) => (entry.id === request.id ? approved : entry)),
+      },
+      passphrase,
+    );
+    return approved;
+  });
 }
 
 export function denyRequest(vaultDir: string, id: string, passphrase: string): void {
-  const file = loadGrants(vaultDir, passphrase);
-  if (!file) throw new Error("This vault has no grant policy.");
-  const now = new Date();
-  const remaining = pruneRequests(file.requests, now).filter((entry) => entry.id !== id && !entry.id.startsWith(id));
-  saveGrants(vaultDir, { ...file, requests: remaining }, passphrase);
+  withGrantsLock(vaultDir, passphrase, () => {
+    const file = loadGrants(vaultDir, passphrase);
+    if (!file) throw new Error("This vault has no grant policy.");
+    const now = new Date();
+    const remaining = pruneRequests(file.requests, now).filter((entry) => entry.id !== id && !entry.id.startsWith(id));
+    saveGrants(vaultDir, { ...file, requests: remaining }, passphrase);
+  });
 }
 
 /**
@@ -397,25 +452,27 @@ export function consumeApproval(
   input: { agent: string; file: string; key: string },
   passphrase: string,
 ): boolean {
-  const file = loadGrants(vaultDir, passphrase);
-  if (!file) return false;
-  const now = new Date();
-  const live = pruneRequests(file.requests, now);
-  const approval = live.find(
-    (request) =>
-      request.approvedAt !== null &&
-      request.agent === input.agent &&
-      request.file === input.file &&
-      request.key === input.key,
-  );
-  if (!approval) {
-    if (live.length !== file.requests.length) {
-      saveGrants(vaultDir, { ...file, requests: live }, passphrase);
+  return withGrantsLock(vaultDir, passphrase, () => {
+    const file = loadGrants(vaultDir, passphrase);
+    if (!file) return false;
+    const now = new Date();
+    const live = pruneRequests(file.requests, now);
+    const approval = live.find(
+      (request) =>
+        request.approvedAt !== null &&
+        request.agent === input.agent &&
+        request.file === input.file &&
+        request.key === input.key,
+    );
+    if (!approval) {
+      if (live.length !== file.requests.length) {
+        saveGrants(vaultDir, { ...file, requests: live }, passphrase);
+      }
+      return false;
     }
-    return false;
-  }
-  saveGrants(vaultDir, { ...file, requests: live.filter((request) => request.id !== approval.id) }, passphrase);
-  return true;
+    saveGrants(vaultDir, { ...file, requests: live.filter((request) => request.id !== approval.id) }, passphrase);
+    return true;
+  });
 }
 
 /** Keys an agent may even learn the names of, used to narrow discovery. */

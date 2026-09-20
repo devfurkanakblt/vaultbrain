@@ -152,6 +152,23 @@ node dist/cli.js --vault ./vault/personal mcp --agent claude-code
 
 A working demo vault (dummy data only) is checked in at `vault/example/`.
 
+### Exit codes
+
+Scripts and CI chain on these, so they describe the result rather than the
+output format — `--json` and the human-readable form of the same command always
+exit the same way.
+
+| Code | Meaning                                                                        |
+| ---: | ------------------------------------------------------------------------------ |
+|  `0` | The command did what it was asked to do.                                       |
+|  `1` | It failed: bad arguments, wrong passphrase, a damaged or busy vault.           |
+|  `2` | It ran, reported honestly, and did **not** do the work.                        |
+
+Code `2` covers a failed `audit` verification, `purge` without `--yes`, a
+`docs verify` that found integrity errors, and a `sync apply` blocked by
+unresolved heads. Treat `2` as "stop the pipeline", not as success with a
+warning.
+
 ### Unlocking, locking and the storage format
 
 ```bash
@@ -260,6 +277,32 @@ node dist/cli.js --vault ./vault/personal docs get Projects/Alpha --with-frontma
 Use `docs list`, `docs import`, `docs rebuild-index`, and `docs remove` for the
 remaining document lifecycle operations. These are direct CLI operations; no
 model sees their output unless you explicitly pipe it into one.
+
+#### Search query language
+
+`docs search` takes the following. Terms combine with AND unless separated by
+`OR`, and `-` negates whichever term it is attached to — including the filters.
+
+| Query                            | Matches                                              |
+| -------------------------------- | ---------------------------------------------------- |
+| `launch plan`                     | both words appear somewhere                          |
+| `"launch plan"`                   | that exact phrase                                    |
+| `launch*`                         | a word starting with `launch` (a bare word is a plain substring, so `apple` also matches `grapple`; `appl*` does not) |
+| `launch OR rollout`               | either                                               |
+| `launch AND rollout`              | both; the same as writing them side by side          |
+| `tag:project/active` `tag:proj*`  | tag, exactly or by prefix; a leading `#` is optional |
+| `path:Projects/` `file:Alpha`     | substring of the full path, or of the basename       |
+| `[status]`                        | the note has a `status` property                     |
+| `[status:done]` `[status:do*]`    | the property holds that value                        |
+| `created:2026-01-15`              | created on that UTC day                              |
+| `created:2026-01-01..2026-06-30`  | created in that inclusive range                      |
+| `updated:>=2026-07-01`            | modified on or after that day (`<=` also works)      |
+| `-tag:archive`                    | excludes; likewise `-[status:done]`, `-"draft"`      |
+
+`OR` and `AND` are operators only when written alone and in capitals, so a note
+about the word "or" is still searchable. An operator whose argument is unusable
+— an empty `tag:`, an unparseable date — falls back to plain text rather than
+failing the query, so a search box narrows as you type.
 
 Revision recovery and encrypted attachments are built in:
 
@@ -699,6 +742,29 @@ so entries stack up instead of colliding. `find_notes_in_range` then lets an
 agent browse "what did I note about health in August" using only that
 timestamp, with zero decryption — the note-taking equivalent of Obsidian's
 daily-notes view, but without reading your notes to build it.
+
+The key is decided before permission is checked, so a journal note needs a
+grant whose scope actually covers the generated name — `NOTE_*` or `*`. A
+grant scoped to one exact key (`health:IBAN:store`) permits writes to that key
+and nothing else, including auto-named notes.
+
+### What MCP does not reach: this surface is key-value only
+
+These five tools are the whole AI boundary, and they all operate on the
+key-value store — the `*.kv.enc` categories and the value-free catalog built
+from them. **Markdown documents are deliberately not reachable over MCP in this
+release.** Notes created with `vbrain docs put`, or brought in with the
+Obsidian importer, have no discovery or resolve tool: an agent cannot list
+them, search them, or read a field out of one.
+
+This is a scope boundary, not an oversight, and it is narrower than the broader
+"per-agent grants scoped by vault, collection, note, field, action and expiry"
+described in [`docs/PRODUCT.md`](docs/PRODUCT.md). The grant model implemented
+here is file/key/action/expiry over key-value entries; note- and field-level
+scoping for Markdown is not built, and adding discovery tools without it would
+mean handing an agent a boundary the policy language cannot express. Use Mode 1
+(`vbrain docs ...`) for Markdown, and reach for MCP when a value belongs in the
+key-value store.
 
 ## Encrypted sync protocol — Phase 6 foundation
 

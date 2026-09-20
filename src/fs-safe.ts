@@ -28,6 +28,42 @@ export function assertNoSymlinkComponents(rootDir: string, targetPath: string): 
   }
 }
 
+/**
+ * The physical path `target` names, with every symbolic link and Windows
+ * junction in its existing ancestors resolved.
+ *
+ * `path.resolve` answers a lexical question: it normalizes `.` and `..` and
+ * nothing else. That is not enough to decide whether a directory lies inside
+ * another, because a junction or symlink anywhere above the target can point
+ * the whole subtree somewhere else while the two strings still look unrelated.
+ * A containment check built on the lexical answer therefore passes for a path
+ * that physically resolves inside the very directory it was meant to stay out
+ * of.
+ *
+ * The target itself usually does not exist yet — it is about to be created —
+ * so the deepest ancestor that does exist is resolved and the remaining
+ * segments are appended to it. Those segments cannot themselves be links,
+ * because nothing is there.
+ */
+export function resolvePhysicalPath(target: string): string {
+  const resolved = path.resolve(target);
+  const tail: string[] = [];
+  let current = resolved;
+  for (;;) {
+    try {
+      return path.join(fs.realpathSync.native(current), ...tail);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const parent = path.dirname(current);
+      // A root that does not resolve leaves nothing further to walk; the
+      // lexical answer is then the only one there is.
+      if (parent === current) return resolved;
+      tail.unshift(path.basename(current));
+      current = parent;
+    }
+  }
+}
+
 export function readTextFileLimited(filePath: string, maxBytes: number, label: string): string {
   assertNotSymlink(filePath);
   const size = fs.statSync(filePath).size;

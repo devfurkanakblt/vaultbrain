@@ -19,6 +19,7 @@ import {
 import { resolveInside } from "./safety.js";
 import { listVaultFiles, loadVaultFile, saveVaultFile, vaultFileEnvelopeVersion } from "./store.js";
 import { withVaultLock } from "./vault-lock.js";
+import { buildSchema, schemaNeedsKeyringMigration } from "./schema.js";
 import { appendKeyringAuditWithKey, newKeyringAuditKey } from "./keyring-audit.js";
 
 const LEGACY_SCRYPT_N = 2 ** 15;
@@ -32,6 +33,8 @@ export interface KeyringMigrationReport {
   generated: KeyName[];
   kvFilesRewritten: string[];
   grantsRewritten: boolean;
+  /** True when the discovery catalog was rebuilt under the vault keyring. */
+  catalogRewritten: boolean;
   manifestTombstoned: boolean;
 }
 
@@ -113,6 +116,16 @@ function tombstoneManifest(vaultDir: string): boolean {
  * Resumable: a run interrupted after the keyring was written finishes the
  * remaining key-value rewrites and the manifest tombstone on the next call.
  */
+/**
+ * Rebuilds the discovery catalog under the vault keyring when it is still
+ * sealed with a key derived from the passphrase. Returns whether it ran.
+ */
+function migrateCatalog(vaultDir: string, passphrase: string): boolean {
+  if (!schemaNeedsKeyringMigration(vaultDir)) return false;
+  buildSchema(vaultDir, passphrase);
+  return true;
+}
+
 export function migrateToKeyring(vaultDir: string, passphrase: string): KeyringMigrationReport {
   if (!passphrase) throw new Error("A non-empty vault passphrase is required.");
   return withVaultLock(vaultDir, () => {
@@ -161,6 +174,12 @@ export function migrateToKeyring(vaultDir: string, passphrase: string): KeyringM
 
         for (const [name, entries] of pending) saveVaultFile(vaultDir, name, entries, passphrase);
         if (grants) saveGrants(vaultDir, grants, passphrase);
+        // The discovery catalog is rebuilt, not rewritten: it is derived from
+        // the files just re-sealed, and leaving it under the old
+        // passphrase-derived envelope would leave one artifact behind that a
+        // later passphrase change could not carry and a re-key could not
+        // classify.
+        const catalogRewritten = migrateCatalog(vaultDir, passphrase);
 
         const report = {
           created: true,
@@ -168,6 +187,7 @@ export function migrateToKeyring(vaultDir: string, passphrase: string): KeyringM
           generated,
           kvFilesRewritten: [...pending.keys()],
           grantsRewritten: grants !== null,
+          catalogRewritten,
           manifestTombstoned: tombstoneManifest(vaultDir),
         };
         appendKeyringAuditWithKey(vaultDir, keys.audit, auditOperation, "allowed");
@@ -209,6 +229,7 @@ export function migrateToKeyring(vaultDir: string, passphrase: string): KeyringM
       generated,
       kvFilesRewritten,
       grantsRewritten,
+      catalogRewritten: migrateCatalog(vaultDir, passphrase),
       manifestTombstoned: tombstoneManifest(vaultDir),
     };
   });

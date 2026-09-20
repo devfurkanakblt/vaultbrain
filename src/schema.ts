@@ -1,9 +1,20 @@
 import fs from "node:fs";
-import { listVaultFiles, loadVaultFile } from "./store.js";
+import { KV_WRITE_WAIT_MS, listVaultFiles, loadVaultFile } from "./store.js";
 import { assertNotSymlink, readTextFileLimited, writeFileAtomic } from "./fs-safe.js";
 import { removeFile } from "./fs-tree.js";
 import { resolveInside } from "./safety.js";
-import { decrypt, encrypt, type AnyEncryptedPayload } from "./crypto.js";
+import {
+  decrypt,
+  decryptWithKey,
+  encrypt,
+  encryptWithKey,
+  envelopeVersion,
+  KEYED_ENVELOPE_VERSION,
+  type AnyEncryptedPayload,
+  type KeyedEncryptedPayload,
+} from "./crypto.js";
+import { openOrCreateVaultKey, openVaultReadKeys } from "./keyring.js";
+import { withVaultLock } from "./vault-lock.js";
 
 export interface SchemaEntry {
   key: string;
@@ -15,36 +26,85 @@ export interface Schema {
   files: Record<string, SchemaEntry[]>;
 }
 
-const SCHEMA_FILENAME = "schema.enc";
+export const SCHEMA_FILENAME = "schema.enc";
 const LEGACY_SCHEMA_FILENAME = "schema.json";
+
+/**
+ * The catalog's AEAD domain, and the reason it is not simply `"schema"`: a
+ * key-value file may legitimately be called `schema`, and it would then be
+ * stored as `schema.kv.enc` under that same identity. `normalizeVaultName`
+ * rejects `:`, so no vault file can ever collide with this string.
+ */
+export const SCHEMA_CATALOG_IDENTITY = "schema:catalog";
+
+/**
+ * The catalog is sealed with the keyring's `kv` key, the same key the entries
+ * it describes are sealed with — not with a key derived from the passphrase.
+ *
+ * Deriving it from the passphrase made the catalog the one artifact a
+ * passphrase change could not carry: changing the passphrase re-wraps the
+ * keyring, which is all a keyring-sealed artifact needs, but it cannot rewrite
+ * something bound to the old passphrase directly. A vault in that state
+ * resolved single keys with the new passphrase and failed every `list`,
+ * `search` and MCP discovery call with an authentication error.
+ */
+function catalogKeyForWrite(vaultDir: string, passphrase: string): Buffer | null {
+  return openOrCreateVaultKey(vaultDir, passphrase, "kv");
+}
 
 /**
  * Rebuilds the encrypted discovery catalog: key names + descriptions only,
  * values stripped. MCP decrypts it in-process and applies live grants.
  */
 export function buildSchema(vaultDir: string, passphrase: string): Schema {
-  const files = listVaultFiles(vaultDir);
-  const schema: Schema = { generatedAt: new Date().toISOString(), files: {} };
+  // Resolved before the lock: see `warmKeyring` in store.ts.
+  catalogKeyForWrite(vaultDir, passphrase)?.fill(0);
+  // Under the lock for the whole scan, not just the write: a catalog built
+  // from files a concurrent writer was replacing halfway through would list a
+  // set of keys that never existed together.
+  return withVaultLock(
+    vaultDir,
+    () => {
+      const files = listVaultFiles(vaultDir);
+      const schema: Schema = { generatedAt: new Date().toISOString(), files: {} };
 
-  for (const name of files) {
-    const entries = loadVaultFile(vaultDir, name, passphrase);
-    schema.files[name] = entries.map((e) => ({ key: e.key, desc: e.desc }));
-  }
+      for (const name of files) {
+        const entries = loadVaultFile(vaultDir, name, passphrase);
+        schema.files[name] = entries.map((e) => ({ key: e.key, desc: e.desc }));
+      }
 
-  writeFileAtomic(
-    resolveInside(vaultDir, SCHEMA_FILENAME),
-    JSON.stringify(encrypt(JSON.stringify(schema), passphrase), null, 2),
-    { mode: 0o600 }
+      const key = catalogKeyForWrite(vaultDir, passphrase);
+      const payload = key
+        ? encryptWithKey(JSON.stringify(schema), key, SCHEMA_CATALOG_IDENTITY)
+        : encrypt(JSON.stringify(schema), passphrase);
+      writeFileAtomic(resolveInside(vaultDir, SCHEMA_FILENAME), JSON.stringify(payload, null, 2), {
+        mode: 0o600,
+      });
+
+      // Earlier releases generated a plaintext catalog. Remove it only after the
+      // encrypted replacement has been committed successfully.
+      const legacyPath = resolveInside(vaultDir, LEGACY_SCHEMA_FILENAME);
+      if (fs.existsSync(legacyPath)) {
+        assertNotSymlink(legacyPath);
+        removeFile(legacyPath);
+      }
+      return schema;
+    },
+    { waitMs: KV_WRITE_WAIT_MS },
   );
+}
 
-  // Earlier releases generated a plaintext catalog. Remove it only after the
-  // encrypted replacement has been committed successfully.
-  const legacyPath = resolveInside(vaultDir, LEGACY_SCHEMA_FILENAME);
-  if (fs.existsSync(legacyPath)) {
-    assertNotSymlink(legacyPath);
-    removeFile(legacyPath);
-  }
-  return schema;
+/**
+ * True when a catalog exists but is still sealed under the pre-keyring,
+ * passphrase-derived envelope. `vbrain passphrase change` uses this to rewrite
+ * it while both passphrases are known, which is the only moment it can.
+ */
+export function schemaNeedsKeyringMigration(vaultDir: string): boolean {
+  const p = resolveInside(vaultDir, SCHEMA_FILENAME);
+  if (!fs.existsSync(p)) return false;
+  assertNotSymlink(p);
+  const payload = JSON.parse(readTextFileLimited(p, 64 * 1024 * 1024, "Schema")) as AnyEncryptedPayload;
+  return envelopeVersion(payload) !== KEYED_ENVELOPE_VERSION;
 }
 
 export function readSchema(vaultDir: string, passphrase: string): Schema | null {
@@ -52,7 +112,25 @@ export function readSchema(vaultDir: string, passphrase: string): Schema | null 
   if (!fs.existsSync(p)) return null;
   assertNotSymlink(p);
   const payload = JSON.parse(readTextFileLimited(p, 64 * 1024 * 1024, "Schema")) as AnyEncryptedPayload;
-  return JSON.parse(decrypt(payload, passphrase)) as Schema;
+  if (envelopeVersion(payload) === KEYED_ENVELOPE_VERSION) {
+    const keys = openVaultReadKeys(vaultDir, passphrase, "kv");
+    if (!keys) throw new Error("The catalog is keyring-encrypted but the vault has no readable keyring.");
+    return JSON.parse(
+      decryptWithKey(payload as KeyedEncryptedPayload, keys, SCHEMA_CATALOG_IDENTITY),
+    ) as Schema;
+  }
+  // A catalog an earlier release sealed directly with the passphrase. It stays
+  // readable here, and the next `vbrain index` or `passphrase change` rewrites
+  // it under the keyring.
+  try {
+    return JSON.parse(decrypt(payload, passphrase)) as Schema;
+  } catch (error) {
+    throw new Error(
+      "This vault's catalog was written by an earlier release and cannot be opened with the current " +
+        "passphrase. Run 'vbrain index' to rebuild it.",
+      { cause: error },
+    );
+  }
 }
 
 /** Very simple fuzzy match over key names + descriptions for MVP "fast find". */

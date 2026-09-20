@@ -1526,6 +1526,11 @@ sync
             ? `Already applied ${objectType}:${objectId}@${result.revision}.`
             : `Applied ${result.applied} change(s); ${objectType}:${objectId}@${result.revision} is current.`,
       );
+      // Nothing was applied, so this is not a success. Exiting 0 let a shell
+      // chain or a CI step carry on as though the conflict had been resolved.
+      // Code 2 is this CLI's "ran fine, did not do the work" answer, the same
+      // one `purge` without `--yes` and a failed `audit` already return.
+      if (result.conflict) process.exitCode = 2;
     } finally {
       vault.lock();
     }
@@ -1863,6 +1868,12 @@ program
     const dir = program.opts().vault;
     const verification = verifyAudit(dir, passphrase);
     const entries = readAudit(dir);
+    // Set before either branch returns. A failed verification used to exit 0
+    // in `--json` mode and 2 in text mode, so the machine-readable output —
+    // the one a script actually chains on — was the one that reported a broken
+    // audit chain as success. The exit code is a property of the result, not
+    // of the format it is printed in.
+    if (!verification.valid) process.exitCode = 2;
     if (opts.json) {
       console.log(JSON.stringify({ verification, entries }, null, 2));
       return;
@@ -1883,7 +1894,6 @@ program
           (governed.length ? `  (${governed.join(", ")})` : ""),
       );
     }
-    if (!verification.valid) process.exitCode = 2;
   });
 
 program
