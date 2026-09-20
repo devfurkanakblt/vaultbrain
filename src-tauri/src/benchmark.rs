@@ -77,9 +77,7 @@ fn corpus_note(index: usize) -> NoteDocument {
             index % 20
         )
     } else {
-        format!(
-            "# Note {index}\ntoken0 and some recall text.\nRoot.\n#group-0\n"
-        )
+        format!("# Note {index}\ntoken0 and some recall text.\nRoot.\n#group-0\n")
     };
     NoteDocument {
         version: 1,
@@ -195,8 +193,10 @@ pub fn phases(vault_path: &str, passphrase: &str, saves: usize) -> Result<String
     for (iteration, id) in ids.iter().enumerate() {
         let previous = session.index.notes[id].note.clone();
         let mut note = previous.clone();
-        note.body = format!("# phase {iteration}
-");
+        note.body = format!(
+            "# phase {iteration}
+"
+        );
         note.revision = previous.revision + 1;
         note.updated_at = now();
         let (links, headings) = analyze_markdown(&note.body)?;
@@ -247,7 +247,10 @@ pub fn phases(vault_path: &str, passphrase: &str, saves: usize) -> Result<String
 
     let line = |name: &str, samples: Vec<f64>| {
         let stats = Stats::from(samples);
-        format!("\"{name}\": {{ \"p50\": {:.3}, \"p95\": {:.3} }}", stats.p50, stats.p95)
+        format!(
+            "\"{name}\": {{ \"p50\": {:.3}, \"p95\": {:.3} }}",
+            stats.p50, stats.p95
+        )
     };
     Ok(format!(
         "{{ {}, {}, {}, {}, {}, {} }}",

@@ -1849,7 +1849,8 @@ fn refresh_resolved_source(index: &mut DocumentIndex, source_id: &str) {
     let Some(links) = index.notes.get(source_id).map(|note| note.links.clone()) else {
         return;
     };
-    let resolved: Vec<Option<String>> = links.iter().map(|link| resolve_link(index, link)).collect();
+    let resolved: Vec<Option<String>> =
+        links.iter().map(|link| resolve_link(index, link)).collect();
     let unresolved: Vec<WikiLink> = links
         .iter()
         .zip(&resolved)
@@ -1860,9 +1861,7 @@ fn refresh_resolved_source(index: &mut DocumentIndex, source_id: &str) {
         index.unresolved.insert(source_id.to_string(), unresolved);
     }
     let targets: HashSet<String> = resolved.iter().flatten().cloned().collect();
-    index
-        .resolved_links
-        .insert(source_id.to_string(), resolved);
+    index.resolved_links.insert(source_id.to_string(), resolved);
     for target in targets {
         if target != source_id {
             add_owner(&mut index.backlinks, target, source_id);
@@ -6873,7 +6872,10 @@ mod tests {
         // index missing a note the vault still holds.
         let mut lines: Vec<String> = raw.lines().map(str::to_string).collect();
         let mut damaged: EncryptedPayload = serde_json::from_str(&lines[1]).unwrap();
-        damaged.ciphertext = format!("{}AAAA", &damaged.ciphertext[..damaged.ciphertext.len() - 4]);
+        damaged.ciphertext = format!(
+            "{}AAAA",
+            &damaged.ciphertext[..damaged.ciphertext.len() - 4]
+        );
         lines[1] = serde_json::to_string(&damaged).unwrap();
         fs::write(&log_path, format!("{}\n", lines.join("\n"))).unwrap();
 
