@@ -112,6 +112,29 @@ BLOOD_TYPE="0 Rh+"
   `vbrain index`; values are never included. Never put sensitive
   information in a description — the tool can't enforce that for you.
 
+### Entering many keys at once
+
+`vbrain add <file> --from <path.kv>` reads exactly the shape above and writes
+the whole file in one transaction. Adding keys one command at a time costs
+about 620 ms each, almost all of it fixed: process start, the module graph and
+the scrypt keyring unwrap, all paid again for every key. Measured, 250 keys
+took 158 seconds that way and **2.1 seconds** through `--from`.
+
+```bash
+vbrain add health --from ./health-entries.kv
+# Stored 250 entries in health.kv.enc (encrypted): 250 new, 0 replaced.
+```
+
+- **All or nothing.** Every entry is validated before anything is written, so
+  one bad key writes none of them rather than leaving the category half
+  updated. A key repeated inside one file is refused too: "last one wins" is a
+  rule you did not necessarily intend.
+- Existing keys are replaced in place; an entry with no `@desc` keeps the
+  description already stored.
+- The audit chain records **each key**, not one line for the batch.
+- **The source file is plain text.** It holds your values unencrypted on disk
+  until you delete it, and the command says so when it finishes.
+
 ## Quickstart
 
 The npm package is named `vault-brain`; installing it globally exposes the
@@ -132,6 +155,10 @@ export VBRAIN_PASSPHRASE="use-a-real-passphrase-here"
 
 node dist/cli.js --vault ./vault/personal init
 node dist/cli.js --vault ./vault/personal add health 'DOCTOR_NEXT_APPOINTMENT="2026-09-15"' --desc "Bir sonraki doktor kontrol tarihi"
+
+# many at once, from a plain .kv file — see "Format" below for the shape
+node dist/cli.js --vault ./vault/personal add health --from ./health-entries.kv
+
 node dist/cli.js --vault ./vault/personal index
 
 # Mode 1 — direct, zero-exposure

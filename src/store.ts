@@ -208,6 +208,110 @@ export function upsertEntry(
   );
 }
 
+export interface KVUpsert {
+  key: string;
+  value: string;
+  desc: string;
+}
+
+export interface BulkUpsertResult {
+  added: number;
+  replaced: number;
+}
+
+/**
+ * The most entries one bulk write may carry.
+ *
+ * A bound rather than a guess: the whole batch is held in memory, encrypted
+ * as one plaintext and written as one file, so an unbounded batch is an
+ * unbounded allocation. Ten thousand keys in one category is already far past
+ * anything this format is meant to hold.
+ */
+export const MAX_BULK_ENTRIES = 10_000;
+
+/**
+ * Writes many entries into one category as a single transaction.
+ *
+ * `upsertEntry` costs about 620 ms from the command line, of which roughly
+ * 610 is fixed: process start, the module graph, and the scrypt keyring
+ * unwrap. The entry itself costs about 4 ms. Entering 250 keys one command at
+ * a time therefore took 158 seconds, of which about one was the work. This
+ * pays those fixed costs once.
+ *
+ * All or nothing, deliberately. Every entry is validated before the lock is
+ * taken, so a batch with one bad key writes nothing rather than leaving the
+ * category half-updated — a partial bulk import is the worst outcome here,
+ * because the caller cannot tell from the outside where it stopped.
+ *
+ * A duplicate key inside one batch is refused rather than resolved by order.
+ * "Last one wins" is a reasonable rule that the caller did not necessarily
+ * intend, and silently dropping one of two values in a file the user wrote by
+ * hand is the kind of loss this vault exists to prevent.
+ */
+export function upsertEntries(
+  vaultDir: string,
+  name: string,
+  updates: readonly KVUpsert[],
+  passphrase: string,
+): BulkUpsertResult {
+  if (!updates.length) return { added: 0, replaced: 0 };
+  if (updates.length > MAX_BULK_ENTRIES) {
+    throw new Error(`A single bulk write cannot exceed ${MAX_BULK_ENTRIES} entries.`);
+  }
+
+  // Validate everything first. Nothing below this point may reject a value.
+  const prepared: KVUpsert[] = [];
+  const seen = new Map<string, number>();
+  updates.forEach((update, index) => {
+    let safeKey: string;
+    let safeDesc: string;
+    try {
+      safeKey = normalizeEntryKey(update.key);
+      safeDesc = normalizeDescription(update.desc);
+      assertValueSize(update.value);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      // Which entry, by position and by key: a batch is rejected whole, so the
+      // message has to say what to fix without the caller bisecting the file.
+      throw new Error(`Entry ${index + 1} (${update.key}): ${reason}`, { cause: error });
+    }
+    const duplicate = seen.get(safeKey);
+    if (duplicate !== undefined) {
+      throw new Error(
+        `Entry ${index + 1} repeats the key ${safeKey}, already given as entry ${duplicate + 1}. Remove one; this write will not choose for you.`,
+      );
+    }
+    seen.set(safeKey, index);
+    prepared.push({ key: safeKey, value: update.value, desc: safeDesc });
+  });
+
+  warmKeyring(vaultDir, passphrase);
+  return withVaultLock(
+    vaultDir,
+    () => {
+      const entries = loadVaultFile(vaultDir, name, passphrase);
+      const positions = new Map(entries.map((entry, index) => [entry.key, index]));
+      let added = 0;
+      let replaced = 0;
+      for (const update of prepared) {
+        const at = positions.get(update.key);
+        if (at === undefined) {
+          positions.set(update.key, entries.length);
+          entries.push(update);
+          added += 1;
+        } else {
+          entries[at] = { key: update.key, value: update.value, desc: update.desc || entries[at].desc };
+          replaced += 1;
+        }
+      }
+      // One read, one encrypt, one atomic replace for the whole batch.
+      saveVaultFile(vaultDir, name, entries, passphrase);
+      return { added, replaced };
+    },
+    { waitMs: KV_WRITE_WAIT_MS },
+  );
+}
+
 /**
  * Auto-generated keys for freeform journal-style notes encode their own
  * timestamp: NOTE_YYYYMMDD_HHMMSS_xxxx. This lets date-range browsing work

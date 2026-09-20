@@ -153,6 +153,28 @@ are closed. Regressions live in `test/cli-audit-2026-09-19.test.mjs` and
   repository changes. `CONTRIBUTING.md` no longer tells contributors to ignore
   the check's output.
 
+### Bulk key-value entry
+
+- Added: `vbrain add <file> --from <path.kv>` writes many entries in one
+  transaction, reading the same plain `.kv` shape the format already uses.
+  Entering keys one command at a time costs about 620 ms each, of which
+  roughly 610 is fixed and paid again every time: Node startup and the module
+  graph (289 ms, measured as `vbrain --help`, which touches no vault) and the
+  scrypt keyring unwrap (~324 ms). The entry itself costs about 4 ms. Measured,
+  250 keys took 158 seconds one at a time and 2.1 seconds through `--from`.
+  The scrypt cost is a deliberate security parameter; this reduces how many
+  times it is paid rather than lowering it.
+- Added: `upsertEntries` in `src/store.ts`, the key-value counterpart to the
+  document engine's `putMany`. All or nothing: every entry is validated before
+  the vault lock is taken, so a batch with one bad key writes nothing rather
+  than leaving a category half updated. A key repeated inside one batch is
+  refused rather than resolved by order. The audit chain records each key
+  individually, because "250 keys were written" does not answer "when did this
+  key get into my vault".
+- Changed: `vbrain add` takes its `KEY=value` argument optionally, since
+  `--from` supplies entries instead, and `--desc` is required only for the
+  single-key form.
+
 ### MCP discovery output
 
 - Changed: `list_keys`, `find_key` and `find_notes_in_range` return one
