@@ -146,7 +146,12 @@ try {
   // before, so the tier gates could all pass while the save path was
   // unbounded. Each iteration edits a different note so the measurement is not
   // dominated by one note's warm cache.
-  const incrementalSave = measureMany(50, (index) => {
+  // More samples than the other measurements take. A save is four durable
+  // file operations, and on a shared CI disk an fsync is bimodal: the median
+  // is a few milliseconds and an occasional one commits a filesystem journal.
+  // Fifty samples let two slow ones move p95 by tens of milliseconds, which
+  // says more about the runner than about the save path.
+  const incrementalSave = measureMany(200, (index) => {
     const target = created[index % created.length];
     vault.put({
       id: target.id,

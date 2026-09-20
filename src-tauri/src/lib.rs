@@ -37,7 +37,13 @@ use zeroize::Zeroizing;
 
 type HmacSha256 = Hmac<Sha256>;
 mod audit;
+/// Save-path measurement for the desktop core. Compiled only under the
+/// `benchmark` feature, so nothing in it ships in the desktop binary.
+#[cfg(feature = "benchmark")]
+#[doc(hidden)]
+pub mod benchmark;
 mod desktop_sync;
+mod index_log;
 mod keyring;
 mod memory;
 mod updater;
@@ -154,6 +160,15 @@ struct VaultSession {
     /// The `audit` key, absent on a legacy vault. See `SessionKeys`.
     audit_key: Option<Zeroizing<[u8; 32]>>,
     index: DocumentIndex,
+    /// The snapshot generation the in-memory index belongs to, and how much of
+    /// its log this session has already applied. Together they let a write
+    /// pick up another process's appends without re-reading the whole index.
+    log_generation: u64,
+    log_lines: usize,
+    log_bytes: u64,
+    /// Identity of the snapshot this session last read, so a write can tell
+    /// "nobody replaced index.enc" from "someone did" without decrypting it.
+    index_stamp: Option<(u64, std::time::SystemTime)>,
     /// Shared with the updater controller. Once installation begins, every
     /// write path fails closed even if it was queued before the vault lock.
     install_gate: Arc<AtomicBool>,
@@ -439,7 +454,7 @@ struct IndexedNote {
     headings: Vec<Heading>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WikiLink {
     raw: String,
@@ -483,6 +498,13 @@ struct DocumentIndex {
     name_owners: HashMap<String, Vec<String>>,
     #[serde(default)]
     basename_owners: HashMap<String, Vec<String>>,
+    /// Which change log this snapshot owns. Zero on an index written before
+    /// the log existed, which simply means there is no log to replay. Every
+    /// snapshot bumps it, so a log left behind by a crash mid-compaction names
+    /// a generation that no longer matches and is discarded instead of
+    /// replayed onto a snapshot that already contains it.
+    #[serde(default)]
+    log_generation: u64,
     #[serde(flatten)]
     extra: serde_json::Map<String, Value>,
 }
@@ -510,6 +532,7 @@ impl DocumentIndex {
             path_owners: HashMap::new(),
             name_owners: HashMap::new(),
             basename_owners: HashMap::new(),
+            log_generation: 0,
             extra,
         }
     }
@@ -814,7 +837,16 @@ impl VaultWriteGuard {
                 reject_symlink(&path)?;
                 match OpenOptions::new().create_new(true).write(true).open(&path) {
                     Ok(mut file) => {
-                        if let Err(error) = file.write_all(&encoded).and_then(|_| file.sync_all()) {
+                        // Written, not fsynced. A vault lock is advisory and
+                        // only means anything while its holder is alive: a
+                        // record that did not survive a crash is reclaimed by
+                        // the PID liveness check, exactly as a stale one is.
+                        // Paying two FlushFileBuffers per save for a file whose
+                        // durability nothing reads was most of what a desktop
+                        // save cost once the index rewrite was gone, and the
+                        // TypeScript implementation of this same lock has never
+                        // fsynced it.
+                        if let Err(error) = file.write_all(&encoded) {
                             let _ = fs::remove_file(&path);
                             return Err(error.to_string());
                         }
@@ -1112,6 +1144,17 @@ fn load_note(session: &VaultSession, id: &str) -> Result<NoteDocument, String> {
     Ok(note)
 }
 
+/// The snapshot's size and modification time, or None when there is none.
+///
+/// A write has to notice that another process replaced `index.enc` since this
+/// session read it. Comparing this stamp answers that without decrypting a
+/// file that can reach a hundred megabytes, which is what re-reading it on
+/// every write used to cost.
+fn index_stamp(root_dir: &Path) -> Option<(u64, std::time::SystemTime)> {
+    let meta = fs::metadata(root_dir.join("index.enc")).ok()?;
+    Some((meta.len(), meta.modified().ok()?))
+}
+
 fn read_index(session: &VaultSession) -> Result<DocumentIndex, String> {
     let path = session.root_dir.join("index.enc");
     if !path.exists() {
@@ -1127,6 +1170,40 @@ fn read_index(session: &VaultSession) -> Result<DocumentIndex, String> {
     if index.version != 2 || index.derived != DERIVED_LAYOUT {
         index.version = 2;
         rebuild_derived(&mut index);
+    }
+    Ok(index)
+}
+
+/// Applies a change-log record to an index, through the same helpers a live
+/// save uses.
+fn apply_index_log_record(index: &mut DocumentIndex, record: index_log::IndexLogRecord) {
+    match record {
+        index_log::IndexLogRecord::Note { note } => {
+            apply_indexed_note(index, *note);
+        }
+        index_log::IndexLogRecord::NoteRemoved { id } => {
+            apply_note_removal(index, &id);
+        }
+    }
+}
+
+/// Reads the snapshot and replays its change log onto it.
+fn load_index_with_log(session: &mut VaultSession) -> Result<DocumentIndex, String> {
+    let mut index = read_index(session)?;
+    let generation = index.log_generation;
+    session.index_stamp = index_stamp(&session.root_dir);
+    if generation == 0 {
+        session.log_generation = 0;
+        session.log_lines = 0;
+        session.log_bytes = 0;
+        return Ok(index);
+    }
+    let log = index_log::read_index_log(&session.root_dir, session.key.as_ref(), generation, 1)?;
+    session.log_generation = generation;
+    session.log_lines = log.lines;
+    session.log_bytes = log.bytes;
+    for record in log.records {
+        apply_index_log_record(&mut index, record);
     }
     Ok(index)
 }
@@ -1236,8 +1313,33 @@ fn recover_plugin_index(session: &mut VaultSession) -> Result<(), String> {
     store_plugin_index(session, &plugins)
 }
 
+/// Brings the in-memory index up to date before a write.
+///
+/// Another process may have written to this vault since the session last
+/// looked. Re-reading and decrypting the whole snapshot to find out is what
+/// made every desktop save cost a pass over the vault; instead the snapshot's
+/// size and modification time say whether it was replaced, and when it was
+/// not, only the log records appended since are applied. A replaced snapshot
+/// still means a full read, which is correct and rare.
 fn refresh_session_index(session: &mut VaultSession) -> Result<(), String> {
-    session.index = read_index(session)?;
+    let stamp = index_stamp(&session.root_dir);
+    if stamp.is_some() && stamp == session.index_stamp && session.log_generation != 0 {
+        let log = index_log::read_index_log(
+            &session.root_dir,
+            session.key.as_ref(),
+            session.log_generation,
+            session.log_lines.max(1),
+        )?;
+        if log.lines >= session.log_lines {
+            for record in log.records {
+                apply_index_log_record(&mut session.index, record);
+            }
+            session.log_lines = log.lines;
+            session.log_bytes = log.bytes;
+            return recover_pending_journal(session);
+        }
+    }
+    session.index = load_index_with_log(session)?;
     if session.index.derived != DERIVED_LAYOUT {
         recover_canvas_index(session)?;
     }
@@ -1279,10 +1381,20 @@ fn audit_write(session: &VaultSession, file: &str, key: &str) -> Result<(), Stri
     )
 }
 
+/// Writes a fresh snapshot and leaves no log behind.
+///
+/// The order is load-bearing: the snapshot lands first, so a crash before the
+/// log is removed leaves a log whose generation no longer matches and which is
+/// therefore discarded rather than replayed onto a snapshot that already
+/// contains it.
 fn save_index(session: &mut VaultSession) -> Result<(), String> {
     session.index.version = 2;
     session.index.derived = DERIVED_LAYOUT;
     session.index.generated_at = now();
+    // Monotonic across rebuilds as well as saves: a snapshot only has to carry
+    // a generation no surviving log claims, and a rebuild starts from an index
+    // object that remembers nothing, so the session's own counter counts too.
+    session.index.log_generation = session.index.log_generation.max(session.log_generation) + 1;
     let payload = encrypt(
         &serde_json::to_vec(&session.index).map_err(|error| error.to_string())?,
         session.key.as_ref(),
@@ -1291,7 +1403,66 @@ fn save_index(session: &mut VaultSession) -> Result<(), String> {
     write_atomic(
         &session.root_dir.join("index.enc"),
         &serde_json::to_vec(&payload).map_err(|error| error.to_string())?,
-    )
+    )?;
+    session.log_generation = session.index.log_generation;
+    index_log::remove_index_log(&session.root_dir)?;
+    session.log_lines = 0;
+    session.log_bytes = 0;
+    session.index_stamp = index_stamp(&session.root_dir);
+    Ok(())
+}
+
+/// Commits an index mutation.
+///
+/// `record` describes the change in a form the log can replay. When one is
+/// supplied and the log has room, the commit is a single sealed append — which
+/// is the whole point of the log: a one-line edit used to cost a serialise,
+/// encrypt, write and fsync of the entire index. Callers that cannot describe
+/// their change, and the compaction threshold, fall back to a full snapshot,
+/// which is always correct and merely slower.
+fn commit_index(
+    session: &mut VaultSession,
+    record: Option<index_log::IndexLogRecord>,
+) -> Result<(), String> {
+    let Some(record) = record else {
+        return save_index(session);
+    };
+    if session.log_generation == 0
+        || index_log::should_compact(session.log_lines + 1, session.log_bytes)
+    {
+        return save_index(session);
+    }
+    if session.log_lines == 0 {
+        let (lines, bytes) = index_log::start_index_log(
+            &session.root_dir,
+            session.key.as_ref(),
+            session.log_generation,
+        )?;
+        session.log_lines = lines;
+        session.log_bytes = bytes;
+    }
+    session.log_bytes += index_log::append_index_log(
+        &session.root_dir,
+        session.key.as_ref(),
+        session.log_generation,
+        session.log_lines,
+        &record,
+    )?;
+    session.log_lines += 1;
+    Ok(())
+}
+
+/// Folds the log back into the snapshot and leaves no log behind.
+///
+/// A re-key, a backup and the other core all want a self-contained
+/// `index.enc`; this is how the desktop leaves one when a session ends. A
+/// no-op when nothing is pending, and safe to call repeatedly.
+fn compact_index(session: &mut VaultSession) -> Result<bool, String> {
+    if session.log_lines == 0 {
+        return Ok(false);
+    }
+    save_index(session)?;
+    Ok(true)
 }
 
 /// The retention policy's domain-separation string, shared with
@@ -1590,6 +1761,177 @@ fn resolve_link(index: &DocumentIndex, link: &WikiLink) -> Option<String> {
     (candidates.len() == 1).then(|| candidates.into_iter().next().unwrap())
 }
 
+/// Removes one note from the owner maps it answers to.
+fn remove_owner(map: &mut HashMap<String, Vec<String>>, label: &str, id: &str) {
+    let Some(owners) = map.get_mut(label) else {
+        return;
+    };
+    owners.retain(|owner| owner != id);
+    if owners.is_empty() {
+        map.remove(label);
+    }
+}
+
+/// The labels a note answers to as an owner: its path, its basename, its
+/// title and its aliases. Mirrors `ownerLabels` in `src/documents.ts`.
+fn owner_labels(note: &NoteDocument) -> (String, String, Vec<String>) {
+    let basename = note.path.rsplit('/').next().unwrap_or(&note.path);
+    let mut names = vec![normalized_text(&note.title)];
+    for alias in &note.aliases {
+        let value = normalized_text(alias);
+        if !names.contains(&value) {
+            names.push(value);
+        }
+    }
+    (normalized(&note.path), normalized(basename), names)
+}
+
+fn add_owner_labels(index: &mut DocumentIndex, note: &NoteDocument, id: &str) {
+    let (path, basename, names) = owner_labels(note);
+    add_owner(&mut index.path_owners, path, id);
+    add_owner(&mut index.basename_owners, basename, id);
+    for name in names {
+        add_owner(&mut index.name_owners, name, id);
+    }
+}
+
+fn remove_owner_labels(index: &mut DocumentIndex, note: &NoteDocument, id: &str) {
+    let (path, basename, names) = owner_labels(note);
+    remove_owner(&mut index.path_owners, &path, id);
+    remove_owner(&mut index.basename_owners, &basename, id);
+    for name in names {
+        remove_owner(&mut index.name_owners, &name, id);
+    }
+}
+
+fn add_source_to_link_map(index: &mut DocumentIndex, source: &IndexedNote) {
+    let targets: HashSet<String> = source
+        .links
+        .iter()
+        .map(|link| normalized(&link.target))
+        .collect();
+    for target in targets {
+        add_owner(&mut index.link_sources, target, &source.note.id);
+    }
+}
+
+fn remove_source_from_link_map(index: &mut DocumentIndex, source_id: &str, previous: &IndexedNote) {
+    let targets: HashSet<String> = previous
+        .links
+        .iter()
+        .map(|link| normalized(&link.target))
+        .collect();
+    for target in targets {
+        remove_owner(&mut index.link_sources, &target, source_id);
+    }
+}
+
+fn clear_resolved_source(index: &mut DocumentIndex, source_id: &str) {
+    let targets: HashSet<String> = index
+        .resolved_links
+        .get(source_id)
+        .map(|resolved| resolved.iter().flatten().cloned().collect())
+        .unwrap_or_default();
+    for target in targets {
+        if let Some(sources) = index.backlinks.get_mut(&target) {
+            sources.retain(|id| id != source_id);
+            if sources.is_empty() {
+                index.backlinks.remove(&target);
+            }
+        }
+    }
+    index.resolved_links.remove(source_id);
+    index.unresolved.remove(source_id);
+}
+
+fn refresh_resolved_source(index: &mut DocumentIndex, source_id: &str) {
+    clear_resolved_source(index, source_id);
+    let Some(links) = index.notes.get(source_id).map(|note| note.links.clone()) else {
+        return;
+    };
+    let resolved: Vec<Option<String>> =
+        links.iter().map(|link| resolve_link(index, link)).collect();
+    let unresolved: Vec<WikiLink> = links
+        .iter()
+        .zip(&resolved)
+        .filter(|(_, target)| target.is_none())
+        .map(|(link, _)| link.clone())
+        .collect();
+    if !unresolved.is_empty() {
+        index.unresolved.insert(source_id.to_string(), unresolved);
+    }
+    let targets: HashSet<String> = resolved.iter().flatten().cloned().collect();
+    index.resolved_links.insert(source_id.to_string(), resolved);
+    for target in targets {
+        if target != source_id {
+            add_owner(&mut index.backlinks, target, source_id);
+        }
+    }
+}
+
+/// Folds one indexed note into the index and every map derived from it.
+///
+/// The incremental counterpart of `rebuild_derived`, and the reason a save no
+/// longer costs a pass over the whole vault. It is also the only place this
+/// mutation is written: a live save calls it once the note object is durable,
+/// and replaying the change log calls it per record, so a replayed index is
+/// the index the writing session held rather than an approximation of it.
+/// Mirrors `applyIndexedNote` in `src/documents.ts`.
+fn apply_indexed_note(index: &mut DocumentIndex, indexed: IndexedNote) -> HashSet<String> {
+    let id = indexed.note.id.clone();
+    let existing = index.notes.get(&id).cloned();
+    let mut labels: HashSet<String> = existing
+        .as_ref()
+        .map(|note| note_identity_labels(&note.note))
+        .unwrap_or_default();
+    labels.extend(note_identity_labels(&indexed.note));
+
+    if let Some(previous) = existing.as_ref() {
+        remove_owner_labels(index, &previous.note, &id);
+        remove_source_from_link_map(index, &id, previous);
+    }
+    add_owner_labels(index, &indexed.note, &id);
+    add_source_to_link_map(index, &indexed);
+    index.notes.insert(id.clone(), indexed);
+
+    let mut affected: HashSet<String> = HashSet::from([id]);
+    for label in &labels {
+        if let Some(sources) = index.link_sources.get(label) {
+            affected.extend(sources.iter().cloned());
+        }
+    }
+    for source_id in &affected {
+        refresh_resolved_source(index, source_id);
+    }
+    labels
+}
+
+/// The removal counterpart of `apply_indexed_note`, on the same contract.
+fn apply_note_removal(index: &mut DocumentIndex, id: &str) -> HashSet<String> {
+    let Some(existing) = index.notes.get(id).cloned() else {
+        return HashSet::new();
+    };
+    let labels = note_identity_labels(&existing.note);
+    let mut affected: HashSet<String> = HashSet::new();
+    for label in &labels {
+        if let Some(sources) = index.link_sources.get(label) {
+            affected.extend(sources.iter().cloned());
+        }
+    }
+    remove_source_from_link_map(index, id, &existing);
+    remove_owner_labels(index, &existing.note, id);
+    clear_resolved_source(index, id);
+    index.notes.remove(id);
+    index.backlinks.remove(id);
+    affected.remove(id);
+    for source_id in &affected {
+        if index.notes.contains_key(source_id) {
+            refresh_resolved_source(index, source_id);
+        }
+    }
+    labels
+}
+
 fn rebuild_derived(index: &mut DocumentIndex) {
     index.backlinks.clear();
     index.resolved_links.clear();
@@ -1749,17 +2091,23 @@ fn store_note(
         &serde_json::to_vec(&payload).map_err(|error| error.to_string())?,
     )?;
     let (links, headings) = analyze_markdown(&note.body)?;
-    session.index.notes.insert(
-        note.id.clone(),
-        IndexedNote {
-            note: note.clone(),
-            links,
-            headings,
-        },
-    );
-    rebuild_derived(&mut session.index);
+    let indexed = IndexedNote {
+        note: note.clone(),
+        links,
+        headings,
+    };
+    // Incremental, not a pass over the whole vault. `rebuild_derived` rebuilt
+    // every owner map, link source, resolved link and backlink on each save,
+    // which is O(vault) work for a one-note edit; `apply_indexed_note` touches
+    // only the note and the sources whose links its labels affect.
+    identity_labels.extend(apply_indexed_note(&mut session.index, indexed.clone()));
     refresh_canvases_for_note_change(session, &note.id, &identity_labels)?;
-    save_index(session)?;
+    commit_index(
+        session,
+        Some(index_log::IndexLogRecord::Note {
+            note: Box::new(indexed),
+        }),
+    )?;
     end_journal(session)?;
     audit_write(session, "documents", &note.id)?;
     Ok(note)
@@ -1919,6 +2267,10 @@ fn open_session(vault_path: &str, passphrase: &str) -> Result<VaultSession, Stri
         attachment_id_key,
         audit_key,
         index: DocumentIndex::empty(),
+        log_generation: 0,
+        log_lines: 0,
+        log_bytes: 0,
+        index_stamp: None,
         install_gate: Arc::new(AtomicBool::new(false)),
     };
     refresh_session_index(&mut session)?;
@@ -3573,6 +3925,34 @@ fn unlock_vault(
 fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
     state.desktop_sync_cancel.store(true, Ordering::Release);
     state.memory_generation.fetch_add(1, Ordering::AcqRel);
+    {
+        let mut guard = state
+            .session
+            .lock()
+            .map_err(|_| "vault session lock poisoned")?;
+        if let Some(session) = guard.as_mut() {
+            // Fold the change log back into the snapshot before the keys go.
+            //
+            // The log is a session optimisation: it exists so a save inside a
+            // live session costs an append instead of a whole-index rewrite.
+            // At rest the vault should be self-contained, because everything
+            // else that reads it -- re-key, backup, the other core -- wants
+            // one authoritative index.enc and not a snapshot plus a tail. A
+            // crash still leaves a log and replay handles that; this is the
+            // orderly path, not the safety net.
+            //
+            // A failure here must not leave the session holding live keys, so
+            // it is reported and locking proceeds: the log is durable either
+            // way, and the next unlock replays it.
+            if let Err(error) = VaultWriteGuard::acquire(&session.vault_dir)
+                .and_then(|_guard| compact_index(session))
+            {
+                eprintln!(
+                    "could not compact the index change log while locking; it will be replayed on the next unlock: {error}"
+                );
+            }
+        }
+    }
     *state
         .session
         .lock()
@@ -6074,7 +6454,8 @@ fn with_lock_transition<T>(
     loop {
         match OpenOptions::new().create_new(true).write(true).open(&path) {
             Ok(mut file) => {
-                if let Err(error) = file.write_all(&encoded).and_then(|_| file.sync_all()) {
+                // Advisory and short-lived; see `VaultWriteGuard::acquire`.
+                if let Err(error) = file.write_all(&encoded) {
                     let _ = fs::remove_file(&path);
                     return Err(error.to_string());
                 }
@@ -6398,6 +6779,112 @@ mod tests {
         assert_eq!(headings.len(), 1);
         assert_eq!(headings[0].text, "Crème_ Brûlée -- Test!");
         assert_eq!(headings[0].slug, "crème-brûlée-test");
+    }
+
+    /// Phase 17: the change log is a shared format, not a Rust detail.
+    ///
+    /// Both cores write `index.enc`. A log only one of them understood would
+    /// leave the other reading a snapshot that omits the first one's recent
+    /// saves, and then overwriting it from that stale state — a correctness
+    /// bug, not a missed optimisation. The TypeScript half of this pair lives
+    /// in `test/cross-core-index-log.test.mjs`, which drives both binaries
+    /// against one vault; this half pins the record shape the Rust core emits
+    /// so a divergence shows up here first.
+    #[test]
+    fn the_change_log_replays_to_the_index_the_writing_session_held() {
+        let path = temporary_vault("index-log-replay");
+        let path_text = path.to_string_lossy().into_owned();
+        let mut session = open_session(&path_text, "correct horse battery staple").unwrap();
+
+        let alpha = seeded_note("Projects/Alpha.md", "Alpha", "Owned by [[People/Ada]].");
+        let ada = seeded_note("People/Ada.md", "Ada", "Works on [[Projects/Alpha]].");
+        let dangling = seeded_note("Notes/Dangling.md", "Dangling", "Points at [[Nowhere]].");
+        store_note(&mut session, alpha.clone(), None).unwrap();
+        store_note(&mut session, ada.clone(), None).unwrap();
+        store_note(&mut session, dangling.clone(), None).unwrap();
+
+        // The saves went to the log, not to a rewritten snapshot.
+        assert!(index_log::index_log_path(&session.root_dir).exists());
+        assert!(session.log_lines > 1, "expected appended records");
+        let expected_notes = session.index.notes.len();
+        let expected_backlinks = session.index.backlinks.clone();
+        let expected_unresolved = session.index.unresolved.clone();
+        let expected_path_owners = session.index.path_owners.clone();
+        let expected_link_sources = session.index.link_sources.clone();
+        drop(session);
+
+        // Reopening without a compaction is the crash-shaped case: snapshot on
+        // disk, log not yet folded in.
+        let reopened = open_session(&path_text, "correct horse battery staple").unwrap();
+        assert_eq!(reopened.index.notes.len(), expected_notes);
+        assert_eq!(reopened.index.backlinks, expected_backlinks);
+        assert_eq!(reopened.index.unresolved, expected_unresolved);
+        assert_eq!(reopened.index.path_owners, expected_path_owners);
+        assert_eq!(reopened.index.link_sources, expected_link_sources);
+
+        // And the incremental maps agree with a full rebuild from the objects.
+        let mut rebuilt = reopened.index.clone();
+        rebuild_derived(&mut rebuilt);
+        assert_eq!(rebuilt.backlinks, reopened.index.backlinks);
+        assert_eq!(rebuilt.unresolved, reopened.index.unresolved);
+        assert_eq!(rebuilt.link_sources, reopened.index.link_sources);
+        drop(reopened);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn a_stale_log_is_discarded_rather_than_replayed_onto_the_snapshot_that_contains_it() {
+        let path = temporary_vault("index-log-stale");
+        let path_text = path.to_string_lossy().into_owned();
+        let mut session = open_session(&path_text, "correct horse battery staple").unwrap();
+        let note = seeded_note("One.md", "One", "first");
+        store_note(&mut session, note.clone(), None).unwrap();
+
+        let log_path = index_log::index_log_path(&session.root_dir);
+        let stale = fs::read(&log_path).unwrap();
+        assert!(compact_index(&mut session).unwrap());
+        assert!(!log_path.exists(), "compaction should leave no log");
+        drop(session);
+
+        // Put the old log back, as a crash between the two steps would.
+        fs::write(&log_path, &stale).unwrap();
+        let reopened = open_session(&path_text, "correct horse battery staple").unwrap();
+        assert_eq!(reopened.index.notes.len(), 1);
+        assert_eq!(reopened.index.notes[&note.id].note.body, "first");
+        drop(reopened);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn a_record_damaged_before_the_end_is_refused_rather_than_skipped() {
+        let path = temporary_vault("index-log-damaged");
+        let path_text = path.to_string_lossy().into_owned();
+        let mut session = open_session(&path_text, "correct horse battery staple").unwrap();
+        for name in ["First", "Second", "Third"] {
+            let note = seeded_note(&format!("{name}.md"), name, "body");
+            store_note(&mut session, note, None).unwrap();
+        }
+        let log_path = index_log::index_log_path(&session.root_dir);
+        let raw = fs::read_to_string(&log_path).unwrap();
+        drop(session);
+
+        // Corrupt a middle record. Dropping it silently would hand back an
+        // index missing a note the vault still holds.
+        let mut lines: Vec<String> = raw.lines().map(str::to_string).collect();
+        let mut damaged: EncryptedPayload = serde_json::from_str(&lines[1]).unwrap();
+        damaged.ciphertext = format!(
+            "{}AAAA",
+            &damaged.ciphertext[..damaged.ciphertext.len() - 4]
+        );
+        lines[1] = serde_json::to_string(&damaged).unwrap();
+        fs::write(&log_path, format!("{}\n", lines.join("\n"))).unwrap();
+
+        let outcome = open_session(&path_text, "correct horse battery staple");
+        assert!(
+            outcome.is_err_and(|error| error.contains("damaged")),
+            "a damaged record must fail closed"
+        );
+        fs::remove_dir_all(path).unwrap();
     }
 
     #[test]
@@ -6819,6 +7306,10 @@ mod tests {
         assert_eq!(session.index.name_owners["exposure"], [note.id.clone()]);
         assert_eq!(resolve_id(&session.index, "North Star").unwrap(), note.id);
 
+        // A save commits to the change log, so the snapshot catches up when
+        // the session ends. What matters to the other core is the layout of
+        // the vault at rest, which is what this asserts.
+        assert!(compact_index(&mut session).unwrap());
         let payload: EncryptedPayload =
             serde_json::from_slice(&fs::read(session.root_dir.join("index.enc")).unwrap()).unwrap();
         let stored: Value =

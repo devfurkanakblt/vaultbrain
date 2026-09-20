@@ -5,6 +5,7 @@
   "keyedEnvelope": "secondbrain-vault:kv:v2",
   "documentKeyCheck": "secondbrain-vault:document-key:v1",
   "documentIndex": "secondbrain-vault:document-index:v1",
+  "indexLogPrefix": "secondbrain-vault:index-log:v1:",
   "pluginPolicy": "secondbrain-vault:plugin-policy:v1",
   "retentionPolicy": "secondbrain-vault:retention-policy:v1",
   "attachmentId": "secondbrain-vault:attachment-id:v1\u0000",

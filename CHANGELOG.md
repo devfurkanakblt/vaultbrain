@@ -5,6 +5,45 @@ Versioning once the encrypted storage format reaches 1.0.
 
 ## Unreleased
 
+### Phase 17 — incremental index persistence
+
+Saving one note no longer costs a pass over the whole vault, in either core.
+
+- Added: an encrypted index change log (`documents/index-log.enc`), shared by
+  the TypeScript library and the Rust desktop core. A save appends one sealed,
+  fsynced record instead of re-serialising and re-encrypting the entire index;
+  the snapshot is refreshed when the log passes its threshold and when a
+  session closes, so the vault stays self-contained at rest. Every line's AAD
+  carries the snapshot generation and the line number, so records cannot be
+  reordered, duplicated, dropped from the middle or replayed against a
+  different snapshot.
+- Fixed: the Rust core rebuilt every derived map on every save
+  (`rebuild_derived`). It now maintains them incrementally, which a profile
+  puts at 0.3% of a save and which does not appear at all at 16,000 notes.
+- Fixed: the Rust core re-read and decrypted the whole index snapshot before
+  every write. It now compares the snapshot's size and modification time and,
+  when nothing replaced it, applies only the log records appended since.
+- Fixed: the Rust core fsynced the advisory vault lock twice per save. A lock
+  record that does not survive a crash is reclaimed by the PID liveness check,
+  so it is written and not fsynced — as the TypeScript implementation of the
+  same lock always has been.
+- Added: `npm run benchmark:rust`, a save-path benchmark for the desktop core,
+  and its tier in the `performance-budgets` CI job. Every budget in
+  `PRODUCT.md` is a desktop interaction, and until now only the TypeScript
+  library was measured.
+
+Measured p95 on the CI Linux runner, 200 samples:
+
+| Vault | TypeScript | Rust (desktop) |
+| ---: | ---: | ---: |
+| 1,000 | 16.6 → **3.5 ms** | 34.4 → **4.95 ms** |
+| 10,000 | 141.7 → **3.5 ms** | 2,553 → **5.03 ms** |
+
+Both cores are flat in vault size rather than linear, and both are gated at the
+1k and 10k tiers; the 100,000-note tier runs on pushes to `main`. What remains
+at that size is the count of durable file operations per save, not the index.
+
+
 ### Security and data integrity — 2026-09-19 CLI/MCP review
 
 All eleven findings in [`docs/CLI-AUDIT-2026-09-19.md`](docs/CLI-AUDIT-2026-09-19.md)
