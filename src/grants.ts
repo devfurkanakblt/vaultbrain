@@ -40,6 +40,31 @@ export interface GrantScope {
   redact: RedactionLevel;
 }
 
+/**
+ * Whether a scope masks values that `partial` was never designed for.
+ *
+ * `partial` recognises identifiers — an IBAN, a card number, a phone number,
+ * an email, a long opaque id — and keeps a short tail so an agent can confirm
+ * a match. Anything it does not recognise falls through to the same treatment:
+ * every character but the last four is replaced. That is the right default for
+ * an unknown secret and the wrong one for a name, a date or a sentence, which
+ * come back as `•••••••••••raca` and answer nothing.
+ *
+ * Applied to one identifier that is exactly the intent. Applied across a whole
+ * file with `*`, it silently destroys every ordinary value in that file, and
+ * the agent reports back that it could not find the answer. Measured on a
+ * synthetic vault, `health:*:discover,resolve:partial` left three of six
+ * permitted questions unanswerable.
+ *
+ * This does not make the scope unsafe, so it is a warning at the point the
+ * owner writes it, never a refusal.
+ */
+export function overBroadRedaction(scope: GrantScope): boolean {
+  if (scope.redact === "none") return false;
+  if (!scope.actions.includes("resolve")) return false;
+  return scope.keys.some((key) => key === "*" || key.endsWith("*"));
+}
+
 export interface AgentGrant {
   id: string;
   agent: string;

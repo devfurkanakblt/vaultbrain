@@ -193,6 +193,24 @@ are closed. Regressions live in `test/cli-audit-2026-09-19.test.mjs` and
 - Changed: an empty discovery result is now a sentence rather than `[]` or
   `{}`, which read as "the tool failed" as easily as "there is nothing".
 
+### Grant redaction guidance
+
+- Changed: `vbrain grant add` now prints a note when a scope resolves with
+  `partial` or `full` over `*` or a `PREFIX*` glob. `partial` recognises
+  identifiers and keeps a short confirming tail; anything it does not
+  recognise gets the same treatment, so a name comes back as
+  `•••••••••••raca` and answers nothing. Applied to one identifier that is the
+  intent; stretched across a file it masks every ordinary value in it, and the
+  agent reports it could not find answers the grant does permit. Measured on a
+  synthetic vault, `health:*:discover,resolve:partial` left three of six
+  permitted questions unanswerable, while per-key scopes answered all of them
+  with the identifier still masked. The scope is safe either way, so this is a
+  note, never a refusal.
+- Changed: the `--scope` example in `vbrain grant add --help` was
+  `health:*:discover,resolve:partial`, which is the shape that produces those
+  unusable answers. It now shows a named key, and the README says plainly what
+  `partial` does to a value it does not recognise.
+
 ### Documentation
 
 - Changed: the README and `docs/PRODUCT.md` now state that the shipped MCP
