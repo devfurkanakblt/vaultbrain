@@ -42,6 +42,7 @@ import {
   grantsExist,
   listGrants,
   normalizeScope,
+  overBroadRedaction,
   pendingRequests,
   revokeGrant,
   type GrantAction,
@@ -1590,7 +1591,10 @@ const grant = program
 grant
   .command("add <agent>")
   .description("grant one agent identity a narrow, optionally expiring slice of the vault")
-  .requiredOption("--scope <scope...>", "file:keys:actions[:redaction], e.g. health:*:discover,resolve:partial")
+  .requiredOption(
+    "--scope <scope...>",
+    "file:keys:actions[:redaction], e.g. health:BLOOD_TYPE:discover,resolve",
+  )
   .option("--expires <when>", "30m, 12h, 7d or an ISO timestamp; omit for no expiry")
   .option("--confirm", "hold every resolution for your approval before it is answered")
   .option("--note <text>", "why this grant exists, for your own review later")
@@ -1617,6 +1621,25 @@ grant
       console.log(`  ${scope.file} · ${scope.keys.join(",")} · ${scope.actions.join(",")} · redaction ${scope.redact}`);
     }
     console.log(`  expires ${created.expiresAt ?? "never"} · confirmation ${created.confirm}`);
+    // The scope is safe; it is the answers that will be useless. Saying so
+    // here is the only moment the owner is looking at this decision — the
+    // alternative is an agent that reports it could not find things the grant
+    // does permit, which reads as a broken vault rather than a broad mask.
+    for (const scope of created.scopes.filter(overBroadRedaction)) {
+      console.log(
+        `\nNote: '${scope.file}:${scope.keys.join(",")}' resolves with redaction '${scope.redact}'.`,
+      );
+      console.log(
+        `  '${scope.redact}' is built for identifiers — an IBAN, a card or phone number, a long id.`,
+      );
+      console.log(
+        "  Every other value under it, including names, dates and free text, comes back masked",
+      );
+      console.log("  to its last few characters, which answers nothing.");
+      console.log(
+        `  For values an agent must actually read, scope them by name: ${scope.file}:SOME_KEY:discover,resolve`,
+      );
+    }
   });
 
 grant

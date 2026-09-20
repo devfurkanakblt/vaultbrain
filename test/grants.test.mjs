@@ -17,6 +17,7 @@ import {
   loadGrants,
   matchesKey,
   normalizeScope,
+  overBroadRedaction,
   pendingRequests,
   requestConfirmation,
   revokeGrant,
@@ -401,4 +402,44 @@ test("a revoked grant stops the very next resolution", () => {
   revokeGrant(vault, created.id, PASSPHRASE);
 
   assert.equal(resolveForAgent(vault, "claude", "health", "BLOOD", PASSPHRASE).kind, "denied");
+});
+
+// A grant that masks everything in a file is safe and useless: the agent
+// reports it could not find answers the grant does permit. `vbrain grant add`
+// warns about exactly these, so the predicate has to name them precisely —
+// warning about a scope that reads fine would train the owner to ignore it.
+test("a wildcard scope that redacts is flagged, a named one is not", () => {
+  const broad = normalizeScope({ file: "health", keys: ["*"], actions: ["discover", "resolve"], redact: "partial" });
+  assert.equal(overBroadRedaction(broad), true, "health:*:...:partial masks every ordinary value in the file");
+
+  const prefix = normalizeScope({ file: "health", keys: ["NOTE_*"], actions: ["discover", "resolve"], redact: "full" });
+  assert.equal(overBroadRedaction(prefix), true, "a PREFIX* glob covers unknown keys the same way");
+
+  const named = normalizeScope({ file: "health", keys: ["INSURANCE_POLICY"], actions: ["discover", "resolve"], redact: "partial" });
+  assert.equal(overBroadRedaction(named), false, "masking one named identifier is the intended use");
+});
+
+test("a scope is not flagged when redaction cannot bite", () => {
+  const unredacted = normalizeScope({ file: "health", keys: ["*"], actions: ["discover", "resolve"], redact: "none" });
+  assert.equal(overBroadRedaction(unredacted), false, "nothing is masked, so there is nothing to warn about");
+
+  const discoverOnly = normalizeScope({ file: "health", keys: ["*"], actions: ["discover"], redact: "full" });
+  assert.equal(overBroadRedaction(discoverOnly), false, "redaction applies to resolution, and this scope resolves nothing");
+});
+
+test("the masking this warns about is real, not hypothetical", () => {
+  // The warning exists because of what `partial` does to ordinary text, so
+  // pin that behaviour here rather than trusting a description of it.
+  // An identifier keeps enough of a tail to confirm a match and loses the
+  // rest. How much of a tail depends on which detector claims it — the digits
+  // here read as a phone number before they read as an opaque id — so this
+  // pins the property, not the detector.
+  const identifier = redactValue("POL-4471-9930-2255", "partial");
+  assert.ok(identifier.endsWith("55"), `a confirming tail survives: ${identifier}`);
+  assert.equal(identifier.includes("4471"), false, "the identifier itself does not");
+
+  const name = redactValue("Dr. Elif Karaca", "partial");
+  assert.ok(name.includes("•"), `a name is masked too: ${name}`);
+  assert.equal(name.includes("Elif"), false, "the part an agent needed is gone");
+  assert.equal(name.includes("Karaca"), false, "and so is the rest of it");
 });
