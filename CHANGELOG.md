@@ -132,6 +132,17 @@ are closed. Regressions live in `test/cli-audit-2026-09-19.test.mjs` and
   Phase 17 in [`docs/ROADMAP.md`](docs/ROADMAP.md), with the encrypted change
   log plus periodic compaction design and its acceptance conditions.
 
+### Contributor tooling
+
+- Fixed: `npm run format:check` reported every checked file as a style
+  violation on Windows. `.gitattributes` sets `* text=auto`, so the working
+  tree carries CRLF, while Prettier defaulted to `endOfLine: "lf"`.
+  `.prettierrc.json` now sets `endOfLine: "auto"`, so the one formatting check
+  in `npm run quality` can be read on the platform this project is mostly
+  developed on. Git still normalises to LF on commit, so no file in the
+  repository changes. `CONTRIBUTING.md` no longer tells contributors to ignore
+  the check's output.
+
 ### Documentation
 
 - Changed: the README and `docs/PRODUCT.md` now state that the shipped MCP

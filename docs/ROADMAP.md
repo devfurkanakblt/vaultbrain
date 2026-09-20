@@ -366,7 +366,11 @@ with Phases 12 and 14.
       crashing Node under a cloud-synced checkout, GNU `tar` refusing Windows
       paths under Git Bash, `format:check` reporting carriage returns as style
       violations, and `quality:rust` being unrunnable without MSVC Build Tools.
-      A check that cannot run stays a gap, never a skip.
+      A check that cannot run stays a gap, never a skip. The third is now
+      fixed rather than documented: `.prettierrc.json` sets `endOfLine: "auto"`,
+      so `format:check` reads correctly on Windows instead of reporting every
+      checked file. Documenting a check that cannot be read is the smaller half
+      of the job when the check itself can be repaired.
 - [ ] 16.4 Diagnose the one flaky test: the portable recovery drill's relay
       download reset under concurrent suite load.
 - [x] 16.5 Triage the twelve open dependency updates, five of which are major
