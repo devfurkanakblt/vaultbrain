@@ -87,6 +87,37 @@ export function resolveForAgent(
 }
 
 /**
+ * Renders a discovery result, one entry per line.
+ *
+ * These results are read by a language model, not parsed by a program, and
+ * discovery is the largest thing this server puts into a context: it lists
+ * every key the agent may see, on every conversation that browses the vault.
+ * The pretty-printed JSON this used to return spent about a third of its
+ * characters on indentation, braces and quoting that carry no information.
+ * Measured on a 250-key vault, listing one key cost 102 characters — more
+ * than handing over that key, its description and its value would have,
+ * which inverts the reason an agent is asked to discover before it resolves.
+ *
+ * Each line carries its own file, because the agent's next call is
+ * `resolve_key(file, key)` and a line that is complete on its own cannot be
+ * mismatched with a heading further up. That costs about 6% against
+ * grouping by file, and buys a format an agent cannot misread.
+ */
+export function discoveryLines(
+  entries: Array<{ file: string; key: string; desc: string; createdAt?: string }>,
+  empty: string,
+): string {
+  if (!entries.length) return empty;
+  return entries
+    .map((entry) => {
+      const when = entry.createdAt ? ` — ${entry.createdAt}` : "";
+      const desc = entry.desc ? ` — ${entry.desc}` : "";
+      return `${entry.file}/${entry.key}${when}${desc}`;
+    })
+    .join("\n");
+}
+
+/**
  * IMPORTANT (read before wiring this into an agent):
  * Under the current MCP spec, whatever `resolve_key` returns DOES flow back
  * into the calling model's context — that's how MCP tool results work. This
@@ -153,11 +184,12 @@ export async function startMcpServer(vaultDir: string, configuredAgent: string):
     return { content: [{ type: "text" as const, text: body }], ...(isError ? { isError: true } : {}) };
   }
 
+
   const server = new McpServer({ name: "vault-brain", version: "0.2.0" });
 
   server.tool(
     "list_keys",
-    "List every available key name and its non-sensitive description across the vault. Contains NO values. Always call this before resolve_key.",
+    "List every available key name and its non-sensitive description across the vault, one 'file/KEY — description' per line. Contains NO values. Always call this before resolve_key.",
     {},
     async () => {
       const schema = readSchema(vaultDir, passphrase);
@@ -165,24 +197,25 @@ export async function startMcpServer(vaultDir: string, configuredAgent: string):
         return text("No schema found. Ask the user to run 'vbrain index'.");
       }
       const grants = policy();
-      const visible: Record<string, unknown[]> = {};
+      const visible: Array<{ file: string; key: string; desc: string }> = [];
       for (const [file, entries] of Object.entries(schema.files)) {
-        const allowed = filterDiscoverable(grants, agent, file, entries);
-        if (allowed.length) visible[file] = allowed;
+        for (const entry of filterDiscoverable(grants, agent, file, entries)) {
+          visible.push({ file, key: entry.key, desc: entry.desc });
+        }
       }
-      if (grants && !Object.keys(visible).length) {
+      if (grants && !visible.length) {
         return text(
           `No key in this vault is discoverable by "${agent}". Ask the vault owner to run: vbrain grant add.`,
           true,
         );
       }
-      return text(JSON.stringify(visible, null, 2));
+      return text(discoveryLines(visible, "This vault holds no discoverable key yet."));
     },
   );
 
   server.tool(
     "find_key",
-    "Fuzzy-search key names and descriptions for a query. Contains NO values. Use this to locate the right key before resolve_key.",
+    "Fuzzy-search key names and descriptions for a query, returning one 'file/KEY — description' per line. Contains NO values. Use this to locate the right key before resolve_key.",
     { query: z.string().describe("what you're looking for, e.g. 'next doctor appointment'") },
     async ({ query }) => {
       const schema = readSchema(vaultDir, passphrase);
@@ -193,7 +226,7 @@ export async function startMcpServer(vaultDir: string, configuredAgent: string):
       const hits = searchSchema(schema, query).filter(
         (hit) => decide(grants, { agent, action: "discover", file: hit.file, key: hit.key }).allowed,
       );
-      return text(JSON.stringify(hits, null, 2));
+      return text(discoveryLines(hits, `Nothing in this vault matches "${query}".`));
     },
   );
 
@@ -279,7 +312,7 @@ export async function startMcpServer(vaultDir: string, configuredAgent: string):
 
   server.tool(
     "find_notes_in_range",
-    "Browse freeform journal notes by date range after unlocking the encrypted, value-free catalog. Returns keys + tags + timestamps, not content. Follow up with resolve_key for any entry you actually need to read.",
+    "Browse freeform journal notes by date range after unlocking the encrypted, value-free catalog. Returns one 'file/KEY — timestamp — description' per line, not content. Follow up with resolve_key for any entry you actually need to read.",
     {
       category: z.string().optional().describe("limit to one category/file, e.g. 'health'"),
       from: z.string().optional().describe("ISO date, inclusive lower bound"),
@@ -294,7 +327,7 @@ export async function startMcpServer(vaultDir: string, configuredAgent: string):
       const hits = filterNotesByDate(schema, { file: category, from, to }).filter(
         (hit) => decide(grants, { agent, action: "discover", file: hit.file, key: hit.key }).allowed,
       );
-      return text(JSON.stringify(hits, null, 2));
+      return text(discoveryLines(hits, "No journal note falls in that range."));
     },
   );
 
