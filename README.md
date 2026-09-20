@@ -453,10 +453,11 @@ desktop application prunes to the same bound the command line set.
 
 > **One product performance budget is not met today.** Incremental save
 > acknowledgement is specified at **< 20 ms p95** in
-> [`docs/PRODUCT.md`](docs/PRODUCT.md) and the implementation misses it, by a
-> margin that grows with the vault. Measured on Windows / Node 22.20.0:
-> **14.1 ms p95 at 200 notes, 27.1 ms at 1,000, 843.9 ms at 4,000.** Treat
-> "the 100k gates pass" as a statement about unlock, search, note open and
+> [`docs/PRODUCT.md`](docs/PRODUCT.md). Measured by the `performance-budgets`
+> CI job on its Linux runner: **16.6 ms p95 at 1,000 notes** (met) and
+> **141.7 ms p95 at 10,000** (missed, by about seven times). The cost grows
+> with the vault, not with the edit, so the miss widens from there. Treat "the
+> 100k gates pass" as a statement about unlock, search, note open and
 > backlinks — not about save latency. The cause and the plan are Phase 17 in
 > [`docs/ROADMAP.md`](docs/ROADMAP.md).
 

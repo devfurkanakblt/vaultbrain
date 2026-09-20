@@ -61,9 +61,19 @@ are closed. Regressions live in `test/cli-audit-2026-09-19.test.mjs` and
   separately as `unlockConstructMs`.
 - Added: a single-note incremental save measurement. It shows the "< 20 ms"
   product budget is missed and that save cost grows with the vault — a save
-  re-serializes and re-encrypts the whole index. Every run that misses it
-  prints `BUDGET MISS` with the number, and the pass line says so rather than
-  claiming a clean run.
+  re-serializes and re-encrypts the whole index. Measured by the
+  `performance-budgets` CI job: 16.6 ms p95 at 1,000 notes (met) and 141.7 ms
+  at 10,000 (missed by about seven times). Every run that misses it prints
+  `BUDGET MISS` with the number, and the pass line says so rather than claiming
+  a clean run.
+- Fixed: the first published figures for this measurement were wrong. A
+  843.9 ms p95 at 4,000 notes was reported in the README, `PRODUCT.md`,
+  `ROADMAP.md` and the audit record; that sample was taken while the test
+  suite was running and measured machine noise. Three clean repeats give
+  ~40 ms p95 at that size. Growth is linear in index size, not explosive. The
+  defect is unchanged — 10,000 notes misses by ~7x on a quiet CI runner — but
+  its magnitude was overstated. `ROADMAP.md` now carries a profile splitting
+  the save into the whole-index rewrite and the vault's own index maintenance.
 - Added: `npm run benchmark:budgets`, which enforces the budgets that are not
   met yet, and a separate `performance-budgets` CI job that runs it. The job is
   expected to fail until the defect is closed and is deliberately not a
