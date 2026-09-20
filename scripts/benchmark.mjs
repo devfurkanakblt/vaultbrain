@@ -34,9 +34,9 @@ function measureMany(count, operation) {
  * measurement and a reason, never to make a red run go green.
  */
 const TIERS = [
-  { notes: 1_000, unlockMs: 2_000, quickSwitchP95: 30, fullTextP95: 100, openP95: 50, backlinkP95: 50 },
-  { notes: 10_000, unlockMs: 2_000, quickSwitchP95: 30, fullTextP95: 100, openP95: 50, backlinkP95: 50 },
-  { notes: 100_000, unlockMs: 2_000, quickSwitchP95: 30, fullTextP95: 100, openP95: 50, backlinkP95: 50 },
+  { notes: 1_000, unlockMs: 2_000, quickSwitchP95: 30, fullTextP95: 100, openP95: 50, backlinkP95: 50, incrementalSaveP95: 20 },
+  { notes: 10_000, unlockMs: 2_000, quickSwitchP95: 30, fullTextP95: 100, openP95: 50, backlinkP95: 50, incrementalSaveP95: 20 },
+  { notes: 100_000, unlockMs: 2_000, quickSwitchP95: 30, fullTextP95: 100, openP95: 50, backlinkP95: 50, incrementalSaveP95: 20 },
 ];
 
 function budgetFor(count) {
@@ -49,6 +49,14 @@ if (!Number.isSafeInteger(noteCount) || noteCount < 100 || noteCount > 100_000) 
 }
 const budget = budgetFor(noteCount);
 const shouldAssert = process.argv.includes("--assert");
+/**
+ * Enforces the budgets the product contract sets but the implementation does
+ * not yet meet. Off by default so the everyday pipeline gates regressions;
+ * on in the dedicated performance job so a known miss fails visibly instead of
+ * being quietly tolerated. Turning a budget off is never the way to make this
+ * green — closing the defect is.
+ */
+const enforceOpenBudgets = process.argv.includes("--enforce-open-budgets");
 const passphrase = "benchmark-only-passphrase";
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-benchmark-"));
 const resolvedRoot = path.resolve(root);
@@ -82,9 +90,16 @@ try {
 
   const unlockStart = performance.now();
   const vault = new DocumentVault(root, passphrase);
-  const unlockAndIndexMs = performance.now() - unlockStart;
-  // Force authenticated index decryption before recording warm timings.
+  const constructMs = performance.now() - unlockStart;
+  // The timer stops here, not after the constructor. `new DocumentVault` is
+  // lazy: it resolves the keyring but does not decrypt or load the index, and
+  // the first call that needs the index is what pays for it. Reporting the
+  // constructor alone as `unlockAndIndexMs` measured an unlock that had not
+  // yet produced a usable index, against a budget whose name is "cold unlock
+  // to usable shell". `list()` is the first operation a shell actually makes,
+  // so it is the honest end of that interval.
   assert.equal(vault.list().length, noteCount);
+  const unlockAndIndexMs = performance.now() - unlockStart;
 
   // The quick switcher matches titles, aliases and paths over the summaries it
   // already holds — it never calls the full-text engine. Measuring it that way
@@ -125,10 +140,27 @@ try {
     vault.backlinks(created[index % Math.max(1, created.length - 1)].id);
   });
 
+  // "Incremental save acknowledgement" from the product budget: one existing
+  // note edited and written back, with the link index and every derived map
+  // updated, in a vault already holding the full corpus. Nothing measured this
+  // before, so the tier gates could all pass while the save path was
+  // unbounded. Each iteration edits a different note so the measurement is not
+  // dominated by one note's warm cache.
+  const incrementalSave = measureMany(50, (index) => {
+    const target = created[index % created.length];
+    vault.put({
+      id: target.id,
+      path: target.path,
+      title: target.title,
+      body: `${target.body ?? ""}\nEdited at iteration ${index}.`,
+    });
+  });
+
   const result = {
     notes: noteCount,
     tier: budget.notes,
     bulkCreateMs: Number(bulkCreateMs.toFixed(2)),
+    unlockConstructMs: Number(constructMs.toFixed(2)),
     unlockAndIndexMs: Number(unlockAndIndexMs.toFixed(2)),
     coldSearchMs: Number(coldSearchMs.toFixed(2)),
     quickSwitchMs: quickSwitch,
@@ -136,8 +168,27 @@ try {
     fullTextSearchMs: fullTextSearch,
     noteOpenMs: noteOpen,
     backlinksMs: backlinks,
+    incrementalSaveMs: incrementalSave,
   };
   console.log(JSON.stringify(result, null, 2));
+
+  // The incremental-save budget is always measured and always reported, and is
+  // enforced only under `--enforce-open-budgets`. It is split out from the
+  // other gates because it is a known miss, not a regression guard: a
+  // single-note save re-serializes and re-encrypts the whole index, so the
+  // cost grows with the vault rather than with the edit (Phase 17 in
+  // docs/ROADMAP.md). The default run keeps the everyday pipeline honest
+  // without turning it red against a defect that needs its own change; the
+  // dedicated performance job runs with the flag so the miss stays visible as
+  // a real failure. Neither mode hides it, and neither mode calls it passing.
+  const savedBudget = incrementalSave.p95 < budget.incrementalSaveP95;
+  if (!savedBudget) {
+    console.log(
+      `BUDGET MISS: incremental save p95 ${incrementalSave.p95.toFixed(1)}ms ` +
+        `exceeded ${budget.incrementalSaveP95}ms at ${noteCount} notes. ` +
+        "Tracked as Phase 17 (incremental index persistence) in docs/ROADMAP.md.",
+    );
+  }
 
   if (shouldAssert) {
     const gate = (label, measured, limit) =>
@@ -148,7 +199,21 @@ try {
     gate("full-text p95", fullTextSearch.p95, budget.fullTextP95);
     gate("note open p95", noteOpen.p95, budget.openP95);
     gate("backlinks p95", backlinks.p95, budget.backlinkP95);
-    console.log(`Performance gates at the ${budget.notes}-note tier: PASS`);
+    // Deliberately worded so a green run cannot be read as "every product
+    // budget is met": one of them is not, and the line above says so.
+    console.log(
+      `Regression gates at the ${budget.notes}-note tier: PASS` +
+        (savedBudget ? "" : " (incremental save budget is missed; see above)"),
+    );
+  }
+
+  if (enforceOpenBudgets) {
+    assert.ok(
+      savedBudget,
+      `incremental save p95 ${incrementalSave.p95.toFixed(1)}ms exceeded ` +
+        `${budget.incrementalSaveP95}ms at ${noteCount} notes`,
+    );
+    console.log(`Open performance budgets at the ${budget.notes}-note tier: PASS`);
   }
 } finally {
   removeTree(resolvedRoot);

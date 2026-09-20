@@ -54,6 +54,26 @@ are closed. Regressions live in `test/cli-audit-2026-09-19.test.mjs` and
   in `src/search-query.ts` and is documented in the README. Result ordering is
   unchanged.
 
+### Performance measurement
+
+- Changed: the benchmark's unlock timing now stops when the index is usable
+  rather than when the constructor returns, and reports the constructor time
+  separately as `unlockConstructMs`.
+- Added: a single-note incremental save measurement. It shows the "< 20 ms"
+  product budget is missed and that save cost grows with the vault — a save
+  re-serializes and re-encrypts the whole index. Every run that misses it
+  prints `BUDGET MISS` with the number, and the pass line says so rather than
+  claiming a clean run.
+- Added: `npm run benchmark:budgets`, which enforces the budgets that are not
+  met yet, and a separate `performance-budgets` CI job that runs it. The job is
+  expected to fail until the defect is closed and is deliberately not a
+  required status check: the miss stays visible without blocking merges. The
+  budget itself is not relaxed.
+- Changed: `docs/PRODUCT.md` now records per-budget status, and the README
+  states plainly that save latency does not meet its target. Tracked as
+  Phase 17 in [`docs/ROADMAP.md`](docs/ROADMAP.md), with the encrypted change
+  log plus periodic compaction design and its acceptance conditions.
+
 ### Documentation
 
 - Changed: the README and `docs/PRODUCT.md` now state that the shipped MCP

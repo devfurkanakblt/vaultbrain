@@ -39,6 +39,31 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
       - run: npm run package:check
 
+  # The product performance budgets that are not met yet, enforced strictly and
+  # on their own.
+  #
+  # This job is expected to be RED until Phase 17 (incremental index
+  # persistence) lands: a single-note save re-serializes and re-encrypts the
+  # whole index, so it misses the "< 20 ms incremental save acknowledgement"
+  # budget in docs/PRODUCT.md and gets worse as a vault grows.
+  #
+  # It is deliberately separate from `typescript` so the miss is visible as a
+  # real failure rather than a tolerated warning, while merges stay unblocked.
+  # **Do not add `performance-budgets` to the repository's required status
+  # checks** until it passes; adding it is what closes the loop once Phase 17 is
+  # done. Relaxing a budget to turn this green is not an option — the whole
+  # point of splitting it out is that the number stays honest.
+  performance-budgets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run benchmark:budgets
+
   node-platform:
     strategy:
       fail-fast: false

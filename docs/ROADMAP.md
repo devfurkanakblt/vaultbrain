@@ -410,6 +410,62 @@ with Phases 12 and 14.
       script; see
       [`docs/superpowers/plans/2026-09-15-phase-16-6-desktop-dist-clean.md`](superpowers/plans/2026-09-15-phase-16-6-desktop-dist-clean.md).
 
+## Phase 17 — Incremental index persistence (open defect)
+
+Found by adding the measurement the 2026-09-19 CLI review asked for
+([finding 11](CLI-AUDIT-2026-09-19.md)), not by a report from the field: the
+"incremental save acknowledgement < 20 ms" budget in [`PRODUCT.md`](PRODUCT.md)
+is missed, and the cost grows with the vault rather than with the edit.
+
+Measured on Windows / Node 22.20.0: 200 notes 14.1 ms p95, 1,000 notes 27.1 ms
+p95, 4,000 notes 843.9 ms p95. I/O is not the bottleneck — an atomic write plus
+fsync of the same index blob is 2.4 ms at 659 KiB and 6.2 ms at 2.6 MiB. The
+cost is `saveIndex` in `src/documents.ts` re-serializing and re-encrypting the
+whole index on every save. While that holds, no small optimisation reaches
+< 20 ms at 100,000 notes; the write architecture is what has to change.
+
+### Now — measure honestly, do not claim the target
+
+These ship ahead of the fix and are deliberately merged without closing it.
+
+- [x] Report the measurement and the `BUDGET MISS` result on every benchmark run
+- [x] Enforce the strict threshold in a separate `performance-budgets` CI job:
+      visibly red, and not a required status check, so it does not block merges
+- [x] State in the README, `PRODUCT.md` and here that the save-latency target is
+      not met
+
+### Phase 17 — encrypted change log plus periodic index compaction
+
+The preferred design, in the order a save executes:
+
+1. A save persists only the changed note and the index delta it implies.
+2. The delta is applied to the in-memory index; the whole index is never
+   re-encrypted on the save path.
+3. When the log passes a size threshold, a fresh index snapshot is written.
+4. The old log is removed only once that snapshot is durable.
+5. After a crash, snapshot and log are read together to rebuild a consistent
+   index.
+
+Constraints that are part of the design, not optimisations to add later:
+
+- "Saved" is answered only after the data it acknowledges is durable on disk.
+  Moving the write to the background to make the number look smaller is not a
+  solution and is not acceptable here.
+- The log is vault content: it must be encrypted and integrity-protected, be
+  catalogued in `src/format-version.ts`, be classified by `planRekey`, be
+  carried by backup and restore, and carry a version this build can refuse.
+
+### Acceptance — not speed alone
+
+- [ ] Save p95 measured at the 1k, 10k and 100k tiers
+- [ ] Measurement spans compaction rather than excluding the slow samples it
+      produces
+- [ ] No acknowledged save is lost across a crash or concurrent writers
+- [ ] Unlock time stays within budget with a large log, not only just after a
+      compaction
+- [ ] Only once all of the above hold: promote `performance-budgets` to a
+      required check and fold the budget into the default `--assert` gates
+
 ## Phase 18 candidates — context semantics (not scheduled)
 
 Adopted from the context-format evaluation in
@@ -434,6 +490,8 @@ new obligation: nothing here adds scope to a phase or moves an item between owne
 
 **Needs code.**
 
+- **17** — the incremental-save defect above. It is a measured budget miss with a
+  named cause, not evidence work.
 - **14.2** — the transition-by-transition coverage mapping is still to be signed off
   ([verification record](PHASE-14-VERIFICATION.md)). If the mapping exposes an
   uncovered transition, closing it means new tests in `test/keyring-recovery.test.mjs`

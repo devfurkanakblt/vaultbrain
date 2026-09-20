@@ -82,14 +82,29 @@ See [`CLI-AUDIT-2026-09-19.md`](CLI-AUDIT-2026-09-19.md), finding 10.
 Performance budgets are measured after unlock on a reference 4-core laptop with
 100,000 medium notes:
 
-| Interaction                      | Target (p95) |
-| -------------------------------- | -----------: |
-| Open indexed note                |      < 50 ms |
-| Title/quick switch search        |      < 30 ms |
-| Full-text result first paint     |     < 100 ms |
-| Backlink query                   |      < 50 ms |
-| Incremental save acknowledgement |      < 20 ms |
-| Cold unlock to usable shell      |        < 2 s |
+| Interaction                      | Target (p95) | Status           |
+| -------------------------------- | -----------: | ---------------- |
+| Open indexed note                |      < 50 ms | Met, gated       |
+| Title/quick switch search        |      < 30 ms | Met, gated       |
+| Full-text result first paint     |     < 100 ms | Met, gated       |
+| Backlink query                   |      < 50 ms | Met, gated       |
+| Incremental save acknowledgement |      < 20 ms | **Not met**      |
+| Cold unlock to usable shell      |        < 2 s | Met, gated       |
+
+"Gated" means `scripts/benchmark.mjs --assert` fails the build when the target
+regresses, at the 1k, 10k and 100k tiers.
+
+**Incremental save acknowledgement is not met.** A single-note save
+re-serializes and re-encrypts the entire index, so the cost scales with the
+vault rather than with the edit: 14.1 ms p95 at 200 notes, 27.1 ms at 1,000,
+843.9 ms at 4,000 (Windows, Node 22.20.0). I/O is not the bottleneck — an
+atomic write plus fsync of the same index blob is 2.4 ms at 659 KiB and 6.2 ms
+at 2.6 MiB. The budget stays as written; the implementation is what has to
+change. See Phase 17 in [`ROADMAP.md`](ROADMAP.md) and finding 11 of
+[`CLI-AUDIT-2026-09-19.md`](CLI-AUDIT-2026-09-19.md).
+
+Acknowledging a save before its data is durable is explicitly not an acceptable
+way to meet this number.
 
 Security release gates:
 

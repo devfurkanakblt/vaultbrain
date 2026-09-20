@@ -451,10 +451,20 @@ desktop application prunes to the same bound the command line set.
 
 ### Performance gates
 
+> **One product performance budget is not met today.** Incremental save
+> acknowledgement is specified at **< 20 ms p95** in
+> [`docs/PRODUCT.md`](docs/PRODUCT.md) and the implementation misses it, by a
+> margin that grows with the vault. Measured on Windows / Node 22.20.0:
+> **14.1 ms p95 at 200 notes, 27.1 ms at 1,000, 843.9 ms at 4,000.** Treat
+> "the 100k gates pass" as a statement about unlock, search, note open and
+> backlinks — not about save latency. The cause and the plan are Phase 17 in
+> [`docs/ROADMAP.md`](docs/ROADMAP.md).
+
 ```bash
-npm run benchmark        # 1,000 notes  — the everyday gate
-npm run benchmark:10k    # 10,000 notes
-npm run benchmark:100k   # 100,000 notes (slow: it writes 100k encrypted objects)
+npm run benchmark          # 1,000 notes  — the everyday regression gate
+npm run benchmark:10k      # 10,000 notes
+npm run benchmark:100k     # 100,000 notes (slow: it writes 100k encrypted objects)
+npm run benchmark:budgets  # strict: also enforces the budgets not met yet
 ```
 
 Each builds a disposable encrypted corpus and enforces the p95 budgets from
@@ -462,6 +472,19 @@ Each builds a disposable encrypted corpus and enforces the p95 budgets from
 full-text search, note open and backlinks. The gates are measured, not
 aspirational — a tier's numbers are only raised with a measurement and a
 reason, never to turn a red run green.
+
+`unlockAndIndexMs` is timed until the index is actually usable, not until the
+constructor returns: `new DocumentVault` is lazy, so stopping the clock there
+measured an unlock that had not yet decrypted an index.
+
+Incremental save is **always measured and always reported**. Every run that
+misses the budget prints a `BUDGET MISS` line naming the number, and the
+success line says the budget is missed rather than claiming a clean pass. The
+default runs do not fail on it, because it is a known defect with its own phase
+rather than a regression; `npm run benchmark:budgets` does fail on it, and the
+separate `performance-budgets` CI job runs exactly that. That job is expected
+to be red until Phase 17 lands and is deliberately not a required check, so the
+miss stays visible without blocking unrelated merges.
 
 Building the larger tiers is what surfaced the work behind them. Three write
 and resolve paths scanned the whole vault (quadratic during a bulk import), and
