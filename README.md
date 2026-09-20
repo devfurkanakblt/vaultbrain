@@ -81,6 +81,24 @@ redaction is `none`, `partial` (mask identifiers, keep a short tail so the agent
 can confirm a match) or `full` (return the value's _shape_ — "an IBAN, 26
 characters" — and none of its characters).
 
+**Choose redaction per key, not per file.** `partial` recognises identifiers —
+an IBAN, a card or phone number, an email, a long opaque id — and keeps a short
+tail. Anything it does not recognise gets the same treatment: every character
+but the last few is replaced. That is the right default for an unknown secret
+and the wrong one for a name or a date, which come back as `•••••••••••raca`
+and answer nothing. Applied to one identifier it is exactly the intent;
+stretched across a file with `health:*:...:partial` it masks every ordinary
+value in that file, and the agent reports that it could not find answers the
+grant does permit. `vbrain grant add` prints a note when a scope does this.
+
+```bash
+# Readable where reading is the point, masked where it is not.
+vbrain grant add claude-code \
+  --scope "health:DOCTOR_NAME:discover,resolve" \
+  --scope "health:BLOOD_TYPE:discover,resolve" \
+  --scope "health:INSURANCE_POLICY:discover,resolve:partial"
+```
+
 Three properties are worth stating plainly:
 
 - **The narrowest scope wins.** When several scopes cover one key, the
