@@ -60,12 +60,15 @@ host and fails with `Cannot connect to C: resolve failed`.
 `test/platform-artifacts.test.mjs` now picks the system bsdtar itself and
 explains it if no usable reader exists, so this should no longer surprise you.
 
-**Do not run `npm run format` to "fix" `npm run format:check`.** `.gitattributes`
-sets `* text=auto`, so Windows checks files out with CRLF while Prettier defaults
-to `endOfLine: "lf"`. `format:check` reports five files that are byte-identical
-to Prettier's output once carriage returns are stripped. Running `npm run format`
-rewrites them to LF and produces a diff that is pure noise. Confirm carriage
-returns are all it reports, then leave them alone.
+**`npm run format:check` runs on Windows.** It used to report every checked file
+as a style violation: `.gitattributes` sets `* text=auto`, so Windows checks
+files out with CRLF, while Prettier defaults to `endOfLine: "lf"`. The advice
+was to confirm carriage returns were all it reported and leave them alone, which
+meant the one formatting check in `npm run quality` could not be read on the
+platform most of this project is developed on. `.prettierrc.json` now sets
+`endOfLine: "auto"`, so Prettier accepts the endings the platform checked out
+and still reports every real formatting difference. Git continues to normalise
+to LF on commit, so the bytes in the repository are unchanged.
 
 **`npm run quality:rust` needs Visual Studio Build Tools** with the "Desktop
 development with C++" workload; the Rust core links with MSVC's `link.exe`.
