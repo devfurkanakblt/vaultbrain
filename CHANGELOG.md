@@ -153,6 +153,24 @@ are closed. Regressions live in `test/cli-audit-2026-09-19.test.mjs` and
   repository changes. `CONTRIBUTING.md` no longer tells contributors to ignore
   the check's output.
 
+### MCP discovery output
+
+- Changed: `list_keys`, `find_key` and `find_notes_in_range` return one
+  `file/KEY — description` per line instead of pretty-printed JSON. These
+  results are read by a language model, not parsed by a program, and discovery
+  is the largest thing the server puts into a context: it lists every key the
+  agent may see, on every conversation that browses the vault. The JSON spent
+  about a third of its characters on indentation and quoting, and on a 250-key
+  vault that made listing one key cost 102 characters — more than handing over
+  that key, its description and its value would have, which inverts the reason
+  an agent is asked to discover before it resolves. Measured `list_keys`
+  output: 25,608 → 16,689 characters at 250 keys, 2,327 → 1,230 at 34, and
+  411 → 192 for a five-key grant. Every line names its own file, so a key
+  cannot be read off the wrong heading. Nothing about which keys are visible,
+  or what is audited, changes.
+- Changed: an empty discovery result is now a sentence rather than `[]` or
+  `{}`, which read as "the tool failed" as easily as "there is nothing".
+
 ### Documentation
 
 - Changed: the README and `docs/PRODUCT.md` now state that the shipped MCP
