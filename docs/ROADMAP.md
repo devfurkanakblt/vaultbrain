@@ -437,13 +437,15 @@ p95 on the CI Linux runner, 200 samples, before and after:
 | ---: | ---: | ---: |
 | 1,000 | 16.6 → **3.5 ms** | 34.4 → **4.95 ms** |
 | 10,000 | 141.7 → **3.5 ms** | 2,553 → **5.03 ms** |
+| 100,000 | → **4.55 ms** | → **5.98 ms** |
 
 (The two "before" figures for the desktop core are from a development machine,
 which reports roughly three times the runner's numbers; there was no CI
 measurement of that core to compare against, which is the gap #77 recorded.)
 
-Both cores are flat in vault size rather than linear, and both are gated at the
-1k and 10k tiers. The 100,000-note tier runs on pushes to `main`.
+Both cores are flat in vault size rather than linear in it: a save costs the
+same at 100,000 notes as at 1,000. The 1k and 10k tiers are gated on every pull
+request; 100k runs on pushes to `main`.
 
 ### The design, as built
 
@@ -478,18 +480,20 @@ replayed against a different snapshot without failing authentication.
 - [x] Unlock stays within budget with a log present
 - [x] A vault written by one core is read correctly by the other, log included
       (`test/cross-core-index-log.test.mjs` drives both binaries over one vault)
-- [ ] Promote `performance-budgets` to a required check once the desktop core
-      meets the budget at 100,000 notes as well
+- [x] Both cores meet the budget at 100,000 notes, the size it is written for
+- [ ] Promote `performance-budgets` to a required status check — a repository
+      setting, and the last thing holding this phase open
 
 ### What is left
 
-The desktop core meets the budget through 10,000 notes. What remains at
-100,000 is not the index: a profile puts the incremental maintenance at 0.3% of
-a save. It is the four durable file operations a save still makes — the
-write-ahead journal, the archived revision, the note object and the log append
-— in a directory holding 100,000 objects. Reducing that count is the next
-lever, and it is a separate change with its own crash-safety argument rather
-than a tuning pass.
+Only the repository setting: `performance-budgets` passes in both cores at
+every tier and can now be made a required status check.
+
+A profile puts the incremental index maintenance at 0.3% of a save, so what a
+save costs now is the four durable file operations it makes — the write-ahead
+journal, the archived revision, the note object and the log append. That is a
+fixed cost rather than one that grows with the vault, and reducing the count is
+an optimisation with its own crash-safety argument rather than a budget miss.
 
 ## Phase 18 candidates — context semantics (not scheduled)
 

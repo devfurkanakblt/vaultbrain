@@ -88,7 +88,7 @@ Performance budgets are measured after unlock on a reference 4-core laptop with
 | Title/quick switch search        |      < 30 ms | Met, gated       |
 | Full-text result first paint     |     < 100 ms | Met, gated       |
 | Backlink query                   |      < 50 ms | Met, gated       |
-| Incremental save acknowledgement |      < 20 ms | Met, gated to 10k |
+| Incremental save acknowledgement |      < 20 ms | Met, gated       |
 | Cold unlock to usable shell      |        < 2 s | Met, gated       |
 
 "Gated" means `scripts/benchmark.mjs --assert` fails the build when the target
@@ -101,27 +101,18 @@ change:
 
 | Vault         | TypeScript p95 | Rust (desktop) p95 |
 | ------------- | -------------: | -----------------: |
-| 1,000 notes   |     **3.5 ms** |         **4.95 ms** |
-| 10,000 notes  |     **3.5 ms** |         **5.03 ms** |
+| 1,000 notes   |     **3.5 ms** |        **4.95 ms** |
+| 10,000 notes  |     **3.5 ms** |        **5.03 ms** |
+| 100,000 notes |    **4.55 ms** |        **5.98 ms** |
 
 Measured by the `performance-budgets` CI job on its Linux runner, 200 samples.
 Before the change the same harness gave 16.6 ms at 1,000 notes and 141.7 ms at
 10,000 for TypeScript, and 34.4 ms and 2,553 ms for the desktop core.
 
-Both cores are now flat in vault size rather than linear in it, and both are
-gated at the 1k and 10k tiers. The 100,000-note tier — the size the budget is
-written for — runs on pushes to `main` in both cores; a development machine
-measures 13.4 ms there for TypeScript and 66.4 ms for the desktop core, and
-that machine reports roughly three times the CI runner's numbers at 10,000, so
-the desktop figure at 100,000 is the one still to confirm on the reference
-platform.
-
-What remains in the desktop core at 100,000 notes is not the index: a CPU
-profile puts the incremental index maintenance at 0.3% of a save. It is the
-four durable file operations a save still makes — the write-ahead journal, the
-archived revision, the note object and the log append — in a directory holding
-100,000 objects. Reducing that count is the next lever and deserves its own
-crash-safety argument rather than a tuning pass.
+Both cores are flat in vault size rather than linear in it: a save costs the
+same at 100,000 notes as at 1,000. The 1k and 10k tiers are gated on every
+pull request; 100k runs on pushes to `main`, because it writes 100,000
+encrypted objects per core.
 
 Acknowledging a save before its data is durable is explicitly not an acceptable
 way to meet this number.

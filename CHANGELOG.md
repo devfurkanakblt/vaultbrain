@@ -38,10 +38,11 @@ Measured p95 on the CI Linux runner, 200 samples:
 | ---: | ---: | ---: |
 | 1,000 | 16.6 → **3.5 ms** | 34.4 → **4.95 ms** |
 | 10,000 | 141.7 → **3.5 ms** | 2,553 → **5.03 ms** |
+| 100,000 | → **4.55 ms** | → **5.98 ms** |
 
-Both cores are flat in vault size rather than linear, and both are gated at the
-1k and 10k tiers; the 100,000-note tier runs on pushes to `main`. What remains
-at that size is the count of durable file operations per save, not the index.
+Both cores meet the budget at 100,000 notes, the size it is written for, and a
+save costs the same there as at 1,000: the cost is flat in vault size rather
+than linear in it.
 
 
 ### Security and data integrity — 2026-09-19 CLI/MCP review

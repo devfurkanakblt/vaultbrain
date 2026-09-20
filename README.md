@@ -454,10 +454,12 @@ desktop application prunes to the same bound the command line set.
 > **Saving one note no longer costs a pass over the vault.** Phase 17 replaced
 > the whole-index rewrite on the save path with an encrypted change log, in
 > both the TypeScript library and the Rust desktop core. Incremental save
-> acknowledgement is specified at **< 20 ms p95**. On the CI runner, at 10,000
-> notes, the TypeScript path went from **141.7 ms to 3.5 ms** and the desktop
-> core from **2,553 ms to 5.0 ms** — and both are now flat in vault size rather
-> than linear in it. See Phase 17 in [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> acknowledgement is specified at **< 20 ms p95**, at 100,000 notes. Both cores
+> now measure well inside it — **4.55 ms** (TypeScript) and **5.98 ms**
+> (desktop) at that size — and a save costs the same there as it does at 1,000
+> notes. At 10,000 the TypeScript path went from 141.7 ms to 3.5 ms and the
+> desktop core from 2,553 ms to 5.0 ms. See Phase 17 in
+> [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ```bash
 npm run benchmark          # 1,000 notes  — the everyday regression gate
