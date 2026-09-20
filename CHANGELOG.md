@@ -32,17 +32,16 @@ Saving one note no longer costs a pass over the whole vault, in either core.
   `PRODUCT.md` is a desktop interaction, and until now only the TypeScript
   library was measured.
 
-Measured p95, same harness before and after:
+Measured p95 on the CI Linux runner, 200 samples:
 
 | Vault | TypeScript | Rust (desktop) |
 | ---: | ---: | ---: |
-| 1,000 | 26.0 → 11.8 ms | 34.4 → 15.1 ms |
-| 10,000 | 141.7 → 9.8 ms | 2,553 → 16.0 ms |
-| 100,000 | → 13.4 ms | measuring |
+| 1,000 | 16.6 → **3.5 ms** | 34.4 → **4.95 ms** |
+| 10,000 | 141.7 → **3.5 ms** | 2,553 → **5.03 ms** |
 
-The TypeScript path meets the < 20 ms budget at 100,000 notes, the size the
-contract specifies. The desktop core meets it through 10,000; what remains
-there is the count of durable file operations per save, not the index.
+Both cores are flat in vault size rather than linear, and both are gated at the
+1k and 10k tiers; the 100,000-note tier runs on pushes to `main`. What remains
+at that size is the count of durable file operations per save, not the index.
 
 
 ### Security and data integrity — 2026-09-19 CLI/MCP review

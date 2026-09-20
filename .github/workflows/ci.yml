@@ -79,6 +79,13 @@ jobs:
       # desktop interaction, so measuring only the TypeScript library left the
       # number the contract is about unmeasured until Phase 17.
       - run: npm run benchmark:rust
+      # The tier the budget is actually written for. Slow -- it writes 100k
+      # encrypted objects in each core -- so it runs on main rather than on
+      # every pull request, the same way benchmark:100k does.
+      - run: npm run benchmark:100k
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      - run: npm run benchmark:rust -- --notes 100000
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
   node-platform:
     strategy:

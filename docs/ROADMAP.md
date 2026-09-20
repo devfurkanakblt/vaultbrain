@@ -431,14 +431,19 @@ on every CLI save:
 
 Measured p95, same harness before and after:
 
-| Vault | TypeScript before | after | Rust before | after |
-| ---: | ---: | ---: | ---: | ---: |
-| 1,000 | 26.0 ms | **11.8 ms** | 34.4 ms | **15.1 ms** |
-| 10,000 | 141.7 ms | **9.8 ms** | 2,553 ms | **16.0 ms** |
-| 100,000 | — | **13.4 ms** | — | measuring |
+p95 on the CI Linux runner, 200 samples, before and after:
 
-The TypeScript path meets the < 20 ms budget at 100,000 notes, the size the
-contract specifies, and the cost is now flat in vault size rather than linear.
+| Vault | TypeScript | Rust (desktop) |
+| ---: | ---: | ---: |
+| 1,000 | 16.6 → **3.5 ms** | 34.4 → **4.95 ms** |
+| 10,000 | 141.7 → **3.5 ms** | 2,553 → **5.03 ms** |
+
+(The two "before" figures for the desktop core are from a development machine,
+which reports roughly three times the runner's numbers; there was no CI
+measurement of that core to compare against, which is the gap #77 recorded.)
+
+Both cores are flat in vault size rather than linear, and both are gated at the
+1k and 10k tiers. The 100,000-note tier runs on pushes to `main`.
 
 ### The design, as built
 
