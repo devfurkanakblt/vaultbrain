@@ -32,6 +32,15 @@ import { applyFrontmatter, parseFrontmatter, stringifyFrontmatter } from "./fron
 import { withVaultLock } from "./vault-lock.js";
 import { matchesQuery, parseQuery, type QueryFields } from "./search-query.js";
 import {
+  appendIndexLog,
+  INDEX_LOG_FILENAME,
+  readIndexLog,
+  removeIndexLog,
+  shouldCompact,
+  startIndexLog,
+  type IndexLogRecord,
+} from "./index-log.js";
+import {
   AAD,
   attachmentChunkAad,
   attachmentManifestAad,
@@ -192,6 +201,14 @@ interface DocumentIndex {
    * field, and that is not a reason to rebuild: nothing derived depends on it.
    */
   plugins?: Record<string, PluginSummary>;
+  /**
+   * Which change log this snapshot owns. Absent on an index written before the
+   * log existed, which simply means there is no log to replay. Every snapshot
+   * bumps it, so a log left behind by a crash mid-compaction names a
+   * generation that no longer matches and is discarded instead of replayed
+   * onto a snapshot that already contains it.
+   */
+  logGeneration?: number;
 }
 
 const DERIVED_LAYOUT = 5;
@@ -568,9 +585,32 @@ function countOccurrences(haystack: string, needle: string): number {
   return count;
 }
 
+/**
+ * Folds a vault's pending index change log into its snapshot, if it has one.
+ *
+ * A re-key rewrites `index.enc` under a new keyset, and the log's lines are
+ * sealed against the generation it replaces, so the snapshot has to be the
+ * whole truth first. Opening and locking a vault does this anyway; this is the
+ * same thing for a caller that only wants the side effect.
+ */
+export function compactDocumentIndex(vaultDir: string, passphrase: string): boolean {
+  if (!fs.existsSync(path.join(vaultDir, "documents", INDEX_LOG_FILENAME))) return false;
+  const vault = new DocumentVault(vaultDir, passphrase);
+  try {
+    return vault.compactIndex();
+  } finally {
+    vault.lock();
+  }
+}
+
 export class DocumentVault {
   private readonly session: DocumentKeySession;
   private indexCache?: DocumentIndex;
+  /** The snapshot generation the in-memory index belongs to. */
+  private logGeneration = 0;
+  /** Lines already in the log, header included; 0 until a snapshot is read. */
+  private logLines = 0;
+  private logBytes = 0;
   private notesCache?: IndexedNote[];
   private retentionCache?: RetentionPolicy;
   // Search fields belong to the in-memory note object for this session. A
@@ -601,6 +641,30 @@ export class DocumentVault {
    * change, not a UI gesture.
    */
   lock(): void {
+    // Fold the change log back into the snapshot before the keys go.
+    //
+    // The log is a session optimisation: it exists so a save inside a live
+    // session costs an append instead of a whole-index rewrite. At rest the
+    // vault should be self-contained, because everything else that reads it —
+    // re-key, backup, the format inventory, the other core — wants one
+    // authoritative `index.enc` and not a snapshot plus a tail. A crash still
+    // leaves a log, and replay on the next open handles that; this is the
+    // orderly path, not the safety net.
+    //
+    // Failure here must not leave a session holding live keys, so it is
+    // reported and the lock proceeds: the log is durable either way, and the
+    // next open replays it.
+    if (!this.locked && this.logLines > 0) {
+      try {
+        this.writeIndexSnapshot(this.loadIndex());
+      } catch (error) {
+        process.emitWarning(
+          `Could not compact the index change log while locking; it will be replayed on the next open. ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
     this.sessionGeneration += 1;
     for (const index of this.semanticIndexes.values()) index.clear();
     this.semanticIndexes.clear();
@@ -715,6 +779,7 @@ export class DocumentVault {
     }
     const index = parsed as DocumentIndex;
     if (typeof index.notes !== "object") throw new Error("Unsupported or invalid document index.");
+    this.applyIndexLog(index);
     this.indexCache = index;
     if (!this.readJournal()) return index;
     return withVaultLock(this.vaultDir, () => this.recoverFromJournal(index) ?? index);
@@ -910,14 +975,165 @@ export class DocumentVault {
     return this.bodyOccurrenceCache;
   }
 
-  private saveIndex(index: DocumentIndex): void {
+  /**
+   * Folds one indexed note into the index and every map derived from it.
+   *
+   * This is the only place that mutation is written. A live save calls it
+   * after the note object is durable; replaying the change log calls it for
+   * each recorded entry. Sharing one implementation is what makes a replayed
+   * index identical to the one the writing session held — the alternative is
+   * two subtly different notions of what a save does to the link graph.
+   */
+  /**
+   * Replays the change log onto a snapshot just read from disk.
+   *
+   * Records are applied through the same helpers a live save uses, so a
+   * replayed index is the index the writing session held rather than an
+   * approximation of it. A log belonging to an older generation is stale and
+   * reads as empty; a log damaged anywhere but its last line raises, and the
+   * caller rebuilds from the note objects, which are the source of truth.
+   */
+  private applyIndexLog(index: DocumentIndex): void {
+    this.logGeneration = index.logGeneration ?? 0;
+    if (this.logGeneration === 0) {
+      this.logLines = 0;
+      this.logBytes = 0;
+      return;
+    }
+    const log = readIndexLog(this.session.rootDir, this.session.readKeys, this.logGeneration);
+    this.logLines = log.lines;
+    this.logBytes = log.bytes;
+    for (const record of log.records) this.applyIndexLogRecord(index, record);
+  }
+
+  private applyIndexLogRecord(index: DocumentIndex, record: IndexLogRecord): void {
+    switch (record.kind) {
+      case "note":
+        this.applyIndexedNote(index, record.note as IndexedNote);
+        return;
+      case "note-removed":
+        this.applyNoteRemoval(index, record.id);
+        return;
+    }
+  }
+
+  private applyIndexedNote(index: DocumentIndex, indexed: IndexedNote): void {
+    const id = indexed.id;
+    const existing = index.notes[id];
+    const oldLabels = existing ? this.identityLabels(existing) : [];
+    if (existing) this.searchCache.delete(existing);
+    if (existing) this.removeOwnerLabels(index, existing);
+    index.notes[id] = indexed;
+    this.addOwnerLabels(index, indexed);
+    this.removeSourceFromLinkMap(index, id, existing);
+    this.addSourceToLinkMap(index, indexed);
+    const labels = [...oldLabels, ...this.identityLabels(indexed)];
+    const affected = new Set<string>([id]);
+    for (const label of labels) {
+      for (const sourceId of index.linkSources[label] ?? []) affected.add(sourceId);
+    }
+    for (const sourceId of affected) this.refreshResolvedSource(index, sourceId);
+    this.refreshCanvasesForNoteChange(index, id, labels);
+  }
+
+  /** The removal counterpart of `applyIndexedNote`, on the same contract. */
+  private applyNoteRemoval(index: DocumentIndex, id: string): void {
+    const existing = index.notes[id];
+    if (!existing) return;
+    const labels = this.identityLabels(existing);
+    const affected = new Set<string>();
+    for (const label of labels) {
+      for (const sourceId of index.linkSources[label] ?? []) affected.add(sourceId);
+    }
+    this.searchCache.delete(existing);
+    this.removeSourceFromLinkMap(index, id, existing);
+    this.removeOwnerLabels(index, existing);
+    this.clearResolvedSource(index, id);
+    delete index.notes[id];
+    delete index.backlinks[id];
+    affected.delete(id);
+    for (const sourceId of affected) {
+      if (index.notes[sourceId]) this.refreshResolvedSource(index, sourceId);
+    }
+    this.refreshCanvasesForNoteChange(index, id, labels);
+  }
+
+  /**
+   * Commits an index mutation.
+   *
+   * `record` describes the change in a form the log can replay. When one is
+   * supplied and the log has room, the commit is a single sealed append —
+   * which is the whole point of the log: a one-line edit used to cost a
+   * serialise, encrypt, write and fsync of the entire index, roughly 120 MiB
+   * at 100,000 notes. Callers that cannot describe their change, and the
+   * compaction threshold, fall back to a full snapshot, which is always
+   * correct and merely slower.
+   */
+  private saveIndex(index: DocumentIndex, record?: IndexLogRecord): void {
     this.assertUnlocked();
     this.notesCache = undefined;
     this.clearBodyOccurrenceCache();
+    this.indexCache = index;
+    if (record && this.logGeneration > 0 && !shouldCompact(this.logLines + 1, this.logBytes)) {
+      if (this.logLines === 0) {
+        const started = startIndexLog(this.session.rootDir, this.session.key, this.logGeneration);
+        this.logLines = started.lines;
+        this.logBytes = started.bytes;
+      }
+      this.logBytes += appendIndexLog(
+        this.session.rootDir,
+        this.session.key,
+        this.logGeneration,
+        this.logLines,
+        record,
+      );
+      this.logLines += 1;
+      return;
+    }
+    this.writeIndexSnapshot(index);
+  }
+
+  /**
+   * Writes a fresh snapshot and starts an empty log bound to it.
+   *
+   * The order is load-bearing: the snapshot lands first, so a crash before the
+   * log is replaced leaves a log whose generation no longer matches and which
+   * is therefore discarded rather than replayed onto a snapshot that already
+   * contains it.
+   */
+  private writeIndexSnapshot(index: DocumentIndex): void {
     index.generatedAt = new Date().toISOString();
+    // Monotonic across rebuilds as well as saves. A snapshot only has to carry
+    // a generation no surviving log claims, and a rebuild starts from a fresh
+    // index object that remembers nothing — so the session's own counter is
+    // taken into account rather than the object's field alone.
+    index.logGeneration = Math.max(index.logGeneration ?? 0, this.logGeneration) + 1;
     const payload = encryptDocument(JSON.stringify(index), this.session.key, AAD.documentIndex);
     writeFileAtomic(this.indexPath(), JSON.stringify(payload), { mode: 0o600 });
     this.indexCache = index;
+    this.logGeneration = index.logGeneration;
+    // The snapshot lands before the log goes. A crash in between leaves a log
+    // whose generation no longer matches, which reads as empty rather than
+    // being replayed onto a snapshot that already contains it.
+    removeIndexLog(this.session.rootDir);
+    this.logLines = 0;
+    this.logBytes = 0;
+  }
+
+  /**
+   * Folds the log back into the snapshot and leaves no log behind.
+   *
+   * A re-key, a backup and the format inventory all want a self-contained
+   * `index.enc`; this is how they ask for one. A no-op when nothing is
+   * pending, and safe to call repeatedly.
+   */
+  compactIndex(): boolean {
+    return withVaultLock(this.vaultDir, () => {
+      const index = this.loadIndex();
+      if (this.logLines === 0) return false;
+      this.writeIndexSnapshot(index);
+      return true;
+    });
   }
 
   private loadById(id: string): NoteDocument {
@@ -2093,19 +2309,8 @@ export class DocumentVault {
     const frontmatterSource = input.frontmatterSource ?? existing?.frontmatterSource;
     if (frontmatterSource) note.frontmatterSource = frontmatterSource;
 
-    const oldLabels = existing ? this.identityLabels(existing) : [];
     const indexed: IndexedNote = { ...note, links: analysis.links, headings: analysis.headings };
-    if (existing) this.removeOwnerLabels(index, existing);
-    index.notes[id] = indexed;
-    this.addOwnerLabels(index, indexed);
-    this.removeSourceFromLinkMap(index, id, existing);
-    this.addSourceToLinkMap(index, indexed);
-    const affected = new Set<string>([id]);
-    for (const label of [...oldLabels, ...this.identityLabels(indexed)]) {
-      for (const sourceId of index.linkSources[label] ?? []) affected.add(sourceId);
-    }
-    for (const sourceId of affected) this.refreshResolvedSource(index, sourceId);
-    this.refreshCanvasesForNoteChange(index, id, [...oldLabels, ...this.identityLabels(indexed)]);
+    this.applyIndexedNote(index, indexed);
 
     return { document: structuredClone(note) };
   }
@@ -2134,7 +2339,6 @@ export class DocumentVault {
       );
     }
 
-    const oldLabels = existing ? this.identityLabels(existing) : [];
     const existingObject = existing ? this.loadById(existing.id) : undefined;
     const now = new Date().toISOString();
     const title = (input.title ?? path.posix.basename(notePath, ".md")).trim();
@@ -2168,20 +2372,9 @@ export class DocumentVault {
       mode: 0o600,
     });
     const indexed: IndexedNote = { ...note, links: analysis.links, headings: analysis.headings };
-    if (existing) this.searchCache.delete(existing);
-    if (existing) this.removeOwnerLabels(index, existing);
-    index.notes[id] = indexed;
-    this.addOwnerLabels(index, indexed);
-    this.removeSourceFromLinkMap(index, id, existing);
-    this.addSourceToLinkMap(index, indexed);
-    const affected = new Set<string>([id]);
-    for (const label of [...oldLabels, ...this.identityLabels(indexed)]) {
-      for (const sourceId of index.linkSources[label] ?? []) affected.add(sourceId);
-    }
-    for (const sourceId of affected) this.refreshResolvedSource(index, sourceId);
-    this.refreshCanvasesForNoteChange(index, id, [...oldLabels, ...this.identityLabels(indexed)]);
+    this.applyIndexedNote(index, indexed);
     if (persistIndex) {
-      this.saveIndex(index);
+      this.saveIndex(index, { kind: "note", note: indexed });
       this.endJournal();
     }
     return structuredClone(note);
@@ -2220,25 +2413,14 @@ export class DocumentVault {
     const index = this.loadIndex();
     this.beginJournal("notes", [id]);
     const existing = index.notes[id];
-    const affected = new Set<string>();
-    for (const label of this.identityLabels(existing)) {
-      for (const sourceId of index.linkSources[label] ?? []) affected.add(sourceId);
-    }
     // A purge is the one caller that must not leave the outgoing revision
     // behind: archiving here is exactly what it is trying to undo.
     if (archive) this.archiveRevision(this.loadById(id));
     const filePath = encryptedDocumentPath(this.session.rootDir, id);
     assertNotSymlink(filePath);
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-    this.removeSourceFromLinkMap(index, id, existing);
-    this.removeOwnerLabels(index, existing);
-    this.clearResolvedSource(index, id);
-    delete index.notes[id];
-    delete index.backlinks[id];
-    affected.delete(id);
-    for (const sourceId of affected) this.refreshResolvedSource(index, sourceId);
-    this.refreshCanvasesForNoteChange(index, id, this.identityLabels(existing));
-    this.saveIndex(index);
+    this.applyNoteRemoval(index, id);
+    this.saveIndex(index, { kind: "note-removed", id });
     this.endJournal();
     return summary(existing);
   }

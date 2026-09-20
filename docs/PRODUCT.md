@@ -88,39 +88,32 @@ Performance budgets are measured after unlock on a reference 4-core laptop with
 | Title/quick switch search        |      < 30 ms | Met, gated       |
 | Full-text result first paint     |     < 100 ms | Met, gated       |
 | Backlink query                   |      < 50 ms | Met, gated       |
-| Incremental save acknowledgement |      < 20 ms | **Not met**      |
+| Incremental save acknowledgement |      < 20 ms | Met (TS); desktop met to 10k |
 | Cold unlock to usable shell      |        < 2 s | Met, gated       |
 
 "Gated" means `scripts/benchmark.mjs --assert` fails the build when the target
 regresses, at the 1k, 10k and 100k tiers.
 
-**Incremental save acknowledgement is not met.** A single-note save
-re-serializes and re-encrypts the entire index, so the cost scales with the
-vault rather than with the edit. Measured by the `performance-budgets` CI job:
+**Incremental save acknowledgement.** Phase 17 replaced the whole-index
+rewrite on the save path with an encrypted change log in both cores, so the
+cost of saving one note no longer grows with the vault. Measured after that
+change:
 
-| Vault        | save p50 | save p95 | Budget  |
-| ------------ | -------: | -------: | ------- |
-| 1,000 notes  |  14.2 ms |  16.6 ms | met     |
-| 10,000 notes | 105.8 ms | 141.7 ms | missed  |
+| Vault         | TypeScript p95 | Rust (desktop) p95 |
+| ------------- | -------------: | -----------------: |
+| 1,000 notes   |        11.8 ms |            15.1 ms |
+| 10,000 notes  |         9.8 ms |            16.0 ms |
+| 100,000 notes |    **13.4 ms** |    still measuring |
 
-The budget is specified at 100,000 notes, where the encrypted index is roughly
-120 MiB; growth is linear in index size, so the miss widens well past 10,000.
-I/O is not the dominant cost — an atomic write plus fsync of the same index
-blob is 2.5 ms at 1.2 MiB and 7.2 ms at 4.9 MiB. The budget stays as written;
-the implementation is what has to change. See Phase 17 in
-[`ROADMAP.md`](ROADMAP.md) and finding 11 of
-[`CLI-AUDIT-2026-09-19.md`](CLI-AUDIT-2026-09-19.md).
+Before the change the same measurement gave 26.0 ms at 1,000 notes and 141.7 ms
+at 10,000 for TypeScript, and 34.4 ms and 2,553 ms for the desktop core.
 
-**What those figures do and do not cover.** They are the TypeScript library in
-`src/documents.ts`, which is what the CLI and the MCP server use. Every other
-budget in this table is a desktop interaction, and the desktop's note lifecycle
-runs in the Rust core: `save_note` reaches `save_index` in
-`src-tauri/src/lib.rs`, which rewrites the whole index exactly as the
-TypeScript path does. **The desktop save path has the same defect and is not
-measured yet** — there is no Rust-side benchmark. Establishing that
-measurement is the first item of Phase 17, ahead of any change to either
-implementation, because designing against an unmeasured target is the mistake
-finding 11 exists to record.
+The TypeScript library — the CLI and MCP path — meets the budget at every tier
+including 100,000 notes, the size the contract specifies. The desktop core
+meets it through 10,000; its remaining cost is the durable file operations a
+save still makes (write-ahead journal, archived revision, note object, log
+append) rather than anything that scales with the vault. `npm run
+benchmark:rust` reports it and the `performance-budgets` CI job gates it.
 
 Acknowledging a save before its data is durable is explicitly not an acceptable
 way to meet this number.

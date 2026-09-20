@@ -54,6 +54,7 @@ export const AAD = {
   keyedEnvelope: "secondbrain-vault:kv:v2",
   documentKeyCheck: "secondbrain-vault:document-key:v1",
   documentIndex: "secondbrain-vault:document-index:v1",
+  indexLogPrefix: "secondbrain-vault:index-log:v1:",
   pluginPolicy: "secondbrain-vault:plugin-policy:v1",
   retentionPolicy: "secondbrain-vault:retention-policy:v1",
   attachmentId: "secondbrain-vault:attachment-id:v1\0",
@@ -187,6 +188,20 @@ export const FORMAT_COMPATIBILITY: FormatCompatibility = {
     writes: [1],
     domains: ["documentIndex"],
     rekey: { normal: "reencrypt", rotateIdentities: "rewrite-identities" },
+  },
+  indexLog: {
+    pattern: new RegExp("^documents/index-log[.]enc$", "u"),
+    path: "documents/index-log.enc",
+    persistence: "persistent",
+    protection: "encrypted",
+    // The log defers the index snapshot; it never outlives one. A re-key
+    // rewrites the snapshot, so the log it extended is compacted into that
+    // snapshot first and the file is then absent rather than re-encrypted.
+    limitation: "Compacted into the index snapshot before a re-key; never re-encrypted in place.",
+    reads: [1],
+    writes: [1],
+    domains: ["indexLogPrefix"],
+    rekey: { normal: "preserve", rotateIdentities: "reset" },
   },
   pluginPolicy: {
     pattern: new RegExp("^documents/plugin-policy\\.enc$", "u"),

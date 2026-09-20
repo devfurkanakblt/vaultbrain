@@ -63,3 +63,13 @@ opt-level = 3
 
 [profile.dev.package.aes]
 opt-level = 3
+
+[features]
+# The desktop save-path benchmark. Off by default: the measurement code and the
+# binary that drives it must never be part of a shipped desktop build.
+benchmark = []
+
+[[bin]]
+name = "vbrain-bench"
+path = "src/bin/vbrain-bench.rs"
+required-features = ["benchmark"]

@@ -451,26 +451,21 @@ desktop application prunes to the same bound the command line set.
 
 ### Performance gates
 
-> **One product performance budget is not met today.** Incremental save
-> acknowledgement is specified at **< 20 ms p95** in
-> [`docs/PRODUCT.md`](docs/PRODUCT.md). Measured by the `performance-budgets`
-> CI job on its Linux runner: **16.6 ms p95 at 1,000 notes** (met) and
-> **141.7 ms p95 at 10,000** (missed, by about seven times). The cost grows
-> with the vault, not with the edit, so the miss widens from there. Treat "the
-> 100k gates pass" as a statement about unlock, search, note open and
-> backlinks — not about save latency. The cause and the plan are Phase 17 in
-> [`docs/ROADMAP.md`](docs/ROADMAP.md).
->
-> Those figures are the TypeScript library — the CLI and MCP path. The
-> desktop saves through the Rust core, whose `save_index` rewrites the whole
-> index the same way, and **that path is not measured yet.** Measuring it is
-> the first item of Phase 17.
+> **Saving one note no longer costs a pass over the vault.** Phase 17 replaced
+> the whole-index rewrite on the save path with an encrypted change log, in
+> both the TypeScript library and the Rust desktop core. Incremental save
+> acknowledgement is specified at **< 20 ms p95**; the TypeScript path now
+> measures **13.4 ms p95 at 100,000 notes** — the size the budget is written
+> for — where it previously measured 141.7 ms at 10,000 and grew from there.
+> The desktop core went from 2,553 ms to 16.0 ms p95 at 10,000 notes. See
+> Phase 17 in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ```bash
 npm run benchmark          # 1,000 notes  — the everyday regression gate
 npm run benchmark:10k      # 10,000 notes
 npm run benchmark:100k     # 100,000 notes (slow: it writes 100k encrypted objects)
-npm run benchmark:budgets  # strict: also enforces the budgets not met yet
+npm run benchmark:budgets  # strict: fails when a budget is missed
+npm run benchmark:rust     # the same, for the Rust desktop core
 ```
 
 Each builds a disposable encrypted corpus and enforces the p95 budgets from
@@ -483,14 +478,13 @@ reason, never to turn a red run green.
 constructor returns: `new DocumentVault` is lazy, so stopping the clock there
 measured an unlock that had not yet decrypted an index.
 
-Incremental save is **always measured and always reported**. Every run that
+Incremental save is **always measured and always reported**. Any run that
 misses the budget prints a `BUDGET MISS` line naming the number, and the
-success line says the budget is missed rather than claiming a clean pass. The
-default runs do not fail on it, because it is a known defect with its own phase
-rather than a regression; `npm run benchmark:budgets` does fail on it, and the
-separate `performance-budgets` CI job runs exactly that. That job is expected
-to be red until Phase 17 lands and is deliberately not a required check, so the
-miss stays visible without blocking unrelated merges.
+success line says so rather than claiming a clean pass.
+`npm run benchmark:budgets` fails on a miss; `npm run benchmark:rust` does the
+same for the desktop core, whose save path is a different implementation of the
+same contract. The `performance-budgets` CI job runs both, so neither core can
+pass a budget the other fails.
 
 Building the larger tiers is what surfaced the work behind them. Three write
 and resolve paths scanned the whole vault (quadratic during a bulk import), and

@@ -68,6 +68,8 @@ import { CHANGE_AAD_PREFIX, changeEncryptionKey } from "./sync/protocol.js";
 import { APPLY_RECEIPT_AAD, LOCAL_TRANSACTION_AAD } from "./sync/transaction.js";
 import { withVaultLock } from "./vault-lock.js";
 import { SCHEMA_CATALOG_IDENTITY, SCHEMA_FILENAME, schemaNeedsKeyringMigration } from "./schema.js";
+import { INDEX_LOG_FILENAME } from "./index-log.js";
+import { compactDocumentIndex } from "./documents.js";
 
 export const STAGING_DIRNAME = ".rekey";
 
@@ -162,6 +164,16 @@ function classifyDocument(relative: string): RekeyItem | null {
     if (segments[0] === "workspace.enc") return item("document", AAD.workspace);
     if (segments[0] === "views.enc") return item("document", AAD.savedViews);
     if (segments[0] === "index.enc") return item("document", AAD.documentIndex);
+    if (segments[0] === INDEX_LOG_FILENAME) {
+      // The log defers the index snapshot and never outlives one, so it is
+      // folded in before a re-key rather than re-encrypted in place: each of
+      // its lines is sealed against a snapshot generation this run is about
+      // to replace. `rekeyVault` compacts first, so reaching here means a
+      // caller planned a re-key directly on a vault a crash left mid-session.
+      throw new Error(
+        "Refusing to re-key: an index change log is still pending. Run 'vbrain docs rebuild-index' to fold it into the index, then re-key.",
+      );
+    }
     if (segments[0] === "plugin-policy.enc") return item("document", AAD.pluginPolicy);
     if (segments[0] === "retention.enc") return item("document", AAD.retentionPolicy);
   }
@@ -955,6 +967,11 @@ export function rekeyVault(
         forgetVaultKeys(vaultDir);
         return emptyReport({ resumed: true, passphraseChanged: false });
       }
+
+      // Fold any pending index change log into the snapshot before planning.
+      // The log's lines are sealed against a generation this run replaces, so
+      // the snapshot has to be the whole truth before the inventory is taken.
+      compactDocumentIndex(vaultDir, currentPassphrase);
 
       if (detectVaultFormat(vaultDir) !== "keyring") {
         throw new Error("This vault is not in the keyring format yet. Run 'vbrain migrate' first.");

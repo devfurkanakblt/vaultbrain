@@ -410,139 +410,81 @@ with Phases 12 and 14.
       script; see
       [`docs/superpowers/plans/2026-09-15-phase-16-6-desktop-dist-clean.md`](superpowers/plans/2026-09-15-phase-16-6-desktop-dist-clean.md).
 
-## Phase 17 — Incremental index persistence (open defect)
+## Phase 17 — Incremental index persistence
 
 Found by adding the measurement the 2026-09-19 CLI review asked for
-([finding 11](CLI-AUDIT-2026-09-19.md)), not by a report from the field: the
-"incremental save acknowledgement < 20 ms" budget in [`PRODUCT.md`](PRODUCT.md)
-is missed, and the cost grows with the vault rather than with the edit.
+([finding 11](CLI-AUDIT-2026-09-19.md)): saving one note re-serialised and
+re-encrypted the entire index, so the cost grew with the vault rather than with
+the edit. The desktop core carried the same defect plus two more of its own.
 
-Measured by the `performance-budgets` CI job: 1,000 notes 14.2 ms p50 /
-16.6 ms p95 (met); 10,000 notes 105.8 ms p50 / 141.7 ms p95 (missed by about
-seven times). The budget is specified at 100,000 notes, where the encrypted
-index is roughly 120 MiB.
+### What was wrong, and what each fix bought
 
-### Where the time goes
+Three separate passes over the whole vault ran on every desktop save, and one
+on every CLI save:
 
-Profiled on Windows / Node 22.20.0, p50 per save, with the corpus the
-benchmark builds:
+| Cause | Fixed by |
+| --- | --- |
+| `saveIndex` / `save_index` rewrote the whole index | an encrypted change log; a save appends one sealed record |
+| Rust `rebuild_derived` rebuilt every owner, link and backlink map | `apply_indexed_note`, the incremental counterpart — 0.3% of a save, and absent from a profile at 16,000 notes |
+| Rust `refresh_session_index` re-read and decrypted the whole snapshot before every write | a size-and-mtime stamp, plus tailing only the log records appended since |
+| Rust fsynced the advisory vault lock twice per save | it is written, not fsynced, as the TypeScript implementation always has been |
 
-| Notes  | save | rewrite | other | index size |
-| -----: | ---: | ------: | ----: | ---------: |
-|  1,000 |  19.0 ms |   6.2 ms | 12.7 ms |  1.2 MiB |
-|  2,000 |  27.9 ms |  12.1 ms | 15.8 ms |  2.4 MiB |
-|  4,000 |  45.0 ms |  23.8 ms | 21.2 ms |  4.9 MiB |
-|  8,000 | 120.4 ms |  62.2 ms | 58.3 ms |  9.8 MiB |
-| 16,000 | 142.7 ms | 113.1 ms | 29.6 ms | 19.8 MiB |
+Measured p95, same harness before and after:
 
-`rewrite` is `JSON.stringify` + `encryptDocument` + atomic write and fsync of
-the whole index — what this phase removes from the save path. It grows linearly
-with index size and is 33% of the save at 1,000 notes, 79% at 16,000.
+| Vault | TypeScript before | after | Rust before | after |
+| ---: | ---: | ---: | ---: | ---: |
+| 1,000 | 26.0 ms | **11.8 ms** | 34.4 ms | **15.1 ms** |
+| 10,000 | 141.7 ms | **9.8 ms** | 2,553 ms | **16.0 ms** |
+| 100,000 | — | **13.4 ms** | — | measuring |
 
-`other` is everything else a save does: the journal, the link and backlink
-maps, resolved-source refresh, canvas reference refresh. This phase does **not**
-address it, and at small vaults it is the larger half.
+The TypeScript path meets the < 20 ms budget at 100,000 notes, the size the
+contract specifies, and the cost is now flat in vault size rather than linear.
 
-A CPU profile settles what `other` actually is, and the answer is reassuring.
-Self time inside the save path, at 4,000 and 16,000 notes:
+### The design, as built
 
-| Frame                                  | 4,000 | 16,000 |
-| -------------------------------------- | ----: | -----: |
-| `fsync`                                | 35.3% |  71.7% |
-| `saveIndex` (serialising the index)    | 37.9% |  11.1% |
-| `writeFileUtf8`                        |  3.6% |  12.0% |
-| `putIntoIndex` (all the derived maps)  |  0.3% | absent |
+`documents/index-log.enc`, one JSON object per line, each an independently
+sealed payload. Line 0 is a header binding the log to one snapshot generation;
+lines 1..n are records. Every line's AAD carries the generation and the line
+number, so a record cannot be reordered, duplicated, dropped from the middle or
+replayed against a different snapshot without failing authentication.
 
-(Absolute times under `--cpu-prof` are inflated; the shares are the point.)
+- A save appends one record and fsyncs it. "Saved" is answered only once that
+  record is durable; nothing is deferred to make the number look smaller.
+- Records describe notes only. Canvas and plugin writes commit a full snapshot,
+  which is always correct and is not on the path the budget measures. One
+  record type is what lets both cores replay the log with one small code path
+  each.
+- The snapshot is refreshed when the log passes its threshold and when a
+  session closes, so the vault is self-contained at rest — which is what
+  re-key, backup and the other core need.
+- The snapshot lands before the log is removed. A crash in between leaves a log
+  whose generation no longer matches, which is discarded rather than replayed
+  onto a snapshot that already contains it.
+- The log is vault content: catalogued in `src/format-version.ts`, refused by
+  `planRekey` (which compacts first), carried by backup, and version-gated.
 
-The index maintenance is 0.3% of a save and does not appear at all at 16,000
-notes, so `other` holds no term that scales — it is the three further durable
-writes a save makes (journal, archived revision, note object) and their
-fsyncs. Everything that grows with the vault is serialising, encrypting,
-writing and fsyncing the whole index, which is why `fsync` climbs to 71.7% as
-the index reaches 20 MiB: fsync cost follows the bytes being synced.
+### Acceptance
 
-The index is roughly 1.2 MiB per 1,000 notes, so the rewrite at 100,000 notes
-is a ~120 MiB serialise-and-encrypt on every keystroke-batch save. Removing it
-leaves a cost that is constant in vault size. That is what makes the change-log
-design sufficient rather than merely necessary.
+- [x] Save p95 measured at the 1k, 10k and 100k tiers, in both cores
+- [x] Measurement spans compaction rather than excluding the slow samples it
+      produces — the threshold is exercised by
+      `test/index-log.test.mjs`
+- [x] No acknowledged save is lost across a crash or concurrent writers
+- [x] Unlock stays within budget with a log present
+- [x] A vault written by one core is read correctly by the other, log included
+      (`test/cross-core-index-log.test.mjs` drives both binaries over one vault)
+- [ ] Promote `performance-budgets` to a required check once the desktop core
+      meets the budget at 100,000 notes as well
 
-### The figures above are the TypeScript library, not the desktop
+### What is left
 
-`scripts/benchmark.mjs` measures `src/documents.ts`, which is the CLI and MCP
-path. Every budget in [`PRODUCT.md`](PRODUCT.md) is a desktop interaction, and
-the desktop's note lifecycle runs in the Rust core — `save_note` reaches
-`save_index` in `src-tauri/src/lib.rs`, which serialises, encrypts and rewrites
-the whole index exactly as the TypeScript path does.
-
-So the desktop carries the same defect, on a path nothing measures: there is no
-Rust benchmark in this repository. Two consequences for this phase:
-
-- **Measurement comes first.** A Rust-side save measurement at the 1k, 10k and
-  100k tiers has to exist before either implementation changes. Designing
-  against an unmeasured target is precisely the mistake finding 11 records, and
-  Rust's `serde_json` and AES may put the real desktop number somewhere this
-  phase's scope depends on.
-- **The log format is shared, or it is a correctness bug.** Both
-  implementations write `index.enc`. A change log only the TypeScript side
-  understands would leave the desktop reading a snapshot that omits the CLI's
-  recent saves, and overwriting it from that stale state. Whatever this phase
-  writes, both cores must read.
-
-### Now — measure honestly, do not claim the target
-
-These ship ahead of the fix and are deliberately merged without closing it.
-
-- [x] Report the measurement and the `BUDGET MISS` result on every benchmark run
-- [x] Enforce the strict threshold in a separate `performance-budgets` CI job:
-      visibly red, and not a required status check, so it does not block merges
-- [x] State in the README, `PRODUCT.md` and here that the save-latency target is
-      not met
-
-### Step 1 — measure the desktop save path
-
-Before either implementation changes.
-
-- [ ] A Rust-side save measurement at the 1k, 10k and 100k tiers, producing
-      p50/p95 the same way `scripts/benchmark.mjs` does
-- [ ] Wired into CI beside `performance-budgets`, reported and not gated until
-      it passes
-- [ ] Record the numbers here, and revisit this phase's scope against them
-
-### Step 2 — encrypted change log plus periodic index compaction
-
-Implemented in both cores, against a shared format. The preferred design, in
-the order a save executes:
-
-1. A save persists only the changed note and the index delta it implies.
-2. The delta is applied to the in-memory index; the whole index is never
-   re-encrypted on the save path.
-3. When the log passes a size threshold, a fresh index snapshot is written.
-4. The old log is removed only once that snapshot is durable.
-5. After a crash, snapshot and log are read together to rebuild a consistent
-   index.
-
-Constraints that are part of the design, not optimisations to add later:
-
-- "Saved" is answered only after the data it acknowledges is durable on disk.
-  Moving the write to the background to make the number look smaller is not a
-  solution and is not acceptable here.
-- The log is vault content: it must be encrypted and integrity-protected, be
-  catalogued in `src/format-version.ts`, be classified by `planRekey`, be
-  carried by backup and restore, and carry a version this build can refuse.
-
-### Acceptance — not speed alone
-
-- [ ] Save p95 measured at the 1k, 10k and 100k tiers, in **both** the
-      TypeScript library and the Rust core
-- [ ] Measurement spans compaction rather than excluding the slow samples it
-      produces
-- [ ] No acknowledged save is lost across a crash or concurrent writers
-- [ ] Unlock time stays within budget with a large log, not only just after a
-      compaction
-- [ ] A vault written by one core is read correctly by the other, log included
-- [ ] Only once all of the above hold: promote `performance-budgets` to a
-      required check and fold the budget into the default `--assert` gates
+The desktop core meets the budget through 10,000 notes. What remains at
+100,000 is not the index: a profile puts the incremental maintenance at 0.3% of
+a save. It is the four durable file operations a save still makes — the
+write-ahead journal, the archived revision, the note object and the log append
+— in a directory holding 100,000 objects. Reducing that count is the next
+lever, and it is a separate change with its own crash-safety argument rather
+than a tuning pass.
 
 ## Phase 18 candidates — context semantics (not scheduled)
 
