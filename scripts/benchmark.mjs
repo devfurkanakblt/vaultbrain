@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
+import { fileURLToPath } from "node:url";
 
 import { DocumentVault } from "../dist/documents.js";
 import { removeTree } from "./fs-tree.mjs";
@@ -17,6 +19,10 @@ function percentile(samples, value) {
   return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * value) - 1)];
 }
 
+function summarize(samples) {
+  return { p50: percentile(samples, 0.5), p95: percentile(samples, 0.95), max: Math.max(...samples) };
+}
+
 function measureMany(count, operation) {
   const samples = [];
   for (let index = 0; index < count; index += 1) {
@@ -24,8 +30,17 @@ function measureMany(count, operation) {
     operation(index);
     samples.push(performance.now() - start);
   }
-  return { p50: percentile(samples, 0.5), p95: percentile(samples, 0.95), max: Math.max(...samples) };
+  return summarize(samples);
 }
+
+/**
+ * How many cold unlocks each tier measures. Five, because the median of five
+ * survives two slow samples and the whole set costs about nine seconds at the
+ * 100k tier -- one unlock there reads a 140 MB index. Fewer samples cannot
+ * outvote an outlier; many more would make the tier's runtime the reason not
+ * to run it.
+ */
+const UNLOCK_SAMPLES = 5;
 
 /**
  * Budgets per corpus size. The 1k tier is the everyday gate; the larger tiers
@@ -58,6 +73,36 @@ const shouldAssert = process.argv.includes("--assert");
  */
 const enforceOpenBudgets = process.argv.includes("--enforce-open-budgets");
 const passphrase = "benchmark-only-passphrase";
+
+/**
+ * Child mode: one cold unlock of an existing corpus, printed as JSON.
+ *
+ * A cold unlock has to be measured in a process that has not done one before.
+ * Repeating it in a single process measures a warm one instead: the same five
+ * unlocks in one process read 1601ms and then 1438, 1423, 1423 and 1432 --
+ * JIT and page cache, not the vault. The median of those four would be a
+ * tenth under the number the budget is about, which is a relaxed budget
+ * wearing the clothes of a better measurement.
+ *
+ * This mode writes nothing and does not lock, so every sample meets the same
+ * bytes on disk as the one before it.
+ */
+const probeRoot = argument("--unlock-probe", undefined);
+if (probeRoot !== undefined) {
+  const probeStart = performance.now();
+  const probed = new DocumentVault(probeRoot, passphrase);
+  const probeConstructMs = performance.now() - probeStart;
+  const probedNotes = probed.list().length;
+  process.stdout.write(
+    JSON.stringify({
+      notes: probedNotes,
+      constructMs: probeConstructMs,
+      unlockAndIndexMs: performance.now() - probeStart,
+    }),
+  );
+  process.exit(0);
+}
+
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "vault-brain-benchmark-"));
 const resolvedRoot = path.resolve(root);
 const resolvedTemp = path.resolve(os.tmpdir());
@@ -88,18 +133,48 @@ try {
   // rather than the KDF it exists to bound. lock() drops that cache.
   writer.lock();
 
-  const unlockStart = performance.now();
+  // One unlock is not a measurement. A cold unlock reads and decrypts the
+  // whole index -- 140 MB at the 100k tier, because the index carries every
+  // note body -- so it is dominated by one large read, two large parses and
+  // the garbage they make. That costs about 1.8s of a 2s budget on the CI
+  // runner, and a single sample of it reports the runner as much as the code:
+  // fourteen samples taken from main's logs ranged 1087-2074ms, and the one
+  // that crossed 2000ms failed a gate the other thirteen passed. Five samples
+  // on one development machine span about 50ms against that 1000ms spread,
+  // which is what says the spread is the runner and not the vault. The median
+  // of several samples is the number the budget is about; p95 and max stay in
+  // the report so a real regression is visible rather than smoothed away.
+  // Raising the budget was never an option, and neither is measuring an
+  // easier operation: each sample is a separate process, for the reason the
+  // `--unlock-probe` note above gives.
+  const unlockDurations = [];
+  const constructDurations = [];
+  const selfPath = fileURLToPath(import.meta.url);
+  for (let index = 0; index < UNLOCK_SAMPLES; index += 1) {
+    const probe = spawnSync(process.execPath, [selfPath, "--unlock-probe", root], { encoding: "utf8" });
+    if (probe.status !== 0) {
+      throw new Error(`Unlock probe failed: ${probe.stderr || probe.error?.message || probe.status}`);
+    }
+    const measured = JSON.parse(probe.stdout);
+    // The probe stops its timer when the index is usable, not when the
+    // constructor returns. `new DocumentVault` is lazy: it resolves the
+    // keyring but does not decrypt or load the index, and the first call that
+    // needs the index is what pays for it. Reporting the constructor alone as
+    // `unlockAndIndexMs` measured an unlock that had not yet produced a usable
+    // index, against a budget whose name is "cold unlock to usable shell".
+    // `list()` is the first operation a shell actually makes, so it is the
+    // honest end of that interval -- and the count it returns is checked here.
+    assert.equal(measured.notes, noteCount);
+    unlockDurations.push(measured.unlockAndIndexMs);
+    constructDurations.push(measured.constructMs);
+  }
+  const unlockAndIndex = summarize(unlockDurations);
+  const unlockConstruct = summarize(constructDurations);
+
+  // Opened after the samples and deliberately not timed: this session serves
+  // the rest of the benchmark, and it would be the sixth unlock rather than a
+  // cold one.
   const vault = new DocumentVault(root, passphrase);
-  const constructMs = performance.now() - unlockStart;
-  // The timer stops here, not after the constructor. `new DocumentVault` is
-  // lazy: it resolves the keyring but does not decrypt or load the index, and
-  // the first call that needs the index is what pays for it. Reporting the
-  // constructor alone as `unlockAndIndexMs` measured an unlock that had not
-  // yet produced a usable index, against a budget whose name is "cold unlock
-  // to usable shell". `list()` is the first operation a shell actually makes,
-  // so it is the honest end of that interval.
-  assert.equal(vault.list().length, noteCount);
-  const unlockAndIndexMs = performance.now() - unlockStart;
 
   // The quick switcher matches titles, aliases and paths over the summaries it
   // already holds — it never calls the full-text engine. Measuring it that way
@@ -165,8 +240,9 @@ try {
     notes: noteCount,
     tier: budget.notes,
     bulkCreateMs: Number(bulkCreateMs.toFixed(2)),
-    unlockConstructMs: Number(constructMs.toFixed(2)),
-    unlockAndIndexMs: Number(unlockAndIndexMs.toFixed(2)),
+    unlockSamples: UNLOCK_SAMPLES,
+    unlockConstructMs: unlockConstruct,
+    unlockAndIndexMs: unlockAndIndex,
     coldSearchMs: Number(coldSearchMs.toFixed(2)),
     quickSwitchMs: quickSwitch,
     titleSearchMs: titleSearch,
@@ -198,7 +274,8 @@ try {
   if (shouldAssert) {
     const gate = (label, measured, limit) =>
       assert.ok(measured < limit, `${label} ${measured.toFixed(1)}ms exceeded ${limit}ms at ${noteCount} notes`);
-    gate("unlock", unlockAndIndexMs, budget.unlockMs);
+    // The median of the samples, not one of them: see the note above the loop.
+    gate("unlock p50", unlockAndIndex.p50, budget.unlockMs);
     gate("quick switch p95", quickSwitch.p95, budget.quickSwitchP95);
     gate("title-shaped full-text p95", titleSearch.p95, budget.fullTextP95);
     gate("full-text p95", fullTextSearch.p95, budget.fullTextP95);

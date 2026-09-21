@@ -522,7 +522,16 @@ reason, never to turn a red run green.
 
 `unlockAndIndexMs` is timed until the index is actually usable, not until the
 constructor returns: `new DocumentVault` is lazy, so stopping the clock there
-measured an unlock that had not yet decrypted an index.
+measured an unlock that had not yet decrypted an index. It is reported as the
+p50/p95/max of five cold unlocks — each in its own process, because a second
+unlock in the same process measures a warm one — and the budget gates the
+median. A cold unlock reads and decrypts the whole index — 140 MB at the 100k
+tier, because the index carries every note body — so a single sample of it
+reports the runner as much as the vault: fourteen consecutive samples from CI
+ranged 1,087–2,074 ms around a 1.78 s median, and the one that crossed the
+2 s budget failed a gate the other thirteen passed. Five samples on one
+development machine span about 30 ms (1,419–1,451 ms at the 100k tier),
+against that 1,000 ms spread.
 
 Incremental save is **always measured and always reported**. Any run that
 misses the budget prints a `BUDGET MISS` line naming the number, and the

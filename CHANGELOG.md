@@ -54,6 +54,25 @@ Both cores meet the budget at 100,000 notes, the size it is written for, and a
 save costs the same there as at 1,000: the cost is flat in vault size rather
 than linear in it.
 
+- Changed: the unlock budget is measured over five cold unlocks, each in its
+  own process, and gated on the median; it is reported as `unlockAndIndexMs`
+  p50/p95/max alongside `unlockSamples`. One sample was not a measurement. A
+  cold unlock reads and decrypts the whole index — 140 MB at the 100k tier,
+  because the index carries every note body — and fourteen consecutive samples
+  from `main` ranged 1,087–2,074 ms around a 1.78 s median. The 2,074 ms one
+  turned `main` red on a commit whose re-run then passed unchanged, while five
+  samples on one development machine span about 30 ms (1,419–1,451 ms at the
+  same tier).
+- Changed: those samples are separate processes. Repeating the unlock inside
+  one process measures a warm one: five in a row read 1,601 ms and then 1,438,
+  1,423, 1,423 and 1,432, so an in-process median would have sat a tenth under
+  the number the budget is about — a relaxed budget dressed as a better
+  measurement. The budget itself is unchanged at 2 s; what changed is that the
+  gate reports the vault rather than the runner. The Rust harness still gates a
+  single sample, which has a wider margin (1.27 s) but is the same measurement
+  on the same contract; it is named in `ROADMAP.md` rather than quietly left
+  divergent.
+
 
 ### Security and data integrity — 2026-09-19 CLI/MCP review
 
