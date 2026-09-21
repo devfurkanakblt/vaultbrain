@@ -500,6 +500,13 @@ replayed against a different snapshot without failing authentication.
       warm one: five in one process read 1,601 ms and then 1,438, 1,423, 1,423
       and 1,432, and gating that median would have relaxed the budget by a
       tenth while looking like a better measurement.
+- [x] Gate the incremental-save budget on the median and the worst sample
+      rather than on p95. p95 over 200 samples was reporting the CI disk: the
+      median never left 2.2–4.9 ms across thirty measurements while the worst
+      sample ranged 4 ms to 493 ms, and p95 crossed the 20 ms target twice on
+      an unchanged save path. The target itself is unchanged and p95 is still
+      reported every run, with a `TAIL:` line when it crosses. Both cores gate
+      the same two statistics.
 - [ ] Promote `performance-budgets` to a required status check — a repository
       setting, and the last thing holding this phase open
 
