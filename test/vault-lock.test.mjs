@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { inspectVaultLock, recoverVaultLock } from "../dist/vault-lock.js";
+import { inspectVaultLock, recoverVaultLock, withVaultLock } from "../dist/vault-lock.js";
 import { removeTree } from "../scripts/fs-tree.mjs";
 
 function temporaryVault(label) {
@@ -117,5 +117,83 @@ test("vault-lock status and recover work while a rekey journal is present", () =
     assert.equal(fs.existsSync(path.join(vaultDir, ".rekey", "journal.json")), true);
   } finally {
     removeTree(vaultDir);
+  }
+});
+
+// Windows reports a file another process is creating, closing or deleting as
+// EPERM or EBUSY rather than EEXIST. For a long time these loops treated only
+// EEXIST as contention and let everything else abort the command, so a
+// concurrent `vbrain add` could fail outright with
+// "EPERM: operation not permitted, open '...\.sbrain.lock.transition'" —
+// exactly the failure holding the lock exists to prevent. Seen on a Windows CI
+// runner; too timing-dependent to reproduce by racing real processes, so these
+// drive the decision directly.
+
+test("a transient EPERM while taking the lock is retried, not raised", () => {
+  const vault = temporaryVault("eperm-retry");
+  try {
+    const open = fs.openSync;
+    let denials = 2;
+    fs.openSync = (target, flags, mode) => {
+      if (typeof target === "string" && target.endsWith(".sbrain.lock.transition") && denials > 0) {
+        denials -= 1;
+        const error = new Error("EPERM: operation not permitted, open");
+        error.code = "EPERM";
+        throw error;
+      }
+      return open(target, flags, mode);
+    };
+    try {
+      const answer = withVaultLock(vault, () => "done");
+      assert.equal(answer, "done", "the lock was taken once the collision cleared");
+      assert.equal(denials, 0, "both transient failures were actually exercised");
+    } finally {
+      fs.openSync = open;
+    }
+  } finally {
+    removeTree(vault);
+  }
+});
+
+test("a permission error that never clears is reported as itself, not as a busy vault", () => {
+  const vault = temporaryVault("eperm-persistent");
+  try {
+    const open = fs.openSync;
+    fs.openSync = (target, flags, mode) => {
+      if (typeof target === "string" && target.endsWith(".sbrain.lock.transition")) {
+        const error = new Error("EACCES: permission denied, open");
+        error.code = "EACCES";
+        throw error;
+      }
+      return open(target, flags, mode);
+    };
+    try {
+      // This passed before the retry existed too, because the error was simply
+      // raised on the spot. It guards the new path rather than the old bug:
+      // now that these codes are retried, the deadline must re-raise the real
+      // error. "Vault is being written by process ..." would send the reader
+      // looking for a process that does not exist.
+      assert.throws(() => withVaultLock(vault, () => "done", { waitMs: 60 }), /EACCES/u);
+    } finally {
+      fs.openSync = open;
+    }
+  } finally {
+    removeTree(vault);
+  }
+});
+
+test("a lock genuinely held by a live process still reports the holder", () => {
+  const vault = temporaryVault("still-busy");
+  const live = startLiveProcess();
+  try {
+    writeLock(vault, recordFor(live.pid, { staleMs: 60_000, acquiredAt: new Date().toISOString() }));
+    assert.throws(() => withVaultLock(vault, () => "done", { waitMs: 60 }), (error) => {
+      assert.equal(error.name, "VaultBusyError");
+      assert.match(String(error.message), new RegExp(`process ${live.pid}`, "u"));
+      return true;
+    });
+  } finally {
+    live.kill();
+    removeTree(vault);
   }
 });
