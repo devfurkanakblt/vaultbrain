@@ -136,6 +136,48 @@ function inspectLockPath(lockPath: string): VaultLockInspection {
 }
 
 /**
+ * Errnos that mean "someone else is touching this file right now", not
+ * "you may not have this file".
+ *
+ * Creating a lock file with `wx` reports an existing file as `EEXIST`
+ * everywhere, and for a long time that was the only code these loops treated
+ * as contention: everything else aborted the command. On Windows that is not
+ * enough. A file another process is creating, closing or deleting at the same
+ * moment can surface as `EPERM` or `EBUSY` instead, and the same is true of
+ * the unlink that releases it — a virus scanner or search indexer holding a
+ * brief handle is enough. The result was a `vbrain add` that failed outright
+ * under concurrency, which is precisely what holding the lock is supposed to
+ * prevent.
+ *
+ * These codes are retried rather than trusted. A genuine permission problem
+ * does not go away, so it still surfaces once the caller's deadline expires —
+ * see `throwAfterDeadline`, which reports the real error rather than claiming
+ * the vault is busy.
+ */
+const CONTENTION_CODES = new Set(["EEXIST", "EPERM", "EBUSY", "EACCES"]);
+
+function isContention(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code !== undefined && CONTENTION_CODES.has(code);
+}
+
+/**
+ * Ends a contended acquisition.
+ *
+ * `EEXIST` means the file was there, so the vault really is held by someone
+ * and `VaultBusyError` names the holder. The other codes are ambiguous: they
+ * are usually a transient collision, but a directory that is genuinely
+ * read-only produces them forever. Reporting "vault is busy" for that would
+ * send the reader looking for a process that does not exist, so the original
+ * error is raised instead.
+ */
+function throwAfterDeadline(lastError: unknown, lockPath: string): never {
+  const code = (lastError as NodeJS.ErrnoException | undefined)?.code;
+  if (code && code !== "EEXIST") throw lastError;
+  throw new VaultBusyError(readRecord(lockPath), lockPath);
+}
+
+/**
  * Serializes short lock-file transitions. A transition left by a crashed
  * process is reclaimable only when its same-host PID is proven dead; live,
  * remote, and malformed records fail closed. The owner token makes release
@@ -155,7 +197,7 @@ function withTransition<T>(lockPath: string, operation: () => T): T {
       fs.closeSync(fd);
       break;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if (!isContention(error)) throw error;
       const transition = readRecord(transitionPath);
       if (isReclaimable(transition, 0) && readRecord(transitionPath)?.token === transition?.token) {
         try {
@@ -165,7 +207,7 @@ function withTransition<T>(lockPath: string, operation: () => T): T {
         }
         continue;
       }
-      if (Date.now() >= deadline) throw new VaultBusyError(undefined, lockPath);
+      if (Date.now() >= deadline) throwAfterDeadline(error, lockPath);
       sleepSync(POLL_MS);
     }
   }
@@ -222,6 +264,7 @@ export function withVaultLock<T>(
   };
   const deadline = Date.now() + waitMs;
 
+  let lastError: unknown;
   for (;;) {
     const acquired = withTransition(lockPath, () => {
       try {
@@ -230,17 +273,21 @@ export function withVaultLock<T>(
         fs.closeSync(fd);
         return true;
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        if (!isContention(error)) throw error;
+        lastError = error;
         const holder = readRecord(lockPath);
         if (isReclaimable(holder, staleMs) && holder?.token === readRecord(lockPath)?.token) {
-          fs.unlinkSync(lockPath);
+          try {
+            fs.unlinkSync(lockPath);
+          } catch {
+            /* another process reclaimed or replaced it; the next pass re-reads */
+          }
         }
         return false;
       }
     });
     if (acquired) break;
-    const holder = readRecord(lockPath);
-    if (Date.now() >= deadline) throw new VaultBusyError(holder, lockPath);
+    if (Date.now() >= deadline) throwAfterDeadline(lastError, lockPath);
     sleepSync(POLL_MS);
   }
 

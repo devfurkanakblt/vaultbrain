@@ -153,6 +153,22 @@ are closed. Regressions live in `test/cli-audit-2026-09-19.test.mjs` and
   repository changes. `CONTRIBUTING.md` no longer tells contributors to ignore
   the check's output.
 
+### Cross-process locking on Windows
+
+- Fixed: a concurrent `vbrain` write could fail outright with
+  `EPERM: operation not permitted, open '...\.sbrain.lock.transition'` on
+  Windows. Both lock-acquisition loops in `src/vault-lock.ts` treated only
+  `EEXIST` as contention and let every other errno abort the command. Windows
+  reports a file another process is creating, closing or deleting as `EPERM`
+  or `EBUSY` instead — a virus scanner or search indexer holding a brief handle
+  is enough — so the lock that exists to make concurrent writes safe was
+  itself the thing that failed them. Those codes are now retried.
+- Changed: when a contended acquisition runs out of time, a code other than
+  `EEXIST` is re-raised as itself rather than reported as `VaultBusyError`. A
+  read-only directory produces `EACCES` forever, and "vault is being written
+  by process ..." would send the reader looking for a process that does not
+  exist.
+
 ### Bulk key-value entry
 
 - Added: `vbrain add <file> --from <path.kv>` writes many entries in one
