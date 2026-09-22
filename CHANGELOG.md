@@ -5,6 +5,27 @@ Versioning once the encrypted storage format reaches 1.0.
 
 ## Unreleased
 
+### npm distribution
+
+- Added: `vbrain --version` (and `-V`), which reports the installed package
+  version. It reads the manifest that ships beside `dist/` rather than a
+  compiled-in constant, so a published tarball cannot report a version other
+  than its own. The on-disk format version is a different number with a
+  different lifetime and stays with `vbrain format`. Covered by
+  `test/cli.test.mjs`, because it is the first thing a reader types after
+  installing and an npm version cannot be republished.
+- Added: `.github/workflows/npm-publish.yml`, a manual workflow that publishes
+  the `vault-brain` package with npm provenance. It refuses any ref but `main`,
+  refuses a version already on the registry, and runs lint, types, the Node
+  suite and the packaging check on the commit it is about to publish rather
+  than trusting an earlier run. Nothing fires on a push or a tag: an npm
+  version is permanent, so a maintainer decides. Tagging stays reserved for the
+  desktop draft release, which is a separate path with separate gates.
+- Added: `publishConfig` (public access, provenance) and keywords to the
+  manifest, and an npm section to `docs/RELEASE.md` covering the one-time token
+  setup and the install-the-tarball check that catches a missing runtime
+  dependency before it reaches a user.
+
 ### Phase 17 — incremental index persistence
 
 Saving one note no longer costs a pass over the whole vault, in either core.

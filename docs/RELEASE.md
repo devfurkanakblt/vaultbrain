@@ -8,6 +8,54 @@ maintainer-owned gates.
 
 The detailed evidence checklist is [RELEASE-ACCEPTANCE.md](RELEASE-ACCEPTANCE.md).
 
+There are two release paths, and they are deliberately independent:
+
+| Path | Artifact | Workflow | Gate |
+| --- | --- | --- | --- |
+| npm | the `vault-brain` package: CLI, library, MCP server | `npm-publish.yml`, manual | maintainer runs it |
+| Desktop | signed installers and the updater feed | `release.yml`, on a stable tag | signing key, then the three-platform acceptance below |
+
+The npm package carries no desktop application and needs no signing key, so it
+does not wait on the desktop gates. Tagging is what starts the desktop path, so
+the npm workflow deliberately does not tag.
+
+## Publishing the npm package
+
+One-time setup: create an npm account, then a **granular access token** scoped
+to read and write this one package, and store it as the repository secret
+`NPM_TOKEN`. Nothing else is needed — provenance comes from the workflow's OIDC
+token rather than from a secret. Once the package exists, npm's trusted
+publishing can replace the token entirely; configure it in the package settings
+and the secret can be removed.
+
+Release steps:
+
+1. Set the version in `package.json` and merge it to `main`.
+2. Wait for that commit's CI.
+3. Run the **Publish to npm** workflow from the Actions tab.
+
+The workflow refuses any ref but `main`, refuses a version that already exists
+on the registry, and runs lint, types, the Node suite and the packaging check on
+the commit it is about to publish rather than trusting an earlier run. It
+publishes with provenance, so the tarball carries a signed statement tying it to
+the repository, the workflow and the commit.
+
+**An npm version is permanent.** It cannot be replaced, and unpublishing is
+restricted and breaks anyone who already installed it. A mistake is fixed by
+publishing a higher version, never by rewriting one. Before publishing a
+version, install the packed tarball into an empty prefix and run the CLI from
+it — a missing runtime dependency is invisible in the repository, where every
+dependency is already present:
+
+```bash
+npm pack
+npm install --global --prefix ./tmp-prefix ./vault-brain-<version>.tgz
+# macOS and Linux put the command in ./tmp-prefix/bin; Windows puts it at the
+# prefix root.
+./tmp-prefix/bin/vbrain --version
+./tmp-prefix/bin/vbrain --vault ./tmp-vault init
+```
+
 ## One-time signing setup
 
 Generate the production Tauri updater signing key using the installed Tauri CLI,

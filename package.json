@@ -10,6 +10,20 @@
   "bugs": {
     "url": "https://github.com/devfurkanakblt/vaultbrain/issues"
   },
+  "keywords": [
+    "encryption",
+    "local-first",
+    "knowledge-base",
+    "markdown",
+    "notes",
+    "mcp",
+    "privacy",
+    "cli"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "type": "module",
   "files": [
     "dist/**",

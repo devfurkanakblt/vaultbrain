@@ -422,3 +422,14 @@ test("vbrain retention bounds history and reports what it removed", () => {
   removeTree(vaultDir);
   removeTree(outside);
 });
+
+// `--version` is the first thing a reader types after `npm install --global
+// vault-brain`, and an npm version cannot be republished, so the flag is
+// covered rather than assumed. It reports the package version, not the on-disk
+// format version, which `vbrain format` owns and which moves independently.
+test("--version reports the package version and nothing else", () => {
+  const expected = JSON.parse(fs.readFileSync("package.json", "utf8")).version;
+
+  assert.equal(runCli(["--version"]).trim(), expected);
+  assert.equal(runCli(["-V"]).trim(), expected);
+});
