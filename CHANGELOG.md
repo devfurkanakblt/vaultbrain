@@ -31,6 +31,27 @@ Versioning once the encrypted storage format reaches 1.0.
   the same lock file, so a waiter that gave up sooner in one of them would be
   the cross-implementation divergence Phase 13 exists to prevent.
 
+### npm distribution
+
+- Added: `vbrain --version` (and `-V`), which reports the installed package
+  version. It reads the manifest that ships beside `dist/` rather than a
+  compiled-in constant, so a published tarball cannot report a version other
+  than its own. The on-disk format version is a different number with a
+  different lifetime and stays with `vbrain format`. Covered by
+  `test/cli.test.mjs`, because it is the first thing a reader types after
+  installing and an npm version cannot be republished.
+- Added: `.github/workflows/npm-publish.yml`, a manual workflow that publishes
+  the `vault-brain` package with npm provenance. It refuses any ref but `main`,
+  refuses a version already on the registry, and runs lint, types, the Node
+  suite and the packaging check on the commit it is about to publish rather
+  than trusting an earlier run. Nothing fires on a push or a tag: an npm
+  version is permanent, so a maintainer decides. Tagging stays reserved for the
+  desktop draft release, which is a separate path with separate gates.
+- Added: `publishConfig` (public access, provenance) and keywords to the
+  manifest, and an npm section to `docs/RELEASE.md` covering the one-time token
+  setup and the install-the-tarball check that catches a missing runtime
+  dependency before it reaches a user.
+
 ### Phase 17 — incremental index persistence
 
 Saving one note no longer costs a pass over the whole vault, in either core.
@@ -112,6 +133,12 @@ than linear in it.
   rate, and a larger sample only makes the same verdict more repeatable. The
   median gates the path with a sixfold margin and the worst sample gates
   catastrophe. Both cores gate the same two statistics.
+- Added: `performance-budgets` is a required status check on `main` as of
+  2026-09-22. It was split out as a job that was expected to be red until
+  Phase 17 landed; it now passes in both cores at every tier, and requiring it
+  is what closes that phase. Branch protection also closes force pushes and
+  deletion of `main`; it requires neither an up-to-date branch nor a review, so
+  a single maintainer and Dependabot can still merge.
 
 
 ### Security and data integrity — 2026-09-19 CLI/MCP review

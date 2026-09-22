@@ -1,0 +1,80 @@
+# Publishes the `vault-brain` npm package: the CLI and the library the MCP
+# server runs on. The desktop application is not part of this package and has
+# its own signed, draft-first workflow in `release.yml`.
+#
+# Manual only. A published npm version can never be replaced, so nothing here
+# fires on a push or a tag: a maintainer decides, and the run fails closed on
+# anything it cannot verify first. It also keeps the two release paths apart --
+# tagging is what `release.yml` waits for, and that workflow fails without the
+# desktop signing secrets.
+#
+# What it proves before publishing:
+#   - the commit is on `main`
+#   - the manifest version is not already on the registry
+#   - lint, types, the Node test suite and the packaged tarball all pass here,
+#     on the commit being published, rather than on whatever CI last saw
+#
+# Provenance is on (`publishConfig.provenance` plus `id-token: write`), so the
+# published tarball carries a signed statement tying it to this workflow, this
+# repository and this commit. That is the same argument the desktop release
+# makes with its SBOM and attestation, and here it costs nothing.
+name: Publish to npm
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required for npm provenance: the OIDC token is what the registry
+      # verifies the build against.
+      id-token: write
+    steps:
+      - name: Refuse to publish anything but main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "This workflow publishes main. Ref was ${{ github.ref }}." >&2
+          exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - name: Refuse to republish an existing version
+        run: |
+          set -euo pipefail
+          name="$(node -p 'require("./package.json").name')"
+          version="$(node -p 'require("./package.json").version')"
+          echo "Publishing $name@$version"
+          # `npm view` exits non-zero when the package does not exist yet, which
+          # is the first publish and is allowed; a version that resolves is not.
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "$name@$version is already on the registry. Versions are immutable; bump it." >&2
+            exit 1
+          fi
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - name: Inspect what would be published
+        run: npm run package:check
+      - run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Report what landed
+        run: |
+          set -euo pipefail
+          name="$(node -p 'require("./package.json").name')"
+          version="$(node -p 'require("./package.json").version')"
+          echo "Published $name@$version from ${{ github.sha }}."
+          echo "Install it with: npm install --global $name"

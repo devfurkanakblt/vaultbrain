@@ -507,8 +507,11 @@ replayed against a different snapshot without failing authentication.
       an unchanged save path. The target itself is unchanged and p95 is still
       reported every run, with a `TAIL:` line when it crosses. Both cores gate
       the same two statistics.
-- [ ] Promote `performance-budgets` to a required status check — a repository
-      setting, and the last thing holding this phase open
+- [x] Promote `performance-budgets` to a required status check. Done on
+      2026-09-22: `main` requires the `performance-budgets` context, with
+      up-to-date branches not required, admins not enforced and no review
+      requirement, so a single maintainer and Dependabot can still merge. The
+      protection also closes force pushes and branch deletion on `main`.
 
 ### The session cache, and what the acceptance list missed
 
@@ -552,8 +555,9 @@ rather than left to be rediscovered.
 
 ### What is left
 
-Only the repository setting: `performance-budgets` passes in both cores at
-every tier and can now be made a required status check.
+Nothing. `performance-budgets` passes in both cores at every tier and is a
+required status check on `main` as of 2026-09-22, which was the last item this
+phase held open.
 
 A profile puts the incremental index maintenance at 0.3% of a save, so what a
 save costs now is the four durable file operations it makes — the write-ahead
@@ -647,8 +651,8 @@ new obligation: nothing here adds scope to a phase or moves an item between owne
 
 **Needs code.**
 
-- **17** — the incremental-save defect above. It is a measured budget miss with a
-  named cause, not evidence work.
+- **17** — closed. The incremental-save defect was fixed, both cores are flat in
+  vault size, and the gate is required on `main`.
 - **14.2** — the transition-by-transition coverage mapping is still to be signed off
   ([verification record](PHASE-14-VERIFICATION.md)). If the mapping exposes an
   uncovered transition, closing it means new tests in `test/keyring-recovery.test.mjs`
