@@ -105,7 +105,18 @@ const PLUGIN_CAPABILITIES: [&str; 11] = [
 const VAULT_LOCK_FILENAME: &str = ".sbrain.lock";
 const VAULT_TRANSITION_FILENAME: &str = ".sbrain.lock.transition";
 const VAULT_LOCK_STALE_SECONDS: i64 = 30;
+/// How long one unchanged holder may block a waiter.
+///
+/// Spent per holder, not per wait: every time the lock changes hands the
+/// waiter starts it again, because a lock that is moving is a queue draining
+/// rather than a vault that is busy. The same budget and the same reset are in
+/// `src/vault-lock.ts`; both cores take this lock, so a waiter must not give
+/// up sooner in one of them.
 const VAULT_LOCK_WAIT: Duration = Duration::from_secs(2);
+/// The end of the waiter's patience, however well the queue is moving.
+/// Resetting on every hand-off could otherwise hold a waiter indefinitely, and
+/// a command that never returns is worse than one that says the vault is busy.
+const VAULT_LOCK_MAX_WAIT: Duration = Duration::from_secs(120);
 const VAULT_LOCK_POLL: Duration = Duration::from_millis(40);
 
 #[derive(Default)]
@@ -830,9 +841,18 @@ impl VaultWriteGuard {
             stale_ms: Some((VAULT_LOCK_STALE_SECONDS * 1_000) as u64),
         };
         let encoded = serde_json::to_vec(&record).map_err(|error| error.to_string())?;
-        let deadline = Instant::now() + VAULT_LOCK_WAIT;
+        let ceiling = Instant::now() + VAULT_LOCK_MAX_WAIT;
+        // Restarted every time the lock changes hands: see `VAULT_LOCK_WAIT`.
+        let mut deadline = Instant::now() + VAULT_LOCK_WAIT;
+        // The holder this waiter is currently waiting on. A record that cannot
+        // be read is deliberately not a change -- a waiter that reset its
+        // budget on every unreadable read would never give up on anything.
+        let mut blocking_token: Option<String> = None;
 
         loop {
+            // Which holder this pass met, carried out of the closure so the
+            // budget can be restarted when the lock has changed hands.
+            let mut observed: Option<String> = None;
             let attempt = with_lock_transition(vault_dir, || {
                 reject_symlink(&path)?;
                 match OpenOptions::new().create_new(true).write(true).open(&path) {
@@ -857,6 +877,7 @@ impl VaultWriteGuard {
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                         let holder = read_lock_record(&path);
+                        observed = holder.as_ref().map(|value| value.token.clone());
                         if lock_is_reclaimable(holder.as_ref())
                             && read_lock_record(&path).as_ref().map(|value| &value.token)
                                 == holder.as_ref().map(|value| &value.token)
@@ -871,7 +892,11 @@ impl VaultWriteGuard {
             if let Some(guard) = attempt {
                 return Ok(guard);
             }
-            if Instant::now() >= deadline {
+            if observed.is_some() && observed != blocking_token {
+                blocking_token = observed;
+                deadline = Instant::now() + VAULT_LOCK_WAIT;
+            }
+            if Instant::now() >= deadline || Instant::now() >= ceiling {
                 let holder = read_lock_record(&path);
                 return Err(match holder {
                     Some(holder) => format!(
@@ -6967,6 +6992,74 @@ mod tests {
         .unwrap();
         assert_eq!(manifest.version, 1);
         fs::remove_dir_all(path).unwrap();
+    }
+
+    // The waiter's budget is spent per holder, not per wait: a lock that keeps
+    // changing hands is a queue draining, and the writers at the back of a
+    // fan-out used to fail on it while nothing was wrong. The TypeScript core
+    // covers the same two halves in `test/vault-lock.test.mjs`; both cores take
+    // this lock, so a waiter must not give up sooner in one of them.
+    #[test]
+    fn a_waiter_waits_out_a_queue_but_not_a_holder_that_never_moves() {
+        let path = temporary_vault("writer-lock-queue");
+        fs::create_dir_all(&path).unwrap();
+        let path = fs::canonicalize(path).unwrap();
+        let lock_path = path.join(VAULT_LOCK_FILENAME);
+
+        // A live holder that never lets go is still reported, and within the
+        // per-holder budget rather than at the ceiling.
+        let stuck = VaultLockRecord {
+            token: Uuid::new_v4().to_string(),
+            pid: std::process::id(),
+            host: lock_host(),
+            acquired_at: now(),
+            stale_ms: Some(15 * 60 * 1_000),
+        };
+        fs::write(&lock_path, serde_json::to_vec(&stuck).unwrap()).unwrap();
+        let started = Instant::now();
+        assert!(VaultWriteGuard::acquire(&path).is_err());
+        let waited = started.elapsed();
+        assert!(
+            waited < VAULT_LOCK_WAIT * 3,
+            "gave up on the budget rather than the ceiling, waited {waited:?}"
+        );
+
+        // A lock being handed on, by a writer that finally finishes. The waiter
+        // must outlast a queue that is longer than one budget.
+        let handing = path.clone();
+        let passing = thread::spawn(move || {
+            let lock_path = handing.join(VAULT_LOCK_FILENAME);
+            let started = Instant::now();
+            while started.elapsed() < VAULT_LOCK_WAIT * 2 {
+                let record = VaultLockRecord {
+                    token: Uuid::new_v4().to_string(),
+                    pid: std::process::id(),
+                    host: lock_host(),
+                    acquired_at: now(),
+                    stale_ms: Some(15 * 60 * 1_000),
+                };
+                fs::write(&lock_path, serde_json::to_vec(&record).unwrap()).unwrap();
+                thread::sleep(VAULT_LOCK_POLL * 2);
+            }
+            let _ = fs::remove_file(&lock_path);
+        });
+
+        let started = Instant::now();
+        let acquired = VaultWriteGuard::acquire(&path);
+        let waited = started.elapsed();
+        passing.join().unwrap();
+        let failure = acquired.as_ref().err().cloned().unwrap_or_default();
+        assert!(
+            acquired.is_ok(),
+            "a waiter gave up on a lock that was being handed on: {failure}"
+        );
+        assert!(
+            waited > VAULT_LOCK_WAIT,
+            "it waited past one holder's budget rather than failing at it, waited {waited:?}"
+        );
+        drop(acquired);
+
+        fs::remove_dir_all(&path).unwrap();
     }
 
     #[test]

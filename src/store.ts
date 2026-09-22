@@ -27,16 +27,6 @@ import { withVaultLock } from "./vault-lock.js";
 export const DEFAULT_VAULT_DIR = path.resolve(process.cwd(), "vault");
 
 /**
- * How long a key-value writer waits for the vault lock. The default two
- * seconds is sized for one writer meeting a straggler; a scripted fan-out of
- * parallel `vbrain add` calls is a legitimate use of this CLI, and a writer
- * that gave up there would report the same failure a lost update used to
- * report silently. Each holder only encrypts and replaces one file, so even a
- * deep queue drains well inside this window.
- */
-export const KV_WRITE_WAIT_MS = 15_000;
-
-/**
  * Resolves the keyring before a write takes the vault lock.
  *
  * Unwrapping a slot runs scrypt at the configured cost, which dominates the
@@ -142,7 +132,6 @@ export function migrateVaultFile(
       saveVaultFile(vaultDir, name, entries, passphrase);
       return { name, from, to, migrated: true };
     },
-    { waitMs: KV_WRITE_WAIT_MS },
   );
 }
 
@@ -204,7 +193,6 @@ export function upsertEntry(
       }
       saveVaultFile(vaultDir, name, entries, passphrase);
     },
-    { waitMs: KV_WRITE_WAIT_MS },
   );
 }
 
@@ -308,7 +296,6 @@ export function upsertEntries(
       saveVaultFile(vaultDir, name, entries, passphrase);
       return { added, replaced };
     },
-    { waitMs: KV_WRITE_WAIT_MS },
   );
 }
 

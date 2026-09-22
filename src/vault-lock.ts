@@ -10,7 +10,33 @@ const LOCK_FILENAME = ".sbrain.lock";
 // unlinking a lock which a different process has just replaced (the ABA race).
 const TRANSITION_FILENAME = ".sbrain.lock.transition";
 const DEFAULT_STALE_MS = 30_000;
+/**
+ * How long one unchanged holder may block a waiter.
+ *
+ * This budget is spent per holder, not per wait: every time the lock changes
+ * hands the waiter starts it again, because a lock that is moving is a queue
+ * draining rather than a vault that is busy. A fan-out of writers -- eight
+ * `vbrain add` calls, a script, a CLI beside the MCP server -- is a legitimate
+ * use of this vault, and the budget that used to cover the whole queue made
+ * the writers at the back fail with "vault is being written by ..." while
+ * nothing was wrong. Sizing that budget for the longest queue anyone might
+ * form would just be a larger guess; what a waiter can actually tell is
+ * whether the holder in front of it is moving.
+ *
+ * A holder that does not move is still reported here, and within this budget
+ * rather than at the ceiling below.
+ */
 const DEFAULT_WAIT_MS = 2_000;
+/**
+ * The end of the waiter's patience, however well the queue is moving.
+ *
+ * Resetting the budget on every hand-off means a busy enough vault could hold
+ * a waiter indefinitely, and a command that never returns is worse than one
+ * that says the vault is busy. Two minutes is far past any queue this vault's
+ * writers form -- each holder replaces one file -- so reaching it means
+ * something other than a queue.
+ */
+const DEFAULT_MAX_WAIT_MS = 120_000;
 const POLL_MS = 40;
 
 export interface LockRecord {
@@ -237,10 +263,11 @@ function withTransition<T>(lockPath: string, operation: () => T): T {
 export function withVaultLock<T>(
   vaultDir: string,
   operation: () => T,
-  options: { staleMs?: number; waitMs?: number } = {},
+  options: { staleMs?: number; waitMs?: number; maxWaitMs?: number } = {},
 ): T {
   const staleMs = options.staleMs ?? DEFAULT_STALE_MS;
   const waitMs = options.waitMs ?? DEFAULT_WAIT_MS;
+  const maxWaitMs = Math.max(options.maxWaitMs ?? DEFAULT_MAX_WAIT_MS, waitMs);
   const lockPath = path.join(path.resolve(vaultDir), LOCK_FILENAME);
 
   const depth = held.get(lockPath) ?? 0;
@@ -262,7 +289,13 @@ export function withVaultLock<T>(
     acquiredAt: new Date().toISOString(),
     staleMs,
   };
-  const deadline = Date.now() + waitMs;
+  const ceiling = Date.now() + maxWaitMs;
+  // Restarted every time the lock changes hands: see `DEFAULT_WAIT_MS`.
+  let deadline = Date.now() + waitMs;
+  // The holder this waiter is currently waiting on. A record that cannot be
+  // read is deliberately not treated as a change -- a waiter that reset its
+  // budget on every unreadable read would never give up on anything.
+  let blockingToken: string | undefined;
 
   let lastError: unknown;
   for (;;) {
@@ -276,6 +309,10 @@ export function withVaultLock<T>(
         if (!isContention(error)) throw error;
         lastError = error;
         const holder = readRecord(lockPath);
+        if (holder?.token !== undefined && holder.token !== blockingToken) {
+          blockingToken = holder.token;
+          deadline = Date.now() + waitMs;
+        }
         if (isReclaimable(holder, staleMs) && holder?.token === readRecord(lockPath)?.token) {
           try {
             fs.unlinkSync(lockPath);
@@ -287,7 +324,7 @@ export function withVaultLock<T>(
       }
     });
     if (acquired) break;
-    if (Date.now() >= deadline) throwAfterDeadline(lastError, lockPath);
+    if (Date.now() >= deadline || Date.now() >= ceiling) throwAfterDeadline(lastError, lockPath);
     sleepSync(POLL_MS);
   }
 

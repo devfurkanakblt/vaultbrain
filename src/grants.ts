@@ -122,13 +122,6 @@ export interface GrantDecision {
 
 const GRANTS_FILENAME = "grants.enc";
 /**
- * See `KV_WRITE_WAIT_MS` in store.ts. Approval traffic is the most contended
- * path in the vault - every held resolution reads and rewrites this one file -
- * so a writer waits rather than reporting a failure the owner cannot act on.
- */
-const GRANTS_WAIT_MS = 15_000;
-
-/**
  * Runs a read-modify-write of the grant file under the vault lock.
  *
  * Every mutation here is a decision taken on what the file said a moment ago:
@@ -147,7 +140,7 @@ const GRANTS_WAIT_MS = 15_000;
  */
 function withGrantsLock<T>(vaultDir: string, passphrase: string, operation: () => T): T {
   if (grantsExist(vaultDir)) openOrCreateVaultKey(vaultDir, passphrase, "kv")?.fill(0);
-  return withVaultLock(vaultDir, operation, { waitMs: GRANTS_WAIT_MS });
+  return withVaultLock(vaultDir, operation);
 }
 const MAX_GRANTS = 100;
 const MAX_SCOPES = 50;

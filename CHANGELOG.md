@@ -5,6 +5,32 @@ Versioning once the encrypted storage format reaches 1.0.
 
 ## Unreleased
 
+### Cross-process locking
+
+- Fixed: a fan-out of writers could fail on a lock that was working. The wait
+  budget was spent on the whole queue, so the writers at the back reported
+  `Vault is being written by process ...` while the lock was in fact being
+  handed on normally. Three paths had already been given a 15 s budget for this
+  reason -- key-value writes, the catalog rebuild and the grant file -- but the
+  audit append that every one of those commands also performs kept the 2 s
+  default, so the fan-out still failed, at the one step nobody had raised.
+  Reproduced with eight parallel `vbrain add` calls on a loaded machine: seven
+  of the eight failed.
+- Changed: the budget now means how long one *unchanged* holder may block a
+  waiter. Every time the lock changes hands the waiter starts it again, because
+  a lock that is moving is a queue draining rather than a vault that is busy. A
+  holder that does not move is still reported within the budget rather than
+  waited out. Sizing a single budget for the longest queue anyone might form
+  would only have been a larger guess; what a waiter can actually tell is
+  whether the holder in front of it is moving.
+- Added: a ceiling (two minutes) on the total wait, because resetting on every
+  hand-off could otherwise hold a waiter indefinitely, and a command that never
+  returns is worse than one that says the vault is busy.
+- Changed: the three 15 s overrides are gone. One behaviour covers every
+  writer, in both cores -- `src/vault-lock.ts` and `src-tauri/src/lib.rs` take
+  the same lock file, so a waiter that gave up sooner in one of them would be
+  the cross-implementation divergence Phase 13 exists to prevent.
+
 ### Phase 17 — incremental index persistence
 
 Saving one note no longer costs a pass over the whole vault, in either core.

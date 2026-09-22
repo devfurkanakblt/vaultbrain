@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { inspectVaultLock, recoverVaultLock, withVaultLock } from "../dist/vault-lock.js";
 import { removeTree } from "../scripts/fs-tree.mjs";
@@ -194,6 +195,108 @@ test("a lock genuinely held by a live process still reports the holder", () => {
     });
   } finally {
     live.kill();
+    removeTree(vault);
+  }
+});
+
+/**
+ * Spawns a process that keeps handing the lock on: it rewrites the record with
+ * a fresh token every `intervalMs`, as a queue of writers would, and removes
+ * it after `holdMs` unless `forever` is set. It stands in for the fan-out this
+ * lock is meant to serialise -- eight `vbrain add` calls, each taking its turn.
+ */
+function startHandOffs(vaultDir, { intervalMs = 60, holdMs = 1_500, forever = false } = {}) {
+  const script = `
+    const fs = require("node:fs");
+    const os = require("node:os");
+    const path = require("node:path");
+    const lockPath = path.join(${JSON.stringify(vaultDir)}, ".sbrain.lock");
+    const started = Date.now();
+    const write = () => {
+      if (!${forever} && Date.now() - started > ${holdMs}) {
+        try { fs.unlinkSync(lockPath); } catch {}
+        process.exit(0);
+      }
+      fs.writeFileSync(lockPath, JSON.stringify({
+        token: require("node:crypto").randomUUID(),
+        pid: process.pid,
+        host: os.hostname(),
+        acquiredAt: new Date().toISOString(),
+        staleMs: 60_000,
+      }), { mode: 0o600 });
+      setTimeout(write, ${intervalMs});
+    };
+    write();
+  `;
+  return spawn(process.execPath, ["-e", script], { stdio: "ignore" });
+}
+
+/** Waits until the hand-off process has actually taken the lock. */
+async function untilLocked(vaultDir) {
+  const lockPath = path.join(vaultDir, ".sbrain.lock");
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (fs.existsSync(lockPath)) return;
+    await delay(25);
+  }
+  throw new Error("the hand-off process never took the lock");
+}
+
+// The defect this covers: the wait budget was spent on the whole queue rather
+// than on one holder, so a writer at the back of a fan-out failed with "vault
+// is being written by ..." while the lock was in fact being handed on
+// normally. A queue that is draining is not a busy vault.
+test("a waiter keeps waiting while the lock is being handed on", async () => {
+  const vault = temporaryVault("handoff");
+  const handing = startHandOffs(vault, { holdMs: 1_200 });
+  try {
+    await untilLocked(vault);
+    const started = Date.now();
+    assert.equal(withVaultLock(vault, () => "acquired", { waitMs: 300 }), "acquired");
+    assert.ok(Date.now() - started > 300, "it waited past the per-holder budget rather than failing at it");
+  } finally {
+    handing.kill();
+    removeTree(vault);
+  }
+});
+
+// The other half: patience is for a queue, not for a holder that never moves.
+// A stuck holder must still be reported within the budget rather than being
+// waited out for as long as the ceiling allows.
+test("a waiter still gives up on one holder that never lets go", () => {
+  const vault = temporaryVault("stuck");
+  const live = startLiveProcess();
+  try {
+    writeLock(vault, recordFor(live.pid, { staleMs: 60_000, acquiredAt: new Date().toISOString() }));
+    const started = Date.now();
+    assert.throws(
+      () => withVaultLock(vault, () => "done", { waitMs: 300 }),
+      (error) => error.name === "VaultBusyError",
+    );
+    assert.ok(Date.now() - started < 3_000, "it failed on the budget, not on the ceiling");
+  } finally {
+    live.kill();
+    removeTree(vault);
+  }
+});
+
+// Waiting while the queue moves must still terminate: hand-offs that never end
+// are a livelock, and a command that never returns is worse than one that says
+// the vault is busy.
+test("an endless hand-off chain is bounded by the ceiling", async () => {
+  const vault = temporaryVault("ceiling");
+  const handing = startHandOffs(vault, { forever: true });
+  try {
+    await untilLocked(vault);
+    const started = Date.now();
+    assert.throws(
+      () => withVaultLock(vault, () => "done", { waitMs: 200, maxWaitMs: 800 }),
+      (error) => error.name === "VaultBusyError",
+    );
+    const waited = Date.now() - started;
+    assert.ok(waited >= 800, `it honoured the ceiling before giving up, waited ${waited}ms`);
+    assert.ok(waited < 5_000, `it did not wait past the ceiling, waited ${waited}ms`);
+  } finally {
+    handing.kill();
     removeTree(vault);
   }
 });
