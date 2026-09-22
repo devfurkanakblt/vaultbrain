@@ -42,17 +42,18 @@ jobs:
   # The product performance budgets that are not met yet, enforced strictly and
   # on their own.
   #
-  # This job is expected to be RED until Phase 17 (incremental index
-  # persistence) lands: a single-note save re-serializes and re-encrypts the
-  # whole index, so it misses the "< 20 ms incremental save acknowledgement"
-  # budget in docs/PRODUCT.md and gets worse as a vault grows.
+  # This job was expected to be RED until Phase 17 (incremental index
+  # persistence) landed, because a single-note save re-serialized and
+  # re-encrypted the whole index and so missed the "< 20 ms incremental save
+  # acknowledgement" budget in docs/PRODUCT.md. Phase 17 closed that: the save
+  # path is now flat in vault size and the budget passes in both cores.
   #
-  # It is deliberately separate from `typescript` so the miss is visible as a
+  # It is deliberately separate from `typescript` so a miss is visible as a
   # real failure rather than a tolerated warning, while merges stay unblocked.
-  # **Do not add `performance-budgets` to the repository's required status
-  # checks** until it passes; adding it is what closes the loop once Phase 17 is
-  # done. Relaxing a budget to turn this green is not an option — the whole
-  # point of splitting it out is that the number stays honest.
+  # It can now be added to the repository's required status checks, which is
+  # the last item Phase 17 is holding open. Relaxing a budget to turn this
+  # green is not an option — the whole point of splitting it out is that the
+  # number stays honest.
   performance-budgets:
     runs-on: ubuntu-latest
     steps:

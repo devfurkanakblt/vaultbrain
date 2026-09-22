@@ -488,6 +488,25 @@ replayed against a different snapshot without failing authentication.
 - [x] A vault written by one core is read correctly by the other, log included
       (`test/cross-core-index-log.test.mjs` drives both binaries over one vault)
 - [x] Both cores meet the budget at 100,000 notes, the size it is written for
+- [x] Measure the unlock budget over five cold unlocks, each in its own
+      process, and gate the median.
+      One sample of a measurement that reads and decrypts a 140 MB index
+      reports the runner as much as the vault: fourteen consecutive samples
+      from `main` ranged 1,087–2,074 ms around a 1.78 s median, and the one
+      that crossed the 2 s budget turned `main` red on a commit whose re-run
+      passed unchanged. Five samples on one development machine span about
+      30 ms (1,419–1,451 ms at the same tier) against that 1,000 ms spread.
+      Separate processes, because a second unlock in the same process is a
+      warm one: five in one process read 1,601 ms and then 1,438, 1,423, 1,423
+      and 1,432, and gating that median would have relaxed the budget by a
+      tenth while looking like a better measurement.
+- [x] Gate the incremental-save budget on the median and the worst sample
+      rather than on p95. p95 over 200 samples was reporting the CI disk: the
+      median never left 2.2–4.9 ms across thirty measurements while the worst
+      sample ranged 4 ms to 493 ms, and p95 crossed the 20 ms target twice on
+      an unchanged save path. The target itself is unchanged and p95 is still
+      reported every run, with a `TAIL:` line when it crosses. Both cores gate
+      the same two statistics.
 - [ ] Promote `performance-budgets` to a required status check — a repository
       setting, and the last thing holding this phase open
 
@@ -541,6 +560,35 @@ save costs now is the four durable file operations it makes — the write-ahead
 journal, the archived revision, the note object and the log append. That is a
 fixed cost rather than one that grows with the vault, and reducing the count is
 an optimisation with its own crash-safety argument rather than a budget miss.
+
+### The unlock margin, named rather than rediscovered
+
+The save path is flat in vault size; the unlock path is not, and the budget it
+passes it passes narrowly. A cold unlock at 100,000 notes costs about 1.78 s of
+its 2 s budget on the CI runner and about 1.45 s on a development machine,
+because it reads and decrypts the entire index — `documents/index.enc` is
+140 MB at that tier, since the index carries every note body, which is what
+makes in-memory full-text search possible.
+
+Profiled on a development machine, one 1,452 ms cold unlock divides as 484 ms
+in the two `JSON.parse` calls, 309 ms in `scryptSync`, 299 ms in garbage
+collection driven by the 140 MB and 105 MB strings, 178 ms reading and decoding
+the file as UTF-8, 117 ms in base64 decoding and AES-GCM, and 51 ms in `list()`
+itself. The KDF is a security parameter and stays. The rest is the envelope:
+base64 inside JSON costs a third more bytes than the ciphertext, and both a
+scan of the outer document and a parse of the inner one.
+
+Reducing it means changing how the index is stored, which the frozen 1.0
+on-disk format ([`FORMAT-1.0.md`](FORMAT-1.0.md)) does not allow inside 1.x.
+It is not scheduled here — it is written down so the next reader finds a
+measured 11% margin with a named cause rather than a mystery.
+
+One divergence stays open with it: `scripts/benchmark.mjs` now gates the median
+of five cold unlocks, while `src-tauri/src/bin/vbrain-bench.rs` still gates one
+sample. The desktop core's unlock has a wider margin (1.27 s against the same
+2 s budget), so it is less exposed, but it is the same measurement on the same
+contract and the two harnesses should agree. Named here rather than left to be
+rediscovered by a red run.
 
 ## Phase 18 candidates — context semantics (not scheduled)
 
