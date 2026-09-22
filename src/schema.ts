@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { KV_WRITE_WAIT_MS, listVaultFiles, loadVaultFile } from "./store.js";
+import { listVaultFiles, loadVaultFile } from "./store.js";
 import { assertNotSymlink, readTextFileLimited, writeFileAtomic } from "./fs-safe.js";
 import { removeFile } from "./fs-tree.js";
 import { resolveInside } from "./safety.js";
@@ -90,7 +90,6 @@ export function buildSchema(vaultDir: string, passphrase: string): Schema {
       }
       return schema;
     },
-    { waitMs: KV_WRITE_WAIT_MS },
   );
 }
 
