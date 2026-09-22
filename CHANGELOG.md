@@ -86,6 +86,12 @@ than linear in it.
   rate, and a larger sample only makes the same verdict more repeatable. The
   median gates the path with a sixfold margin and the worst sample gates
   catastrophe. Both cores gate the same two statistics.
+- Added: `performance-budgets` is a required status check on `main` as of
+  2026-09-22. It was split out as a job that was expected to be red until
+  Phase 17 landed; it now passes in both cores at every tier, and requiring it
+  is what closes that phase. Branch protection also closes force pushes and
+  deletion of `main`; it requires neither an up-to-date branch nor a review, so
+  a single maintainer and Dependabot can still merge.
 
 
 ### Security and data integrity — 2026-09-19 CLI/MCP review
