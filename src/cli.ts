@@ -3,6 +3,7 @@ import { Command } from "commander";
 import { registerMemoryCommands } from "./memory/cli.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 import {
   DEFAULT_VAULT_DIR,
@@ -90,6 +91,18 @@ import { FORMAT_COMPATIBILITY, VAULT_FORMAT_VERSION } from "./format-version.js"
 
 const program = new Command();
 
+/**
+ * The package version, read from the manifest that ships beside `dist/`.
+ *
+ * Read rather than compiled in, so a published tarball cannot report a version
+ * other than its own. npm always includes `package.json`, and `createRequire`
+ * resolves it relative to this module in both the source tree and an installed
+ * package. This is the package version; the on-disk format version is a
+ * different number with a different lifetime, and `vbrain format` owns it.
+ */
+const packageVersion = (createRequire(import.meta.url)("../package.json") as { version: string })
+  .version;
+
 function openDocumentVault(vaultDir: string, passphrase: string): DocumentVault {
   const deviceId = program.opts().syncDevice as string | undefined;
   if (deviceId && !program.opts().experimentalTrustedSync) {
@@ -104,6 +117,7 @@ function openDocumentVault(vaultDir: string, passphrase: string): DocumentVault 
 
 program
   .name("vbrain")
+  .version(packageVersion, "-V, --version", "print the installed vault-brain version")
   .description("Vault Brain — an .env-style, least-exposure personal data store for the AI age.")
   .option("--vault <dir>", "vault directory", DEFAULT_VAULT_DIR)
   .option("--sync-device <uuid>", "automatically capture document writes for this sync device")
