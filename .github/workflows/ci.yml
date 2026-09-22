@@ -49,11 +49,12 @@ jobs:
   # path is now flat in vault size and the budget passes in both cores.
   #
   # It is deliberately separate from `typescript` so a miss is visible as a
-  # real failure rather than a tolerated warning, while merges stay unblocked.
-  # It can now be added to the repository's required status checks, which is
-  # the last item Phase 17 is holding open. Relaxing a budget to turn this
-  # green is not an option — the whole point of splitting it out is that the
-  # number stays honest.
+  # real failure rather than a tolerated warning. Since 2026-09-22 it is a
+  # required status check on `main`, which is what closed Phase 17. Relaxing a
+  # budget to turn this green is not an option — the whole point of splitting
+  # it out is that the number stays honest. The statistics it gates are named
+  # in docs/PRODUCT.md, and two of them are not p95, for reasons measured
+  # rather than assumed.
   performance-budgets:
     runs-on: ubuntu-latest
     steps:
