@@ -28,9 +28,15 @@ token rather than from a secret. Once the package exists, npm's trusted
 publishing can replace the token entirely; configure it in the package settings
 and the secret can be removed.
 
+First published on 2026-09-22: `vault-brain@0.2.0`, from `9fdef37`, with
+provenance. The evidence is in
+[RELEASE-ACCEPTANCE.md](RELEASE-ACCEPTANCE.md).
+
 Release steps:
 
-1. Set the version in `package.json` and merge it to `main`.
+1. Raise the version in `package.json` and merge it to `main`. The workflow
+   refuses a version that is already on the registry, because an npm version is
+   permanent.
 2. Wait for that commit's CI.
 3. Run the **Publish to npm** workflow from the Actions tab.
 
