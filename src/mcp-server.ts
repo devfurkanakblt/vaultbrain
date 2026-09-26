@@ -87,7 +87,14 @@ export function resolveForAgent(
   };
 }
 
-/** Maximum number of explicitly named keys in one `resolve_keys` call. */
+/**
+ * The most keys one `resolve_keys` call may name.
+ *
+ * The batch saves the agent a tool-call round trip per key; it is not a way to
+ * pull a category. Twenty covers the sessions that motivated it (eleven notes
+ * read out of twenty-eight listed) while keeping a single answer small enough
+ * that the agent still has to decide what it needs.
+ */
 export const MAX_RESOLVE_BATCH = 20;
 
 export type BatchOutcome = ResolveOutcome | { kind: "error"; message: string };
@@ -98,7 +105,19 @@ export interface Resolution {
   outcome: BatchOutcome;
 }
 
-/** Validate the whole list before resolving any key, then use the single-key path. */
+/**
+ * Resolves each named key through `resolveForAgent`, in the order given.
+ *
+ * The list is validated whole before any key is touched: an empty list, one
+ * over the limit, or one that names a key twice is refused without a decrypt
+ * or an audit line. A repeat is refused rather than collapsed because under a
+ * confirming grant the first copy would spend the owner's single-use approval
+ * and the second would open a new request for the same key.
+ *
+ * After that, every key is its own resolution — its own grant decision, hold,
+ * mask and audit line — so a batch never grants more than the same keys asked
+ * one at a time. A key that throws is reported in place and the rest continue.
+ */
 export function resolveManyForAgent(
   vaultDir: string,
   agent: string,
@@ -156,7 +175,17 @@ export function discoveryLines(
     .join("\n");
 }
 
-/** Frame each free-text value with a fresh per-response marker. */
+/**
+ * Renders a `resolve_keys` answer: one entry per key, in the order asked.
+ *
+ * Values are free text — a journal note spans lines, and `store_note` lets an
+ * agent write anything, including a line shaped like an entry header. Each
+ * entry therefore opens with a marker drawn fresh for this response, which no
+ * stored value can have known in advance. The legend names it once; entries
+ * repeat only the marker, the locator and, when the key did not resolve, why.
+ *
+ * `isError` follows `resolve_key`: set when not a single value came back.
+ */
 export function renderResolutions(
   results: Resolution[],
   marker: string = crypto.randomBytes(4).toString("hex"),

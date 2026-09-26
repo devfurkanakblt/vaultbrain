@@ -236,8 +236,8 @@ test("the framing costs a small, fixed amount per key", () => {
     outcome: value(`decision body ${index} `.repeat(20)),
   }));
   const rendered = renderResolutions(results, "cafebabe");
-  // The locator (file/KEY) is information the agent needs; everything else â€”
-  // marker, separators, the legend's share â€” is framing.
+  // The locator (file/KEY) is information the agent needs; everything else —
+  // marker, separators, the legend's share — is framing.
   const payload = results.reduce(
     (sum, result) => sum + result.outcome.message.length + `${result.file}/${result.key}`.length,
     0,
