@@ -28,6 +28,17 @@ through the same path as `resolve_key`, which is unchanged.
   reached, since scope matching is exact; a `*` scope now gets this message
   instead of the authentication error. (#96)
 
+### Desktop object IDs
+
+- Hardened: the desktop core accepted any spelling `Uuid::parse_str` takes for
+  a note, canvas or plugin ID — uppercase, braced, `urn:uuid:`, unhyphenated.
+  The ID is both the object's filename and its AEAD identity, so a second
+  spelling opened the same file on Windows or macOS and failed authentication,
+  or named a different file elsewhere. It now takes only the lowercase,
+  hyphenated form the format inventory defines and the TypeScript core already
+  enforces. No command reached this with user input, since references resolve
+  through the index first.
+
 ### Cross-process locking
 
 - Fixed: a fan-out of writers could fail on a lock that was working. The wait
