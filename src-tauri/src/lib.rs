@@ -1129,8 +1129,23 @@ fn end_journal(session: &VaultSession) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `id` is a document or plugin ID in the one spelling the vault
+/// writes: a lowercase, hyphenated UUID.
+///
+/// The ID is both the object's filename and its AEAD identity, and the format
+/// inventory (`src/format-version.ts`) names objects `[a-f0-9-]{36}` only.
+/// `Uuid::parse_str` alone also takes uppercase, braced, `urn:uuid:` and
+/// unhyphenated forms. Each of those names the same file on a case-insensitive
+/// filesystem, where it then fails authentication, or a different file on a
+/// case-sensitive one. The TypeScript core already refuses them.
+fn is_canonical_id(id: &str) -> bool {
+    Uuid::parse_str(id).is_ok_and(|uuid| uuid.hyphenated().to_string() == id)
+}
+
 fn note_path(root: &Path, id: &str) -> Result<PathBuf, String> {
-    Uuid::parse_str(id).map_err(|_| "invalid note ID")?;
+    if !is_canonical_id(id) {
+        return Err("invalid note ID".into());
+    }
     Ok(root.join("objects").join(format!("{id}.note.enc")))
 }
 
@@ -1264,7 +1279,7 @@ fn recover_pending_journal(session: &mut VaultSession) -> Result<(), String> {
         .is_some_and(|entry| entry.version == 1 && entry.scope == "notes");
     if targeted {
         for id in journal.unwrap().ids {
-            if Uuid::parse_str(&id).is_err() {
+            if !is_canonical_id(&id) {
                 continue;
             }
             let object = note_path(&session.root_dir, &id)?;
@@ -1294,7 +1309,7 @@ fn recover_pending_journal(session: &mut VaultSession) -> Result<(), String> {
                 let Some(id) = name.strip_suffix(".note.enc") else {
                     continue;
                 };
-                if Uuid::parse_str(id).is_err() {
+                if !is_canonical_id(id) {
                     continue;
                 }
                 let note = load_note(session, id)?;
@@ -1329,7 +1344,7 @@ fn recover_plugin_index(session: &mut VaultSession) -> Result<(), String> {
             let Some(id) = name.strip_suffix(".plugin.enc") else {
                 continue;
             };
-            if Uuid::parse_str(id).is_ok() {
+            if is_canonical_id(id) {
                 let plugin = load_plugin(session, id)?;
                 plugins.insert(id.to_string(), PluginSummary::from(&plugin));
             }
@@ -2582,7 +2597,9 @@ fn save_existing_note(
 }
 
 fn note_history_dir(session: &VaultSession, id: &str) -> Result<PathBuf, String> {
-    Uuid::parse_str(id).map_err(|_| "invalid note ID")?;
+    if !is_canonical_id(id) {
+        return Err("invalid note ID".into());
+    }
     Ok(session.root_dir.join("history").join(id))
 }
 
@@ -2636,7 +2653,7 @@ fn resolve_history_id(session: &VaultSession, reference: &str) -> Result<String,
     if let Ok(id) = resolve_id(&session.index, reference) {
         return Ok(id);
     }
-    if Uuid::parse_str(reference).is_ok() && note_history_dir(session, reference)?.is_dir() {
+    if is_canonical_id(reference) && note_history_dir(session, reference)?.is_dir() {
         return Ok(reference.to_string());
     }
     Err(format!("note not found: {reference}"))
@@ -2658,7 +2675,7 @@ fn deleted_notes(session: &VaultSession) -> Result<Vec<DeletedNote>, String> {
     for entry in fs::read_dir(history).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
         let id = entry.file_name().to_string_lossy().into_owned();
-        if Uuid::parse_str(&id).is_err() || session.index.notes.contains_key(&id) {
+        if !is_canonical_id(&id) || session.index.notes.contains_key(&id) {
             continue;
         }
         let Some(latest) = archived_revisions(session, &id)?.into_iter().max() else {
@@ -3026,12 +3043,16 @@ fn plugin_store_aad(id: &str) -> String {
 }
 
 fn plugin_object_path(root: &Path, id: &str) -> Result<PathBuf, String> {
-    Uuid::parse_str(id).map_err(|_| "invalid plugin ID")?;
+    if !is_canonical_id(id) {
+        return Err("invalid plugin ID".into());
+    }
     Ok(root.join("objects").join(format!("{id}.plugin.enc")))
 }
 
 fn plugin_store_path(root: &Path, id: &str) -> Result<PathBuf, String> {
-    Uuid::parse_str(id).map_err(|_| "invalid plugin ID")?;
+    if !is_canonical_id(id) {
+        return Err("invalid plugin ID".into());
+    }
     Ok(root.join("objects").join(format!("{id}.pluginstore.enc")))
 }
 
@@ -5032,7 +5053,9 @@ fn canvas_history_aad(id: &str, revision: u64) -> String {
 }
 
 fn canvas_object_path(root: &Path, id: &str) -> Result<PathBuf, String> {
-    Uuid::parse_str(id).map_err(|_| "invalid canvas ID")?;
+    if !is_canonical_id(id) {
+        return Err("invalid canvas ID".into());
+    }
     Ok(root.join("objects").join(format!("{id}.canvas.enc")))
 }
 
@@ -5106,7 +5129,7 @@ fn validate_canvas(nodes: &[Value], edges: &[Value]) -> Result<(), String> {
                         "canvas node {id}: a file cannot name both note and attachment IDs"
                     ));
                 }
-                if note_id.is_some_and(|value| Uuid::parse_str(value).is_err())
+                if note_id.is_some_and(|value| !is_canonical_id(value))
                     || attachment_id.is_some_and(|value| !attachment_pattern.is_match(value))
                 {
                     return Err(format!("canvas node {id}: invalid document identity"));
@@ -5353,7 +5376,7 @@ fn recover_canvas_index(session: &mut VaultSession) -> Result<(), String> {
             let Some(id) = name.strip_suffix(".canvas.enc") else {
                 continue;
             };
-            if Uuid::parse_str(id).is_ok() {
+            if is_canonical_id(id) {
                 let canvas = load_canvas(session, id)?;
                 canvases.insert(id.to_string(), index_canvas(&session.index, &canvas)?);
             }
@@ -5467,7 +5490,9 @@ fn put_canvas(session: &mut VaultSession, input: CanvasInput) -> Result<CanvasDo
         .map(|canvas| canvas.id.clone())
         .or(input.id)
         .unwrap_or_else(|| Uuid::new_v4().to_string());
-    Uuid::parse_str(&id).map_err(|_| "invalid canvas ID")?;
+    if !is_canonical_id(&id) {
+        return Err("invalid canvas ID".into());
+    }
     if session.index.notes.contains_key(&id) && existing.is_none() {
         return Err(format!("document ID already exists: {id}"));
     }
@@ -6768,6 +6793,43 @@ mod tests {
         let mut tampered = payload;
         tampered.ciphertext = BASE64.encode(b"not the original ciphertext");
         assert!(decrypt(&tampered, &key, "test-context").is_err());
+    }
+
+    #[test]
+    fn object_paths_accept_only_the_canonical_id_spelling() {
+        // An object's ID is both its filename and its AEAD identity. A second
+        // spelling of the same UUID opens the same file on a case-insensitive
+        // filesystem and then fails authentication, or names a different file
+        // elsewhere; the format inventory only ever writes the canonical one.
+        let root = Path::new("vault-root");
+        let canonical = "0f8c3a52-6b1d-4e2a-9c7f-2d4e6a8b0c1e";
+        assert!(note_path(root, canonical).is_ok());
+        assert!(canvas_object_path(root, canonical).is_ok());
+        assert!(plugin_object_path(root, canonical).is_ok());
+        assert!(plugin_store_path(root, canonical).is_ok());
+        for spelling in [
+            "0F8C3A52-6B1D-4E2A-9C7F-2D4E6A8B0C1E",
+            "0f8c3a526b1d4e2a9c7f2d4e6a8b0c1e",
+            "{0f8c3a52-6b1d-4e2a-9c7f-2d4e6a8b0c1e}",
+            "urn:uuid:0f8c3a52-6b1d-4e2a-9c7f-2d4e6a8b0c1e",
+        ] {
+            assert!(
+                note_path(root, spelling).is_err(),
+                "note accepted {spelling}"
+            );
+            assert!(
+                canvas_object_path(root, spelling).is_err(),
+                "canvas accepted {spelling}"
+            );
+            assert!(
+                plugin_object_path(root, spelling).is_err(),
+                "plugin accepted {spelling}"
+            );
+            assert!(
+                plugin_store_path(root, spelling).is_err(),
+                "plugin store accepted {spelling}"
+            );
+        }
     }
 
     #[test]
