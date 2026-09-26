@@ -5,6 +5,15 @@ Versioning once the encrypted storage format reaches 1.0.
 
 ## Unreleased
 
+### Several keys in one MCP call
+
+`resolve_keys` resolves up to 20 explicitly named keys in one tool call. An
+agent that read eleven notes out of a twenty-eight-key vault used to spend
+eleven `resolve_key` calls on it; the per-call cost sat almost entirely on the
+agent's side, since the server already keeps the unwrapped keyset for the life
+of the process. Each key is still decided, held, masked and audited on its own
+through the same path as `resolve_key`, which is unchanged.
+
 ### Cross-process locking
 
 - Fixed: a fan-out of writers could fail on a lock that was working. The wait

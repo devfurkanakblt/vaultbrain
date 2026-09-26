@@ -54,12 +54,12 @@ References:
 
 - Safe catalog search without note bodies
 - Per-agent grants scoped by vault, collection, note, field, action and expiry
-- Explicit one-item resolution with audit trail
+- Explicit per-key resolution with audit trail (one key, or a short list of named keys)
 - Local-model path for zero-network workflows
 - Redacted tool results and user confirmation policies for sensitive classes
 
 **Delivered scope (0.2.0):** the MCP surface is key-value only — `list_keys`,
-`find_key`, `resolve_key`, `store_note` and `find_notes_in_range`, over the
+`find_key`, `resolve_key`, `resolve_keys`, `store_note` and `find_notes_in_range`, over the
 `*.kv.enc` categories and their value-free catalog. Grants are scoped by
 file, key pattern, action and expiry. Note- and field-level scoping, and any
 discovery or resolve path for Markdown documents, are not built: an agent
