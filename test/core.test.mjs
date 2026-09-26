@@ -61,6 +61,45 @@ test("vault category cannot escape the selected vault directory", () => {
   assert.equal(vaultFilePath(vault, "health"), path.join(vault, "health.kv.enc"));
 });
 
+// A category's name is also its file's AEAD identity. On a case-insensitive
+// filesystem "HEALTH" opens health.kv.enc and then fails authentication, which
+// reads as a damaged vault; on a case-sensitive one it silently starts a second
+// category that collides the moment the vault reaches Windows or macOS.
+test("a category asked for in the wrong case is refused by name, on every platform", () => {
+  const vault = tempVault();
+  upsertEntry(vault, "health", "BLOOD", "A Rh+", "blood type", PASSPHRASE);
+
+  assert.throws(() => loadVaultFile(vault, "HEALTH", PASSPHRASE), (error) => {
+    assert.match(error.message, /No category "HEALTH"/u);
+    assert.match(error.message, /"health"/u, "the message names the category that is stored");
+    assert.doesNotMatch(error.message, /authenticate/u);
+    return true;
+  });
+});
+
+test("a write in the wrong case is refused and starts no second category", () => {
+  const vault = tempVault();
+  upsertEntry(vault, "health", "BLOOD", "A Rh+", "blood type", PASSPHRASE);
+
+  assert.throws(() => upsertEntry(vault, "Health", "X", "1", "x", PASSPHRASE), /No category "Health"/u);
+
+  assert.deepEqual(
+    fs.readdirSync(vault).filter((name) => name.endsWith(".kv.enc")),
+    ["health.kv.enc"],
+  );
+  assert.deepEqual(
+    loadVaultFile(vault, "health", PASSPHRASE).map((entry) => [entry.key, entry.value]),
+    [["BLOOD", "A Rh+"]],
+  );
+});
+
+test("a category's own spelling, and a new one in any case, still work", () => {
+  const vault = tempVault();
+  upsertEntry(vault, "Travel", "PASSPORT", "U123", "passport number", PASSPHRASE);
+  assert.equal(loadVaultFile(vault, "Travel", PASSPHRASE)[0].value, "U123");
+  assert.deepEqual(loadVaultFile(vault, "work", PASSPHRASE), [], "an absent category is still just empty");
+});
+
 test("encrypted storage writes atomically and schema never contains values", () => {
   const vault = tempVault();
   fs.writeFileSync(path.join(vault, "schema.json"), '{"legacy":"plaintext"}');
