@@ -14,6 +14,20 @@ agent's side, since the server already keeps the unwrapped keyset for the life
 of the process. Each key is still decided, held, masked and audited on its own
 through the same path as `resolve_key`, which is unchanged.
 
+### Category names in the wrong case
+
+- Fixed: on Windows and macOS, naming a category in a different case
+  (`get HEALTH BLOOD` for a stored `health`) opened the stored file and then
+  failed with `Unsupported state or unable to authenticate data`, which reads
+  as a damaged vault. The name is the file's authentication identity, so it has
+  to match exactly. Reads and writes now refuse with
+  `No category "HEALTH" in this vault; ... Stored as: "health".` on every
+  platform, which also stops a case-sensitive filesystem from starting a second
+  category that would collide once the vault reached Windows or macOS. Over
+  MCP a grant scoped to `health` already denies `HEALTH` before the store is
+  reached, since scope matching is exact; a `*` scope now gets this message
+  instead of the authentication error. (#96)
+
 ### Cross-process locking
 
 - Fixed: a fan-out of writers could fail on a lock that was working. The wait

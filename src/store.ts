@@ -41,8 +41,29 @@ function warmKeyring(vaultDir: string, passphrase: string): void {
   kvKeyForWrite(vaultDir, passphrase)?.fill(0);
 }
 
+/**
+ * The file that holds one key-value category.
+ *
+ * A category's name is also its file's AEAD identity, so the name has to match
+ * the stored one exactly, case included. On a case-insensitive filesystem
+ * "HEALTH" would open health.kv.enc and then fail authentication — an error
+ * that reads as a damaged vault. On a case-sensitive one it would start a
+ * second category that collides once the vault is copied to Windows or macOS.
+ * Either way the caller meant a category that exists under another spelling,
+ * so this refuses and names it, on every platform alike.
+ */
 export function vaultFilePath(vaultDir: string, name: string): string {
   const base = normalizeVaultName(name);
+  const stored = listVaultFiles(vaultDir);
+  if (!stored.includes(base)) {
+    const folded = base.toLowerCase();
+    const spellings = stored.filter((candidate) => candidate.toLowerCase() === folded);
+    if (spellings.length) {
+      throw new Error(
+        `No category "${base}" in this vault; category names are case-sensitive. Stored as: ${spellings.map((s) => `"${s}"`).join(", ")}.`,
+      );
+    }
+  }
   return resolveInside(vaultDir, `${base}.kv.enc`);
 }
 
