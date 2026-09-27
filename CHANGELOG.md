@@ -24,6 +24,10 @@ reasons given under 0.2.0.
   never declared; it arrived as the MCP SDK's peer dependency, which npm
   installs and stricter installers do not. It is now a direct dependency. A
   test checks every package the built code imports against `dependencies`.
+- The desktop manifests (`tauri.conf.json`, `Cargo.toml`) move to 0.3.0 with
+  the package, as the native release check requires. Two tests that had
+  `0.2.0` written into them — the updater's upgrade rule and the platform
+  artifact fixtures — now take the version from the manifests instead.
 
 ### Several keys in one MCP call
 

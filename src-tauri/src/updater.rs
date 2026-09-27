@@ -513,20 +513,32 @@ mod tests {
 
     #[test]
     fn only_strict_stable_upgrades_are_accepted() {
+        // Relative to the running version, which is what the check compares
+        // against: literals here broke on every version bump.
+        let current = Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+        let next_minor = Version::new(current.major, current.minor + 1, 0);
+        let older = if current.patch > 0 {
+            Version::new(current.major, current.minor, current.patch - 1)
+        } else if current.minor > 0 {
+            Version::new(current.major, current.minor - 1, 9)
+        } else {
+            Version::new(current.major - 1, 9, 9)
+        };
+        assert!(older < current);
         for rejected in [
-            "not-semver",
-            "0.1.9",
-            "0.2.0",
-            "0.3.0-beta.1",
-            "0.3.0+rebuilt",
+            "not-semver".to_string(),
+            older.to_string(),
+            current.to_string(),
+            format!("{next_minor}-beta.1"),
+            format!("{next_minor}+rebuilt"),
         ] {
             assert_eq!(
-                validate_release_version(rejected),
+                validate_release_version(&rejected),
                 Err(()),
                 "accepted {rejected}"
             );
         }
-        assert_eq!(validate_release_version("0.3.0"), Ok(()));
+        assert_eq!(validate_release_version(&next_minor.to_string()), Ok(()));
     }
 
     #[test]
