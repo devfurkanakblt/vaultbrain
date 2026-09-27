@@ -1,6 +1,6 @@
 {
   "name": "vault-brain",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A fast, local-first encrypted Markdown knowledge engine with controlled AI access, backlinks, history, attachments, templates, and portable YAML frontmatter.",
   "repository": {
     "type": "git",
@@ -72,7 +72,8 @@
     "@iarna/toml": "^2.2.5",
     "@modelcontextprotocol/sdk": "^1.11.0",
     "commander": "^15.0.0",
-    "yaml": "^2.9.1"
+    "yaml": "^2.9.1",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@codemirror/commands": "^6.11.1",

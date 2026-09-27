@@ -5,6 +5,30 @@ Versioning once the encrypted storage format reaches 1.0.
 
 ## Unreleased
 
+Nothing yet. The npm workflow refuses a version that is already on the
+registry, so the next publish starts by raising the version in `package.json`.
+
+## 0.3.0 — prepared for npm, not yet published
+
+`resolve_keys` for MCP agents, a clear refusal for a category named in the
+wrong case, and two packaging fixes. The desktop change below ships in the
+repository only; the desktop application is still not released, for the
+reasons given under 0.2.0.
+
+### Packaging
+
+- Fixed: the MCP server introduced itself to every client as `0.2.0`, from a
+  literal, whatever version was installed. It now reads `package.json` the way
+  `vbrain --version` does.
+- Fixed: `zod` is imported by the MCP server and the memory MCP server but was
+  never declared; it arrived as the MCP SDK's peer dependency, which npm
+  installs and stricter installers do not. It is now a direct dependency. A
+  test checks every package the built code imports against `dependencies`.
+- The desktop manifests (`tauri.conf.json`, `Cargo.toml`) move to 0.3.0 with
+  the package, as the native release check requires. Two tests that had
+  `0.2.0` written into them — the updater's upgrade rule and the platform
+  artifact fixtures — now take the version from the manifests instead.
+
 ### Several keys in one MCP call
 
 `resolve_keys` resolves up to 20 explicitly named keys in one tool call. An

@@ -1,6 +1,6 @@
 [package]
 name = "vault-brain-desktop"
-version = "0.2.0"
+version = "0.3.0"
 description = "Local-first encrypted knowledge workspace"
 authors = ["Vault Brain contributors"]
 edition = "2021"

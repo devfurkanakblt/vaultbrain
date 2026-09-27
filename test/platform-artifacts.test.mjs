@@ -11,6 +11,10 @@ import { removeTree } from "../scripts/fs-tree.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const script = path.join(root, "scripts", "platform-artifacts.mjs");
+// The validator expects the version tauri.conf.json declares, so the synthetic
+// bundles carry that one rather than a literal that breaks on every release.
+const VERSION = JSON.parse(fs.readFileSync(path.join(root, "src-tauri", "tauri.conf.json"), "utf8")).version;
+const escapedVersion = VERSION.replaceAll(".", "\\.");
 
 // GNU tar reads the leading "C:" of an absolute Windows path as a remote host
 // specification and fails with "Cannot connect to C: resolve failed", so it
@@ -59,12 +63,12 @@ function writeMacArtifacts(bundleDir, { architecture = "arm64" } = {}) {
   fs.mkdirSync(path.dirname(executable), { recursive: true });
   fs.writeFileSync(
     path.join(app, "Contents", "Info.plist"),
-    `<?xml version="1.0"?><plist><dict><key>CFBundleIdentifier</key><string>dev.vaultbrain.desktop</string><key>CFBundleShortVersionString</key><string>0.2.0</string></dict></plist>`,
+    `<?xml version="1.0"?><plist><dict><key>CFBundleIdentifier</key><string>dev.vaultbrain.desktop</string><key>CFBundleShortVersionString</key><string>${VERSION}</string></dict></plist>`,
   );
   if (architecture === "arm64") writeArm64MachO(executable);
   else fs.writeFileSync(executable, Buffer.from([0xcf, 0xfa, 0xed, 0xfe, 0x07, 0, 0, 1]));
   fs.mkdirSync(path.join(bundleDir, "dmg"), { recursive: true });
-  fs.writeFileSync(path.join(bundleDir, "dmg", "Vault Brain_0.2.0_aarch64.dmg"), "synthetic dmg");
+  fs.writeFileSync(path.join(bundleDir, "dmg", `Vault Brain_${VERSION}_aarch64.dmg`), "synthetic dmg");
 }
 
 function run(args, options = {}) {
@@ -144,9 +148,9 @@ test("writes portable upload and checksum manifests for valid macOS artifacts", 
     assert.equal(output.configuredIdentifier, "dev.vaultbrain.desktop");
     assert.deepEqual(
       uploads.artifacts.map((artifact) => artifact.path),
-      ["dmg/Vault Brain_0.2.0_aarch64.dmg", "macos/Vault Brain.app.tar.gz"],
+      [`dmg/Vault Brain_${VERSION}_aarch64.dmg`, "macos/Vault Brain.app.tar.gz"],
     );
-    assert.match(checksums, /^[a-f0-9]{64} {2}dmg\/Vault Brain_0\.2\.0_aarch64\.dmg$/mu);
+    assert.match(checksums, new RegExp(`^[a-f0-9]{64} {2}dmg/Vault Brain_${escapedVersion}_aarch64\\.dmg$`, "mu"));
     assert.match(checksums, /^[a-f0-9]{64} {2}macos\/Vault Brain\.app\.tar\.gz$/mu);
     assert.doesNotMatch(checksums, /checksums\.sha256|upload-artifacts\.json/u);
   } finally {
