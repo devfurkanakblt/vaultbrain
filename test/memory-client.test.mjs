@@ -43,6 +43,12 @@ test("MCP output remains bounded after JSON escaping", () => {
   assert.match(rendered, /truncated/u);
 });
 
+test("native lowercase status errors remain distinguishable without echoing private messages", () => {
+  assert.throws(() => decodeMemoryResponse(JSON.stringify({ version: 1, ok: false, error: { code: "locked", message: "private-path" } })), /Memory request refused \(locked\)/u);
+  assert.throws(() => decodeMemoryResponse(JSON.stringify({ version: 1, ok: false, error: { code: "private-path", message: "private-path" } })), { message: "Memory request refused." });
+  assert.throws(() => decodeMemoryResponse(JSON.stringify({ version: 1, ok: false, error: { code: "locKed" } })), { message: "Memory request refused." });
+});
+
 test("hook records require an offset-bearing ISO timestamp", () => {
   const base = { version: 1, event: "Stop", sessionId: "session", turnId: "turn", transcriptPath: "C:\\session.jsonl" };
   assert.throws(() => parseHookPayload({ ...base, createdAt: "03/04/2026" }), /ISO timestamp/iu);

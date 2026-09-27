@@ -45,7 +45,7 @@ export function decodeMemoryResponse(text: string): unknown {
   if (!response.ok) {
     const code = (response.error as { code?: unknown } | undefined)?.code;
     // Native diagnostics never become a path/content echo channel.
-    throw new Error(typeof code === "string" && /^[A-Z_]{1,48}$/u.test(code) ? `Memory request refused (${code}).` : "Memory request refused.");
+    throw new Error(typeof code === "string" && /^[A-Za-z_]{1,48}$/u.test(code) ? `Memory request refused (${code}).` : "Memory request refused.");
   }
   if (!Object.hasOwn(response, "result")) throw new Error("Invalid memory response.");
   return response.result;
@@ -89,7 +89,7 @@ export function callMemoryNative(executable: string, method: string, params: Rec
       if (settled) return;
       if (code !== 0) return finish(new Error("Memory desktop unavailable."));
       try { finish(undefined, decodeMemoryResponse(Buffer.concat(chunks).toString("utf8"))); }
-      catch { finish(new Error("Memory request refused or returned an invalid response.")); }
+      catch (error) { finish(error instanceof Error ? error : new Error("Invalid memory response.")); }
     });
     child.stdin.end(request);
   });
