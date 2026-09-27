@@ -38,7 +38,9 @@ Release steps:
    refuses a version that is already on the registry, because an npm version is
    permanent.
 2. Wait for that commit's CI.
-3. Run the **Publish to npm** workflow from the Actions tab.
+3. Run the **Publish to npm** workflow from the Actions tab with **Run workflow**.
+   Do not use **Re-run** on an earlier run: a re-run checks out the commit that
+   run started on, not the current `main`, and the workflow refuses it.
 
 The workflow refuses any ref but `main`, refuses a version that already exists
 on the registry, and runs lint, types, the Node suite and the packaging check on

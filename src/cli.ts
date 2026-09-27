@@ -1771,13 +1771,24 @@ grant
   });
 
 grant
-  .command("approve <id>")
-  .description("approve one held resolution; the approval is single-use and expires shortly")
-  .action(async (id) => {
+  .command("approve <ids...>")
+  .description("approve held resolutions by id; each approval is single-use and expires shortly")
+  .action(async (ids: string[]) => {
     const dir = program.opts().vault;
     const passphrase = await getPassphrase({ vaultDir: dir });
-    const approved = approveRequest(dir, id, passphrase);
-    console.log(`Approved ${approved.file}.${approved.key} for "${approved.agent}" until ${approved.expiresAt}.`);
+    // One `resolve_keys` call under a confirming grant holds each key on its
+    // own, so the owner may be handed several ids at once. Each is approved on
+    // its own too: an id that matches nothing is reported and does not undo
+    // or block the others.
+    for (const id of ids) {
+      try {
+        const approved = approveRequest(dir, id, passphrase);
+        console.log(`Approved ${approved.file}.${approved.key} for "${approved.agent}" until ${approved.expiresAt}.`);
+      } catch (error) {
+        console.error(error instanceof Error ? error.message : String(error));
+        process.exitCode = 1;
+      }
+    }
   });
 
 grant

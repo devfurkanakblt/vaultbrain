@@ -9,7 +9,8 @@
 # desktop signing secrets.
 #
 # What it proves before publishing:
-#   - the commit is on `main`
+#   - the commit is on `main`, and is still its head (a re-run of an old run
+#     is not)
 #   - the manifest version is not already on the registry
 #   - lint, types, the Node test suite and the packaged tarball all pass here,
 #     on the commit being published, rather than on whatever CI last saw
@@ -45,6 +46,20 @@ jobs:
           echo "This workflow publishes main. Ref was ${{ github.ref }}." >&2
           exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # "Re-run" on an old run replays that run's commit, not today's main, so
+      # re-running the failed 0.2.0 attempt after main moved to 0.3.0 checked
+      # out 0.2.0 again and died on the version check below with no hint why.
+      # A fresh dispatch always starts at main's head, so this only fires on a
+      # stale re-run, and says what to do instead.
+      - name: Refuse to publish a commit main has moved past
+        run: |
+          set -euo pipefail
+          head="$(git ls-remote origin refs/heads/main | cut -f1)"
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "This run is for $GITHUB_SHA (attempt $GITHUB_RUN_ATTEMPT), but main is now at $head." >&2
+            echo "Re-running an old run publishes the commit it started on. Start a new run with 'Run workflow' instead." >&2
+            exit 1
+          fi
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22

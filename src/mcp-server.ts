@@ -3,8 +3,9 @@ import { createRequire } from "node:module";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { buildSchema, readSchema, searchSchema, filterNotesByDate } from "./schema.js";
+import { buildSchema, readSchema, searchSchema, filterNotesByDate, noteCreatedAt } from "./schema.js";
 import { generateAutoKey, loadVaultFile, storeNote } from "./store.js";
+import type { KVEntry } from "./format.js";
 import { appendAudit, clearAuditKeyCache } from "./audit.js";
 import {
   consumeApproval,
@@ -36,14 +37,59 @@ export type ResolveOutcome =
   | { kind: "missing"; message: string }
   | { kind: "value"; message: string; redaction: RedactionLevel };
 
+/**
+ * What one resolution reads, and what it may share with the others in the
+ * same call.
+ *
+ * A lone `resolve_key` reads the grant policy and its category file once, so
+ * sharing changes nothing for it. A `resolve_keys` batch of eleven notes in one
+ * category used to decrypt the policy eleven times and that category eleven
+ * times; with one context per call it decrypts each once. Only reads are
+ * shared. Approvals are spent and requested under the grants lock per key, and
+ * every key still writes its own audit line.
+ */
+export interface ResolveContext {
+  /** The tool the agent calls again once the owner has approved a hold. */
+  tool: "resolve_key" | "resolve_keys";
+  policy(): GrantFile | null;
+  entries(file: string): KVEntry[];
+}
+
+export function resolveContext(
+  vaultDir: string,
+  passphrase: string,
+  tool: ResolveContext["tool"] = "resolve_key",
+): ResolveContext {
+  let policy: GrantFile | null | undefined;
+  const files = new Map<string, KVEntry[]>();
+  return {
+    tool,
+    policy: () => {
+      if (policy === undefined) policy = loadGrants(vaultDir, passphrase);
+      return policy;
+    },
+    // Only a successful read is kept: a file that failed to open throws again
+    // for the next key that names it, and is reported against that key.
+    entries: (file) => {
+      let entries = files.get(file);
+      if (!entries) {
+        entries = loadVaultFile(vaultDir, file, passphrase);
+        files.set(file, entries);
+      }
+      return entries;
+    },
+  };
+}
+
 export function resolveForAgent(
   vaultDir: string,
   agent: string,
   file: string,
   key: string,
   passphrase: string,
+  context: ResolveContext = resolveContext(vaultDir, passphrase),
 ): ResolveOutcome {
-  const decision = decide(loadGrants(vaultDir, passphrase), { agent, action: "resolve", file, key });
+  const decision = decide(context.policy(), { agent, action: "resolve", file, key });
   if (!decision.allowed) {
     appendAudit(vaultDir, { actor: "mcp-agent", file, key, agent, outcome: "denied" }, passphrase);
     return { kind: "denied", message: decision.reason };
@@ -61,12 +107,20 @@ export function resolveForAgent(
       message: [
         "This grant holds each resolution for the vault owner's approval.",
         `Ask them to run:  vbrain grant approve ${request.id.slice(0, 8)}`,
-        "Then call resolve_key again. The approval is single-use and expires shortly.",
+        `Then call ${context.tool} again. The approval is single-use and expires shortly.`,
       ].join("\n"),
     };
   }
-  const entry = loadVaultFile(vaultDir, file, passphrase).find((candidate) => candidate.key === key);
+  const entry = context.entries(file).find((candidate) => candidate.key === key);
   if (!entry) {
+    // Recorded like a denial. `list_keys` already names every key the agent
+    // may see, so this leaks nothing; it keeps an agent that guesses names —
+    // up to twenty a call through `resolve_keys` — from doing so unseen.
+    appendAudit(
+      vaultDir,
+      { actor: "mcp-agent", file, key, agent, grant: decision.grantId, outcome: "missing" },
+      passphrase,
+    );
     return { kind: "missing", message: `Not found: ${key} in ${file}` };
   }
   appendAudit(
@@ -140,9 +194,10 @@ export function resolveManyForAgent(
     if (seen.has(locator)) throw new Error(`${locator} is named twice in one resolve_keys call. Name each key once.`);
     seen.add(locator);
   }
+  const context = resolveContext(vaultDir, passphrase, "resolve_keys");
   return items.map(({ file, key }) => {
     try {
-      return { file, key, outcome: resolveForAgent(vaultDir, agent, file, key, passphrase) };
+      return { file, key, outcome: resolveForAgent(vaultDir, agent, file, key, passphrase, context) };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       return { file, key, outcome: { kind: "error", message: `Could not resolve ${file}/${key}: ${reason}` } };
@@ -200,8 +255,15 @@ export function renderResolutions(
     const status = outcome.kind === "value" ? "" : ` (${outcome.kind})`;
     return `[${marker}] ${file}/${key}${status}\n${outcome.message}`;
   });
+  // Every held key names its own request, but an owner asked for eleven keys
+  // should not have to copy eleven commands. `grant approve` takes them all.
+  const held = results.flatMap(({ outcome }) => (outcome.kind === "pending" ? [outcome.requestId.slice(0, 8)] : []));
+  const summary =
+    held.length > 1
+      ? [`${held.length} keys are held for approval. The owner can approve them all at once:  vbrain grant approve ${held.join(" ")}`]
+      : [];
   return {
-    text: [`Entries start with [${marker}].`, ...entries].join("\n\n"),
+    text: [`Entries start with [${marker}].`, ...entries, ...summary].join("\n\n"),
     isError: results.every((result) => result.outcome.kind !== "value"),
   };
 }
@@ -278,7 +340,7 @@ export async function startMcpServer(vaultDir: string, configuredAgent: string):
 
   server.tool(
     "list_keys",
-    "List every available key name and its non-sensitive description across the vault, one 'file/KEY — description' per line. Contains NO values. Always call this before resolve_key or resolve_keys.",
+    "List every available key name and its non-sensitive description across the vault, one 'file/KEY — description' per line, with the date a journal note was written between the two. Contains NO values. Always call this before resolve_key or resolve_keys.",
     {},
     async () => {
       const schema = readSchema(vaultDir, passphrase);
@@ -286,10 +348,10 @@ export async function startMcpServer(vaultDir: string, configuredAgent: string):
         return text("No schema found. Ask the user to run 'vbrain index'.");
       }
       const grants = policy();
-      const visible: Array<{ file: string; key: string; desc: string }> = [];
+      const visible: Array<{ file: string; key: string; desc: string; createdAt?: string }> = [];
       for (const [file, entries] of Object.entries(schema.files)) {
         for (const entry of filterDiscoverable(grants, agent, file, entries)) {
-          visible.push({ file, key: entry.key, desc: entry.desc });
+          visible.push({ file, key: entry.key, desc: entry.desc, createdAt: noteCreatedAt(entry.key) });
         }
       }
       if (grants && !visible.length) {
@@ -304,7 +366,7 @@ export async function startMcpServer(vaultDir: string, configuredAgent: string):
 
   server.tool(
     "find_key",
-    "Fuzzy-search key names and descriptions for a query, returning one 'file/KEY — description' per line. Contains NO values. Use this to locate the right key before resolve_key.",
+    "Fuzzy-search key names and descriptions for a query, returning one 'file/KEY — description' per line, with the date a journal note was written between the two. Contains NO values. Use this to locate the right key before resolve_key.",
     { query: z.string().describe("what you're looking for, e.g. 'next doctor appointment'") },
     async ({ query }) => {
       const schema = readSchema(vaultDir, passphrase);
@@ -312,9 +374,9 @@ export async function startMcpServer(vaultDir: string, configuredAgent: string):
         return text("No schema found. Ask the user to run 'vbrain index'.");
       }
       const grants = policy();
-      const hits = searchSchema(schema, query).filter(
-        (hit) => decide(grants, { agent, action: "discover", file: hit.file, key: hit.key }).allowed,
-      );
+      const hits = searchSchema(schema, query)
+        .filter((hit) => decide(grants, { agent, action: "discover", file: hit.file, key: hit.key }).allowed)
+        .map((hit) => ({ ...hit, createdAt: noteCreatedAt(hit.key) }));
       return text(discoveryLines(hits, `Nothing in this vault matches "${query}".`));
     },
   );
