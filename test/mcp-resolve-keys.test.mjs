@@ -352,3 +352,61 @@ test("a journal note carries the date its key encodes; a fact carries none", () 
   assert.equal(noteCreatedAt("NOTE_20260920_212739_0e78a1b2c3d4"), "2026-09-20T21:27:39.000Z");
   assert.equal(noteCreatedAt("IBAN"), undefined);
 });
+
+test("a wrong-case category the grant covers is denied with its stored spelling, not a request to widen the grant", () => {
+  const vault = seededVault();
+  addGrant(vault, { agent: "claude", scopes: [scope()] }, PASSPHRASE);
+  const before = readAudit(vault).length;
+
+  const outcome = resolveForAgent(vault, "claude", "HEALTH", "BLOOD", PASSPHRASE);
+
+  assert.equal(outcome.kind, "denied");
+  assert.match(outcome.message, /No category "HEALTH"/u);
+  assert.match(outcome.message, /Stored as: "health"/u);
+  assert.doesNotMatch(outcome.message, /widen/u, "a typo must not send the owner off to change the grant");
+  const lines = readAudit(vault).slice(before);
+  assert.deepEqual(lines.map((line) => [line.file, line.outcome]), [["HEALTH", "denied"]]);
+});
+
+test("the spelling hint never names a category the grant does not cover", () => {
+  const vault = seededVault();
+  upsertEntry(vault, "work", "DESK", "B-12", "desk", PASSPHRASE);
+  addGrant(vault, { agent: "claude", scopes: [scope({ file: "work" })] }, PASSPHRASE);
+
+  const outcome = resolveForAgent(vault, "claude", "HEALTH", "BLOOD", PASSPHRASE);
+
+  assert.equal(outcome.kind, "denied");
+  assert.doesNotMatch(outcome.message, /health/u);
+  assert.match(outcome.message, /widen or renew/u);
+});
+
+test("a key that throws is audited as an error, value-free, in a batch and alone", () => {
+  const vault = seededVault();
+  // A `*` file scope admits the wrong-case name, so it reaches the store and
+  // throws there instead of being denied by the grant.
+  addGrant(vault, { agent: "claude", scopes: [scope({ file: "*" })] }, PASSPHRASE);
+  const before = readAudit(vault).length;
+
+  const results = resolveManyForAgent(
+    vault,
+    "claude",
+    [{ file: "HEALTH", key: "PROBE" }, { file: "health", key: "BLOOD" }],
+    PASSPHRASE,
+  );
+  assert.deepEqual(results.map((result) => result.outcome.kind), ["error", "value"]);
+  assert.throws(() => resolveForAgent(vault, "claude", "HEALTH", "ALONE", PASSPHRASE), /No category "HEALTH"/u);
+
+  const lines = readAudit(vault).slice(before);
+  assert.deepEqual(lines.map((line) => [line.file, line.key, line.outcome]), [
+    ["HEALTH", "PROBE", "error"],
+    ["health", "BLOOD", "allowed"],
+    ["HEALTH", "ALONE", "error"],
+  ]);
+  for (const line of lines) {
+    assert.deepEqual(
+      Object.keys(line).filter((field) => !["timestamp", "actor", "file", "key", "agent", "grant", "redaction", "outcome", "prevHash", "hash"].includes(field)),
+      [],
+      "an error line carries no message, path or value",
+    );
+  }
+});

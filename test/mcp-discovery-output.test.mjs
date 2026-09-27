@@ -93,3 +93,10 @@ test("listing a key costs less than handing over that key with its value", () =>
     `discovery (${discovery.length}) should stay well under pretty-printed JSON (${asPrettyJson.length})`,
   );
 });
+
+test("a fact carries the day of its last recorded write, labelled so it cannot pass for a note's date", () => {
+  assert.equal(
+    discoveryLines([{ file: "work", key: "PLAN", updatedAt: "2026-09-26", desc: "current plan" }], "nothing"),
+    "work/PLAN — updated 2026-09-26 — current plan",
+  );
+});
