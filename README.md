@@ -826,8 +826,12 @@ The server exposes six tools:
 Under a grant policy the three value-free tools return only the keys that
 agent may discover, `store_note` needs a `store` action, and `resolve_key`
 additionally records who asked, under which grant, how much came back, and
-whether the answer was allowed, denied, held for approval, or asked for a key
-that does not exist.
+whether the answer was allowed, denied, held for approval, asked for a key
+that does not exist, or failed with an error. An error line is value-free like
+the others: it names the file and key asked for, never the error message. A
+category named in the wrong case (`HEALTH` for a stored `health`) that the
+grant covers under its stored spelling is denied with that spelling, rather
+than with advice to widen the grant.
 
 `resolve_keys` is `resolve_key` for several keys at once: the agent names each
 `{file, key}` pair, up to twenty, and gets them back in one answer instead of
@@ -845,7 +849,16 @@ file so the next `resolve_key` call cannot take a key from the wrong one:
 health/DOCTOR_NAME — family doctor
 health/BLOOD_TYPE — blood type
 health/NOTE_20260920_212739_0e78eb198dd6 — 2026-09-20T21:27:39.000Z — checkup summary
+work/CURRENT_PLAN — updated 2026-09-26 — this quarter's plan
 ```
+
+A journal note carries the time its key encodes. A fact carries the day it was
+last written, so an agent can tell a plan rewritten yesterday from one left
+untouched for a month. Neither the `.kv` format nor the catalog stores a
+timestamp, so that day comes from the audit trail: the latest signed CLI or MCP
+write of the key, read only when the whole chain verifies. A fact never written
+through the CLI or MCP on this machine, including one that arrived only by
+sync, shows no date.
 
 Discovery is the largest thing this server puts into a context — it lists
 every key the agent may see, on every conversation that browses the vault —

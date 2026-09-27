@@ -4,9 +4,15 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { buildSchema, readSchema, searchSchema, filterNotesByDate, noteCreatedAt } from "./schema.js";
-import { generateAutoKey, loadVaultFile, storeNote } from "./store.js";
+import {
+  categorySpellingMessage,
+  generateAutoKey,
+  loadVaultFile,
+  otherCategorySpellings,
+  storeNote,
+} from "./store.js";
 import type { KVEntry } from "./format.js";
-import { appendAudit, clearAuditKeyCache } from "./audit.js";
+import { appendAudit, clearAuditKeyCache, lastWrites } from "./audit.js";
 import {
   consumeApproval,
   decide,
@@ -89,10 +95,55 @@ export function resolveForAgent(
   passphrase: string,
   context: ResolveContext = resolveContext(vaultDir, passphrase),
 ): ResolveOutcome {
+  try {
+    return resolveGoverned(vaultDir, agent, file, key, passphrase, context);
+  } catch (error) {
+    // A resolution that fails is recorded too, so no request an agent makes
+    // goes unseen. The line is value-free like every other: the error message
+    // may carry a path or a stored category name, so it stays out of the log.
+    try {
+      appendAudit(vaultDir, { actor: "mcp-agent", file, key, agent, outcome: "error" }, passphrase);
+    } catch {
+      // The audit append may be what failed; the original error is the one to report.
+    }
+    throw error;
+  }
+}
+
+/**
+ * A wrong-case category is denied by a grant scoped to the stored spelling,
+ * since scope matching is exact. Saying "widen the grant" would send the owner
+ * to change a policy over a typo, so name the stored spelling instead — but
+ * only one the grant would have admitted for this very key. The agent can
+ * already discover that category, so the hint tells it nothing new.
+ */
+function spellingHint(
+  vaultDir: string,
+  policy: GrantFile | null,
+  agent: string,
+  file: string,
+  key: string,
+): string | undefined {
+  const covered = otherCategorySpellings(vaultDir, file).filter(
+    (stored) =>
+      decide(policy, { agent, action: "discover", file: stored, key }).allowed &&
+      decide(policy, { agent, action: "resolve", file: stored, key }).allowed,
+  );
+  return covered.length ? categorySpellingMessage(file, covered) : undefined;
+}
+
+function resolveGoverned(
+  vaultDir: string,
+  agent: string,
+  file: string,
+  key: string,
+  passphrase: string,
+  context: ResolveContext,
+): ResolveOutcome {
   const decision = decide(context.policy(), { agent, action: "resolve", file, key });
   if (!decision.allowed) {
     appendAudit(vaultDir, { actor: "mcp-agent", file, key, agent, outcome: "denied" }, passphrase);
-    return { kind: "denied", message: decision.reason };
+    return { kind: "denied", message: spellingHint(vaultDir, context.policy(), agent, file, key) ?? decision.reason };
   }
   if (decision.requiresConfirmation && !consumeApproval(vaultDir, { agent, file, key }, passphrase)) {
     const request = requestConfirmation(vaultDir, { agent, file, key }, passphrase);
@@ -205,6 +256,41 @@ export function resolveManyForAgent(
   });
 }
 
+export interface DiscoveryEntry {
+  file: string;
+  key: string;
+  desc: string;
+  /** When a journal note was written, from its key. */
+  createdAt?: string;
+  /** The day a fact was last written, from the audit trail. */
+  updatedAt?: string;
+}
+
+/**
+ * A journal note keeps the full timestamp its key encodes. A fact gets only
+ * the day of its last recorded write: the line is repeated for every key on
+ * every browse, and the day is what tells an agent a fact may be stale.
+ */
+export function discoveryDates(
+  file: string,
+  key: string,
+  written: ReadonlyMap<string, string>,
+): Pick<DiscoveryEntry, "createdAt" | "updatedAt"> {
+  const createdAt = noteCreatedAt(key);
+  if (createdAt) return { createdAt };
+  const updatedAt = written.get(`${file}\0${key}`)?.slice(0, 10);
+  return updatedAt ? { updatedAt } : {};
+}
+
+/** Dates are a hint: an unreadable audit trail costs them, never the listing. */
+function recordedWrites(vaultDir: string, passphrase: string): Map<string, string> {
+  try {
+    return lastWrites(vaultDir, passphrase);
+  } catch {
+    return new Map();
+  }
+}
+
 /**
  * Renders a discovery result, one entry per line.
  *
@@ -222,14 +308,15 @@ export function resolveManyForAgent(
  * mismatched with a heading further up. That costs about 6% against
  * grouping by file, and buys a format an agent cannot misread.
  */
-export function discoveryLines(
-  entries: Array<{ file: string; key: string; desc: string; createdAt?: string }>,
-  empty: string,
-): string {
+export function discoveryLines(entries: DiscoveryEntry[], empty: string): string {
   if (!entries.length) return empty;
   return entries
     .map((entry) => {
-      const when = entry.createdAt ? ` — ${entry.createdAt}` : "";
+      const when = entry.createdAt
+        ? ` — ${entry.createdAt}`
+        : entry.updatedAt
+          ? ` — updated ${entry.updatedAt}`
+          : "";
       const desc = entry.desc ? ` — ${entry.desc}` : "";
       return `${entry.file}/${entry.key}${when}${desc}`;
     })
@@ -340,7 +427,7 @@ export async function startMcpServer(vaultDir: string, configuredAgent: string):
 
   server.tool(
     "list_keys",
-    "List every available key name and its non-sensitive description across the vault, one 'file/KEY — description' per line, with the date a journal note was written between the two. Contains NO values. Always call this before resolve_key or resolve_keys.",
+    "List every available key name and its non-sensitive description across the vault, one 'file/KEY — description' per line. Between the two: the date a journal note was written, or 'updated <day>' for a fact whose last write is in the audit trail. Contains NO values. Always call this before resolve_key or resolve_keys.",
     {},
     async () => {
       const schema = readSchema(vaultDir, passphrase);
@@ -348,10 +435,11 @@ export async function startMcpServer(vaultDir: string, configuredAgent: string):
         return text("No schema found. Ask the user to run 'vbrain index'.");
       }
       const grants = policy();
-      const visible: Array<{ file: string; key: string; desc: string; createdAt?: string }> = [];
+      const written = recordedWrites(vaultDir, passphrase);
+      const visible: DiscoveryEntry[] = [];
       for (const [file, entries] of Object.entries(schema.files)) {
         for (const entry of filterDiscoverable(grants, agent, file, entries)) {
-          visible.push({ file, key: entry.key, desc: entry.desc, createdAt: noteCreatedAt(entry.key) });
+          visible.push({ file, key: entry.key, desc: entry.desc, ...discoveryDates(file, entry.key, written) });
         }
       }
       if (grants && !visible.length) {
@@ -366,7 +454,7 @@ export async function startMcpServer(vaultDir: string, configuredAgent: string):
 
   server.tool(
     "find_key",
-    "Fuzzy-search key names and descriptions for a query, returning one 'file/KEY — description' per line, with the date a journal note was written between the two. Contains NO values. Use this to locate the right key before resolve_key.",
+    "Fuzzy-search key names and descriptions for a query, returning one 'file/KEY — description' per line. Between the two: the date a journal note was written, or 'updated <day>' for a fact whose last write is in the audit trail. Contains NO values. Use this to locate the right key before resolve_key.",
     { query: z.string().describe("what you're looking for, e.g. 'next doctor appointment'") },
     async ({ query }) => {
       const schema = readSchema(vaultDir, passphrase);
@@ -374,9 +462,10 @@ export async function startMcpServer(vaultDir: string, configuredAgent: string):
         return text("No schema found. Ask the user to run 'vbrain index'.");
       }
       const grants = policy();
+      const written = recordedWrites(vaultDir, passphrase);
       const hits = searchSchema(schema, query)
         .filter((hit) => decide(grants, { agent, action: "discover", file: hit.file, key: hit.key }).allowed)
-        .map((hit) => ({ ...hit, createdAt: noteCreatedAt(hit.key) }));
+        .map((hit) => ({ ...hit, ...discoveryDates(hit.file, hit.key, written) }));
       return text(discoveryLines(hits, `Nothing in this vault matches "${query}".`));
     },
   );

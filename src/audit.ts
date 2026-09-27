@@ -19,9 +19,9 @@ export interface AuditEntry {
   /**
    * A denial and a held-back resolution are recorded, not only successes. So
    * is a permitted lookup of a key that does not exist, so an agent guessing
-   * names leaves a trail.
+   * names leaves a trail, and a resolution that failed with an error.
    */
-  outcome?: "allowed" | "denied" | "pending" | "missing";
+  outcome?: "allowed" | "denied" | "pending" | "missing" | "error";
   prevHash?: string;
   hash?: string;
 }
@@ -242,6 +242,31 @@ export function readAudit(vaultDir: string): AuditEntry[] {
     .split("\n")
     .filter(Boolean)
     .map((line) => JSON.parse(line) as AuditEntry);
+}
+
+const WRITE_ACTORS: ReadonlySet<AuditEntry["actor"]> = new Set(["cli-direct-write", "mcp-agent-write"]);
+
+/**
+ * When each key-value entry was last written, keyed `file\0key`, as this
+ * vault's audit trail recorded it.
+ *
+ * Neither the .kv format nor the catalog stores a timestamp, so a fact that is
+ * overwritten in place gives an agent no sign of how old it is. Every CLI and
+ * MCP write already leaves a signed audit line, so the date is read from there
+ * rather than added to the encrypted format. Only signed lines of a chain that
+ * verifies count: the log is plaintext on disk, and an edited one must not be
+ * able to plant a date. A write that reached this vault through sync has no
+ * local line, so its key shows the last write made here, or none.
+ */
+export function lastWrites(vaultDir: string, passphrase: string): Map<string, string> {
+  const written = new Map<string, string>();
+  if (!verifyAudit(vaultDir, passphrase).valid) return written;
+  for (const entry of readAudit(vaultDir)) {
+    if (!entry.hash || !WRITE_ACTORS.has(entry.actor)) continue;
+    if (entry.outcome !== undefined && entry.outcome !== "allowed") continue;
+    written.set(`${entry.file}\0${entry.key}`, entry.timestamp);
+  }
+  return written;
 }
 
 export function verifyAudit(vaultDir: string, passphrase: string): AuditVerification {

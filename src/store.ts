@@ -54,17 +54,25 @@ function warmKeyring(vaultDir: string, passphrase: string): void {
  */
 export function vaultFilePath(vaultDir: string, name: string): string {
   const base = normalizeVaultName(name);
-  const stored = listVaultFiles(vaultDir);
-  if (!stored.includes(base)) {
-    const folded = base.toLowerCase();
-    const spellings = stored.filter((candidate) => candidate.toLowerCase() === folded);
-    if (spellings.length) {
-      throw new Error(
-        `No category "${base}" in this vault; category names are case-sensitive. Stored as: ${spellings.map((s) => `"${s}"`).join(", ")}.`,
-      );
-    }
-  }
+  const spellings = otherCategorySpellings(vaultDir, base);
+  if (spellings.length) throw new Error(categorySpellingMessage(base, spellings));
   return resolveInside(vaultDir, `${base}.kv.enc`);
+}
+
+/**
+ * The stored categories that differ from `name` only in case, or none when
+ * `name` itself is stored. Reads the directory listing only, so it is safe to
+ * call with a name that has not been validated.
+ */
+export function otherCategorySpellings(vaultDir: string, name: string): string[] {
+  const stored = listVaultFiles(vaultDir);
+  if (stored.includes(name)) return [];
+  const folded = name.toLowerCase();
+  return stored.filter((candidate) => candidate.toLowerCase() === folded);
+}
+
+export function categorySpellingMessage(name: string, spellings: string[]): string {
+  return `No category "${name}" in this vault; category names are case-sensitive. Stored as: ${spellings.map((s) => `"${s}"`).join(", ")}.`;
 }
 
 export function listVaultFiles(vaultDir: string): string[] {

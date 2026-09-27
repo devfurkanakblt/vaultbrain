@@ -5,8 +5,29 @@ Versioning once the encrypted storage format reaches 1.0.
 
 ## Unreleased
 
-Nothing yet. The npm workflow refuses a version that is already on the
-registry, so the next publish starts by raising the version in `package.json`.
+The npm workflow refuses a version that is already on the registry, so the
+next publish starts by raising the version in `package.json`.
+
+These close the three items left open by a live review of 0.3.0 against a
+28-key project vault.
+
+- Fixed: a category named in the wrong case under a grant scoped to its stored
+  spelling (`PROJECT` for `project`) was denied with "Ask the vault owner to
+  widen or renew it", which sends the owner to change a policy over a typo.
+  The denial now names the stored spelling, as a `*` scope already did. It
+  names only a spelling the grant would have let the agent discover and resolve
+  for that key, so it reveals no category the agent could not already see.
+- Added: a resolution that fails with an error is audited with the outcome
+  `error`, in `resolve_key` and in each entry of `resolve_keys`. The line is
+  value-free and carries no error text. Until now only a permitted lookup of a
+  missing key was recorded, so a request that threw left no trace.
+- Added: `list_keys` and `find_key` show the day a fact was last written
+  (`work/PLAN — updated 2026-09-26 — ...`). The date is read from the audit
+  trail, not added to the encrypted format: the latest signed
+  `cli-direct-write` or `mcp-agent-write` line of that key, used only when the
+  whole chain verifies. A refused write does not count. A fact that reached
+  this vault only by sync shows no date. Journal notes keep the full timestamp
+  their key encodes.
 
 ## 0.3.0 — prepared for npm, not yet published
 
