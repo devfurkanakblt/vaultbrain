@@ -264,12 +264,18 @@ round trips without placing the passphrase in a child process argument vector.
 
 ## Phase 12 — Actually shipping
 
-The release workflow builds Tauri-signed updater packages, checksums them,
-produces an SPDX SBOM and attests build provenance, then prepares an immutable
-draft release for a maintainer to publish. The native updater and its UI are
-implemented, but Phase 12 acceptance still depends on the real two-version
+Two artifacts ship from this repository, on two independent paths. The npm
+package is out: `vault-brain@0.2.0` has been published, so the CLI, the library
+and the MCP server can be installed by anyone. The desktop application has not,
+and its path still depends on a production signing key and the real two-version
 installation drill on every supported platform.
 
+- [x] Publish the npm package from CI, with provenance. `npm install --global
+      vault-brain` installs the documented entry point; the first publish was
+      `0.2.0` from `9fdef37` on 2026-09-22, with a SLSA v1 attestation on the
+      registry tying the tarball to this repository, workflow and commit. The
+      workflow is manual and refuses a republished version, because an npm
+      version is permanent.
 - [x] Build and stage signed installers with their checksums, SBOM and provenance
       in an immutable draft-release workflow.
 - [x] An update path, with a recorded decision that it is never automatic.
@@ -279,7 +285,13 @@ installation drill on every supported platform.
       native package-transition evidence into CI.
 - [ ] Provision and back up the production signing key, execute the draft workflow,
       and record real signed vN-to-vN+1 updater installation on Windows x64, macOS
-      ARM64 and Linux x64 before the maintainer publishes the draft.
+      ARM64 and Linux x64 before the maintainer publishes the draft. This is the
+      desktop path only; the npm package does not wait on it.
+- [ ] Decide whether the desktop packages carry an OS publisher signature.
+      Updater signatures authenticate bytes for the in-app updater; SmartScreen
+      and Gatekeeper answer to Authenticode and an Apple Developer ID, which
+      are paid identities this project does not hold. Without them a signed
+      release still shows a trust prompt, and saying so is part of shipping it.
 
 ## Phase 13 — One implementation of each thing
 
@@ -643,6 +655,32 @@ bulk entry does that for the case that was actually slow.
 - [ ] In-process session for the CLI, if and when interactive single-key entry
       is shown to matter more than the added surface
 
+## Phase 19 — the project's public surface
+
+Found by auditing the repository itself on 2026-09-22, the day the npm package
+went out. None of it is code, and all of it is now reachable by strangers:
+publishing the package is what turned these from cosmetics into gaps.
+
+- [ ] Enable private vulnerability reporting. `SECURITY.md` tells a reporter to
+      use GitHub's private security-advisory flow for this repository, and that
+      flow is switched off, so the one channel the policy names does not exist.
+      A reporter who follows the policy either opens a public issue with a
+      working exploit or gives up.
+- [ ] Decide on Dependabot security updates, which are off while version
+      updates are on. The version updates are what produced the crate and npm
+      bumps this project has been triaging; the security ones are the alerts
+      that matter under a deadline.
+- [ ] Add `CODE_OF_CONDUCT.md`, an issue template and a pull-request template.
+      `CONTRIBUTING.md` exists and is detailed; the three files that shape what
+      arrives in the tracker do not.
+- [ ] Fill in the repository description, homepage and topics, which are empty,
+      and give the desktop application at least one screenshot. A 56 KB README
+      with no image is the whole first impression of a workspace whose point is
+      what it looks like to use.
+- [ ] Decide whether checks other than `performance-budgets` are required on
+      `main`. That one is required because Phase 17 asked for it; the test,
+      Rust and CodeQL jobs are not, so a red suite can still merge.
+
 ## Which open phases still need code
 
 A classification of every unchecked item above, so a reader can tell implementation
@@ -673,6 +711,7 @@ new obligation: nothing here adds scope to a phase or moves an item between owne
 **Does not need code.**
 
 - **Phase 6** external security audit and **14.5** — external gates with named owners.
+- **19** — repository settings, three short files, and one screenshot.
 - **Phase 12** production signing key, its backup, and the real signed vN→vN+1
   installation on each platform — operational evidence.
 - **14.0** — reconciling stale roadmap, README, architecture and security prose.

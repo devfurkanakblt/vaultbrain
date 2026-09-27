@@ -1,11 +1,44 @@
 # Production release acceptance
 
-This is the maintainer checklist for a production-signed draft. CI contract
-tests and synthetic package transitions are supporting evidence only. A release
-is not accepted until the three real signed updater transitions below have
-artifacts and reviewer sign-off.
+This is the maintainer checklist for a production-signed **desktop** draft. CI
+contract tests and synthetic package transitions are supporting evidence only.
+A release is not accepted until the three real signed updater transitions below
+have artifacts and reviewer sign-off.
 
-## Signing and build inputs
+The npm package is a separate artifact on a separate path and is not gated by
+anything below; it needs no signing key, ships no desktop application, and is
+already out. Its record is the next section.
+
+## npm — accepted and published
+
+| Item | Value |
+| --- | --- |
+| Package | `vault-brain@0.2.0` |
+| Published | 2026-09-22, by the manual `Publish to npm` workflow |
+| Commit | `9fdef37` |
+| Workflow run | https://github.com/devfurkanakblt/vaultbrain/actions/runs/35757515587 |
+| Contents | 65 files, 969,529 bytes unpacked |
+| Integrity | `sha512-YbVG8LpS0kntRlngEsQUZtbBu69vqiS+G3ao0CrDKY0SZna37n5mJCdGeB7XiVmoM4xSiPlICGBTsNNQQezX0w==` |
+| Provenance | SLSA v1 attestation on the registry, tying the tarball to this repository, workflow and commit |
+| Post-publish check | Installed from the registry into an empty prefix on Windows x64; `vbrain --version`, `init`, `add` and `get` ran from the installed command |
+
+What that does and does not say: the tarball is the one this repository built,
+from a commit anyone can read, and the registry can prove it. It says nothing
+about the independent security audit, which is still open — `SECURITY.md` and
+`README.md` continue to state that this software is not presented as suitable
+for real medical, financial or identity data until that review is complete.
+
+An npm version is permanent. The workflow refuses a version already on the
+registry, so the next publish begins by raising the version in `package.json`.
+
+## Desktop — still open
+
+Everything below this line is the desktop path: the signing material, the draft
+contents, the three real updater transitions and the publication decision. None
+of it has been run, and the table at the end records that rather than implying
+otherwise.
+
+### Signing and build inputs
 
 Use the Tauri updater signing material only through the protected release
 environment. The repository workflow reads `TAURI_SIGNING_PRIVATE_KEY` and
@@ -35,7 +68,7 @@ publisher signatures and notarization determine platform trust prompts such as
 SmartScreen or Gatekeeper. An updater-signed package can still show an OS trust
 warning when no Authenticode or Apple publisher identity is configured.
 
-## Draft contents
+### Draft contents
 
 Before publication, verify the draft has exactly the required platform packages,
 updater signatures, `latest.json`, `checksums.sha256`, `sbom.spdx.json`, and
@@ -47,7 +80,7 @@ the first real updater drill cannot be backfilled from the unsigned local
 `0.2.0` packages recorded in `PHASE-14-VERIFICATION.md`; obtain and retain a
 previous production-signed vN package before running vN to vN+1.
 
-## Real three-platform updater acceptance
+### Real three-platform updater acceptance
 
 For each row, install the old signed vN package on an ephemeral real device,
 point it at the fixed feed, and use the native Updates flow to approve check,
@@ -68,7 +101,7 @@ signature must leave the vault usable. The script
 `scripts/release/native-update-acceptance.mjs` checks these invariants
 synthetically; it does not install a package or prove a real signed update.
 
-## Publication decision
+### Publication decision
 
 | Gate | Result | Reviewer / evidence |
 | --- | --- | --- |
