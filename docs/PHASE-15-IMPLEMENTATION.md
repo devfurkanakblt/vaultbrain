@@ -1,5 +1,24 @@
 # Phase 15 implementation and acceptance ledger
 
+## Local memory troubleshooting (2026-09-27)
+
+The CLI/native bridge needs access to the current Windows user's pairing store
+and named pipe. A restricted assistant shell can return `unavailable` while the
+same read-only status command succeeds through the host's approved execution
+mechanism. Pairing again does not fix that shell restriction.
+
+`memory_search` and `memory_read` cover memory-tagged notes, not the entire vault.
+An empty search is a successful result. `memory_remember` submits a candidate for
+owner review; the desktop generates its ID and timestamp. The owner must approve
+it before it becomes a searchable note. Reads include a UTF-8-safe body excerpt
+up to 8,000 bytes and a `truncated` flag. Bootstrap selects from the ten newest
+visible memory notes, shortening bodies to fit its 6,000-byte JSON budget.
+An entry is omitted only if its metadata alone cannot fit the remaining budget.
+
+Local verification: candidate submission, approval, read, bootstrap and forget
+are covered using temporary encrypted vaults. This does not establish worker,
+automatic capture, or full-vault access support.
+
 Base: `9ed71bf04ee1f2224df96c2a7102779f30724cbb`, branch
 `phase-14-closure`. Personal memory belongs to a later release, not the initial
 1.0 acceptance. The user executes tests; this change has not been test-verified.

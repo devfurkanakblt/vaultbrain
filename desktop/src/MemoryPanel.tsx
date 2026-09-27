@@ -26,7 +26,7 @@ export function MemoryPanel({ status, review, onRefresh, onPairBegin, onPairComp
   const [scope, setScope] = useState<MemoryScope["kind"]>("session");
   const [scopeId, setScopeId] = useState("");
   const [busy, setBusy] = useState<string>();
-  const unavailable = !status || status.state === "disabled" || status.state === "unsupported" || status.state === "locked";
+  const unavailable = !status || status.state === "unsupported" || status.state === "locked";
 
   async function run(label: string, operation: () => Promise<void>) {
     setBusy(label);

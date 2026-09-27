@@ -99,6 +99,16 @@ pub(crate) struct MemoryNoteDto {
     pub(crate) updated_at: String,
 }
 
+#[cfg(windows)]
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MemoryReadDto {
+    #[serde(flatten)]
+    note: MemoryNoteDto,
+    body: String,
+    truncated: bool,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MemoryScopeDto {
@@ -1074,7 +1084,7 @@ fn public_search(
     Ok(notes)
 }
 #[cfg(windows)]
-fn public_read(session: &VaultSession, params: Option<&Value>) -> Result<MemoryNoteDto, String> {
+fn public_read(session: &VaultSession, params: Option<&Value>) -> Result<MemoryReadDto, String> {
     let id = params
         .and_then(|v| v.get("id"))
         .and_then(Value::as_str)
@@ -1090,21 +1100,59 @@ fn public_read(session: &VaultSession, params: Option<&Value>) -> Result<MemoryN
     if !note.tags.iter().any(|t| t == "memory") {
         return Err("not found".into());
     }
-    Ok(memory_note(&note, &c))
+    let mut end = note.body.len().min(8_000);
+    while !note.body.is_char_boundary(end) {
+        end -= 1;
+    }
+    Ok(MemoryReadDto {
+        note: memory_note(&note, &c),
+        body: note.body[..end].to_string(),
+        truncated: end < note.body.len(),
+    })
 }
 #[cfg(windows)]
 fn public_remember(session: &mut VaultSession, params: Option<&Value>) -> Result<(), String> {
-    let mut candidate: MemoryCandidateDto = serde_json::from_value(
-        params
-            .and_then(|v| v.get("candidate"))
-            .cloned()
-            .ok_or("invalid request")?,
-    )
-    .map_err(|_| "invalid request")?;
-    candidate.id.clear();
-    candidate.created_at.clear();
+    let mut input = params
+        .and_then(|v| v.get("candidate"))
+        .and_then(Value::as_object)
+        .cloned()
+        .ok_or("invalid request")?;
+    // These fields belong to the owner-controlled queue, not the MCP caller.
+    input.insert("id".into(), Value::String(String::new()));
+    input.insert("createdAt".into(), Value::String(String::new()));
+    let candidate: MemoryCandidateDto =
+        serde_json::from_value(Value::Object(input)).map_err(|_| "invalid request")?;
     enqueue_review(session, candidate)
 }
+#[cfg(windows)]
+fn public_bootstrap(session: &VaultSession) -> Result<Value, String> {
+    let matches = public_search(session, Some(&serde_json::json!({"query":"", "limit":10})))?;
+    let mut notes = Vec::new();
+    for note in matches {
+        let read = public_read(session, Some(&serde_json::json!({"id":note.id})))?;
+        notes.push(read);
+        // Keep startup context bounded, including JSON escaping and metadata.
+        while serde_json::to_vec(&serde_json::json!({"notes": &notes}))
+            .map_err(|_| "memory unavailable")?
+            .len()
+            > 6_000
+        {
+            let last = notes.last_mut().ok_or("memory unavailable")?;
+            if last.body.is_empty() {
+                notes.pop();
+                break;
+            }
+            let mut end = last.body.len() / 2;
+            while !last.body.is_char_boundary(end) {
+                end -= 1;
+            }
+            last.body.truncate(end);
+            last.truncated = true;
+        }
+    }
+    Ok(serde_json::json!({"notes": notes}))
+}
+
 #[cfg(windows)]
 fn public_forget(session: &mut VaultSession, params: Option<&Value>) -> Result<(), String> {
     let id = params
@@ -1246,7 +1294,7 @@ fn broker_response(app: &AppHandle, bytes: &[u8]) -> Value {
     let result = match method {
         "memory_status" => get_status(session, generation)
             .and_then(|value| serde_json::to_value(value).map_err(|_| "memory unavailable".into())),
-        "memory_bootstrap" => Ok(serde_json::json!({"notes": []})),
+        "memory_bootstrap" => public_bootstrap(session),
         "memory_search" => public_search(session, request.get("params"))
             .and_then(|value| serde_json::to_value(value).map_err(|_| "memory unavailable".into())),
         "memory_read" => public_read(session, request.get("params"))
@@ -1348,12 +1396,24 @@ fn broker_once(app: &AppHandle) {
         if wait_pipe_connection(pipe, Instant::now() + PIPE_DEADLINE) {
             if let Some(request) = read_pipe_message(pipe, Instant::now() + PIPE_DEADLINE) {
                 let response = broker_response(app, &request).to_string();
-                let _ =
-                    write_pipe_message(pipe, response.as_bytes(), Instant::now() + PIPE_DEADLINE);
+                deliver_pipe_response(pipe, response.as_bytes(), Instant::now() + PIPE_DEADLINE);
             }
             DisconnectNamedPipe(pipe);
         }
         CloseHandle(pipe);
+    }
+}
+
+#[cfg(windows)]
+fn deliver_pipe_response(
+    pipe: windows_sys::Win32::Foundation::HANDLE,
+    response: &[u8],
+    deadline: Instant,
+) {
+    if write_pipe_message(pipe, response, deadline) {
+        // DisconnectNamedPipe discards unread output. Wait for client closure,
+        // bounded by the same deadline so a stalled client cannot block forever.
+        let _ = read_pipe_message(pipe, deadline);
     }
 }
 
@@ -1435,7 +1495,8 @@ fn read_pipe_message(
                 return None;
             }
             total += read as usize;
-            if left_in_message == 0 {
+            // PeekNamedPipe reports bytes remaining before ReadFile, not after it.
+            if read >= left_in_message {
                 break;
             }
             if Instant::now() >= deadline {
@@ -1616,6 +1677,135 @@ fn pipe_request(request: Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn mcp_candidate_without_server_fields_enters_owner_review() {
+        let path = std::env::temp_dir().join(format!("vaultbrain-memory-test-{}", Uuid::new_v4()));
+        let mut session = open_session(&path.to_string_lossy(), "test passphrase").unwrap();
+        let control = MemoryControl {
+            paired: true,
+            fingerprint: fingerprint(&session).unwrap(),
+            ..Default::default()
+        };
+        save(&mut session, &control).unwrap();
+        let params = serde_json::json!({"candidate": {
+            "kind":"fact", "title":"Tea", "body":"Prefers tea",
+            "evidence":[{"messageId":"test-message","quote":"I prefer tea"}],
+            "sourceKind":"user-stated", "sensitive":false, "links":[]
+        }});
+        let result = public_remember(&mut session, Some(&params));
+        let review = list_review(&session).unwrap();
+        drop(session);
+        fs::remove_dir_all(&path).unwrap();
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(review.len(), 1);
+        assert!(Uuid::parse_str(&review[0].id).is_ok());
+        assert!(!review[0].created_at.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn approved_memory_read_returns_body_and_forget_hides_it() {
+        let path =
+            std::env::temp_dir().join(format!("vaultbrain-memory-read-test-{}", Uuid::new_v4()));
+        let mut session = open_session(&path.to_string_lossy(), "test passphrase").unwrap();
+        let control = MemoryControl {
+            paired: true,
+            fingerprint: fingerprint(&session).unwrap(),
+            ..Default::default()
+        };
+        save(&mut session, &control).unwrap();
+        let candidate: MemoryCandidateDto = serde_json::from_value(serde_json::json!({
+            "id":"", "createdAt":"", "kind":"fact", "title":"Tea", "body":"Prefers tea 🍵 ".repeat(800),
+            "evidence":[{"messageId":"test-message","quote":"I prefer tea"}],
+            "sourceKind":"user-stated", "sensitive":false, "links":[]
+        }))
+        .unwrap();
+        enqueue_review(&mut session, candidate).unwrap();
+        let id = list_review(&session).unwrap()[0].id.clone();
+        let note = approve(&mut session, &id).unwrap();
+        let params = serde_json::json!({"id":note.id});
+        let result = serde_json::to_value(public_read(&session, Some(&params)).unwrap()).unwrap();
+        let bootstrap = public_bootstrap(&session).unwrap();
+        forget(&mut session, &note.id).unwrap();
+        let forgotten = public_read(&session, Some(&params));
+        let forgotten_bootstrap = public_bootstrap(&session).unwrap();
+        drop(session);
+        fs::remove_dir_all(&path).unwrap();
+        assert!(forgotten.is_err());
+        assert!(result["body"]
+            .as_str()
+            .is_some_and(|body| body.contains("Prefers tea")));
+        assert_eq!(bootstrap["notes"][0]["id"], note.id);
+        assert_eq!(bootstrap["notes"][0]["truncated"], true);
+        assert!(serde_json::to_vec(&bootstrap).unwrap().len() <= 6_000);
+        assert_eq!(forgotten_bootstrap["notes"], serde_json::json!([]));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pipe_reads_complete_message_without_waiting_for_more() {
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE},
+            Storage::FileSystem::{CreateFileW, WriteFile, OPEN_EXISTING, PIPE_ACCESS_DUPLEX},
+            System::Pipes::{
+                CreateNamedPipeW, PIPE_NOWAIT, PIPE_READMODE_MESSAGE, PIPE_TYPE_MESSAGE,
+            },
+        };
+        unsafe {
+            let name = wide(&format!(r"\\.\pipe\vaultbrain-test-{}", Uuid::new_v4()));
+            let server = CreateNamedPipeW(
+                name.as_ptr(),
+                PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_NOWAIT,
+                1,
+                4096,
+                4096,
+                0,
+                std::ptr::null(),
+            );
+            assert_ne!(server, INVALID_HANDLE_VALUE);
+            let client = CreateFileW(
+                name.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                0,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                0,
+                std::ptr::null_mut(),
+            );
+            assert_ne!(client, INVALID_HANDLE_VALUE);
+            assert!(wait_pipe_connection(server, Instant::now() + PIPE_DEADLINE));
+            let payload = b"{\"version\":1}";
+            let mut sent = 0;
+            assert_ne!(
+                WriteFile(
+                    client,
+                    payload.as_ptr(),
+                    payload.len() as u32,
+                    &mut sent,
+                    std::ptr::null_mut()
+                ),
+                0
+            );
+            let result = read_pipe_message(server, Instant::now() + Duration::from_millis(100));
+            let server_address = server as usize;
+            let responder = thread::spawn(move || {
+                let server = server_address as windows_sys::Win32::Foundation::HANDLE;
+                deliver_pipe_response(server, b"response", Instant::now() + PIPE_DEADLINE);
+                windows_sys::Win32::System::Pipes::DisconnectNamedPipe(server);
+                CloseHandle(server);
+            });
+            // A client need not consume the response in the server's timeslice.
+            thread::sleep(Duration::from_millis(50));
+            let response = read_pipe_message(client, Instant::now() + PIPE_DEADLINE);
+            CloseHandle(client);
+            responder.join().unwrap();
+            assert_eq!(result.as_deref(), Some(payload.as_slice()));
+            assert_eq!(response.as_deref(), Some(b"response".as_slice()));
+        }
+    }
     use std::io::Cursor;
     #[test]
     fn client_rejects_unknown_methods_without_echoing_input() {
