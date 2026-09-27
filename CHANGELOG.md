@@ -39,6 +39,24 @@ through the same path as `resolve_key`, which is unchanged.
   enforces. No command reached this with user input, since references resolve
   through the index first.
 
+## 0.2.0 — published to npm on 2026-09-22
+
+The first published artifact of this project: `vault-brain` on npm, the CLI,
+the library and the MCP server. Installed with
+`npm install --global vault-brain`, which is what `README.md` had been telling
+readers to run since the project was named.
+
+Published from `9fdef37` by the `Publish to npm` workflow, with provenance: the
+registry carries a SLSA v1 attestation tying the tarball to this repository,
+that workflow and that commit. 65 files, 969,529 bytes unpacked, integrity
+`sha512-YbVG8LpS0kntRlngEsQUZtbBu69vqiS+G3ao0CrDKY0SZna37n5mJCdGeB7XiVmoM4xSiPlICGBTsNNQQezX0w==`.
+
+The desktop application is **not** in this package and is not released. Its
+packages carry the same version number and have never been published, because
+production signing and the three-platform updater acceptance in
+[`RELEASE-ACCEPTANCE.md`](docs/RELEASE-ACCEPTANCE.md) are still open.
+
+
 ### Cross-process locking
 
 - Fixed: a fan-out of writers could fail on a lock that was working. The wait

@@ -160,8 +160,15 @@ short, project-specific `vbrain` command:
 
 ```bash
 npm install --global vault-brain
+vbrain --version
 vbrain --help
 ```
+
+The package is published from CI with provenance: the registry carries a signed
+statement tying the tarball to this repository, the publishing workflow and the
+commit it was built from. `npm view vault-brain dist` shows the attestation.
+The desktop application is not in this package and is not released yet — see
+[`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 For local development from this repository:
 
