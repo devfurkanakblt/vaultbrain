@@ -5,8 +5,39 @@ Versioning once the encrypted storage format reaches 1.0.
 
 ## Unreleased
 
-Nothing yet. The npm workflow refuses a version that is already on the
-registry, so the next publish starts by raising the version in `package.json`.
+### Several keys in one MCP call
+
+`resolve_keys` resolves up to 20 explicitly named keys in one tool call. An
+agent that read eleven notes out of a twenty-eight-key vault used to spend
+eleven `resolve_key` calls on it; the per-call cost sat almost entirely on the
+agent's side, since the server already keeps the unwrapped keyset for the life
+of the process. Each key is still decided, held, masked and audited on its own
+through the same path as `resolve_key`, which is unchanged.
+
+### Category names in the wrong case
+
+- Fixed: on Windows and macOS, naming a category in a different case
+  (`get HEALTH BLOOD` for a stored `health`) opened the stored file and then
+  failed with `Unsupported state or unable to authenticate data`, which reads
+  as a damaged vault. The name is the file's authentication identity, so it has
+  to match exactly. Reads and writes now refuse with
+  `No category "HEALTH" in this vault; ... Stored as: "health".` on every
+  platform, which also stops a case-sensitive filesystem from starting a second
+  category that would collide once the vault reached Windows or macOS. Over
+  MCP a grant scoped to `health` already denies `HEALTH` before the store is
+  reached, since scope matching is exact; a `*` scope now gets this message
+  instead of the authentication error. (#96)
+
+### Desktop object IDs
+
+- Hardened: the desktop core accepted any spelling `Uuid::parse_str` takes for
+  a note, canvas or plugin ID — uppercase, braced, `urn:uuid:`, unhyphenated.
+  The ID is both the object's filename and its AEAD identity, so a second
+  spelling opened the same file on Windows or macOS and failed authentication,
+  or named a different file elsewhere. It now takes only the lowercase,
+  hyphenated form the format inventory defines and the TypeScript core already
+  enforces. No command reached this with user input, since references resolve
+  through the index first.
 
 ## 0.2.0 — published to npm on 2026-09-22
 

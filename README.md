@@ -812,7 +812,7 @@ kontrolüm ne zaman?" and it calls `find_key` → `resolve_key`. The CLI's own
 `add`/`note`/`get` commands still exist, but they're there for scripting and
 testing — not the intended everyday interface.
 
-The server exposes five tools:
+The server exposes six tools:
 
 | Tool                  | Touches values?           | Gets audited? |
 | --------------------- | ------------------------- | ------------- |
@@ -821,11 +821,21 @@ The server exposes five tools:
 | `find_notes_in_range` | No — timestamps/tags only | No            |
 | `store_note`          | Yes — that's the point    | Yes           |
 | `resolve_key`         | Yes                       | Yes           |
+| `resolve_keys`        | Yes — up to 20 named keys | Yes, one line per key |
 
 Under a grant policy the three value-free tools return only the keys that
 agent may discover, `store_note` needs a `store` action, and `resolve_key`
 additionally records who asked, under which grant, how much came back, and
 whether the answer was allowed, denied or held for approval.
+
+`resolve_keys` is `resolve_key` for several keys at once: the agent names each
+`{file, key}` pair, up to twenty, and gets them back in one answer instead of
+one tool call each. It adds no reach. Every key goes through the same grant
+decision, approval hold and mask as it would alone, and the audit chain records
+each key, not one line for the batch. A list that is empty, too long, or names a
+key twice is refused before anything is decrypted. Each entry in the answer
+opens with a marker drawn fresh for that response, so a stored value cannot pass
+itself off as a different key's entry.
 
 The three value-free tools answer with one entry per line, each naming its own
 file so the next `resolve_key` call cannot take a key from the wrong one:

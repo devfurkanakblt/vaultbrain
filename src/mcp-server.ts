@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -87,6 +88,63 @@ export function resolveForAgent(
 }
 
 /**
+ * The most keys one `resolve_keys` call may name.
+ *
+ * The batch saves the agent a tool-call round trip per key; it is not a way to
+ * pull a category. Twenty covers the sessions that motivated it (eleven notes
+ * read out of twenty-eight listed) while keeping a single answer small enough
+ * that the agent still has to decide what it needs.
+ */
+export const MAX_RESOLVE_BATCH = 20;
+
+export type BatchOutcome = ResolveOutcome | { kind: "error"; message: string };
+
+export interface Resolution {
+  file: string;
+  key: string;
+  outcome: BatchOutcome;
+}
+
+/**
+ * Resolves each named key through `resolveForAgent`, in the order given.
+ *
+ * The list is validated whole before any key is touched: an empty list, one
+ * over the limit, or one that names a key twice is refused without a decrypt
+ * or an audit line. A repeat is refused rather than collapsed because under a
+ * confirming grant the first copy would spend the owner's single-use approval
+ * and the second would open a new request for the same key.
+ *
+ * After that, every key is its own resolution — its own grant decision, hold,
+ * mask and audit line — so a batch never grants more than the same keys asked
+ * one at a time. A key that throws is reported in place and the rest continue.
+ */
+export function resolveManyForAgent(
+  vaultDir: string,
+  agent: string,
+  items: Array<{ file: string; key: string }>,
+  passphrase: string,
+): Resolution[] {
+  if (!items.length) throw new Error("resolve_keys needs at least one {file, key}.");
+  if (items.length > MAX_RESOLVE_BATCH) {
+    throw new Error(`resolve_keys takes at most ${MAX_RESOLVE_BATCH} keys per call; split the request.`);
+  }
+  const seen = new Set<string>();
+  for (const { file, key } of items) {
+    const locator = `${file}/${key}`;
+    if (seen.has(locator)) throw new Error(`${locator} is named twice in one resolve_keys call. Name each key once.`);
+    seen.add(locator);
+  }
+  return items.map(({ file, key }) => {
+    try {
+      return { file, key, outcome: resolveForAgent(vaultDir, agent, file, key, passphrase) };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return { file, key, outcome: { kind: "error", message: `Could not resolve ${file}/${key}: ${reason}` } };
+    }
+  });
+}
+
+/**
  * Renders a discovery result, one entry per line.
  *
  * These results are read by a language model, not parsed by a program, and
@@ -115,6 +173,31 @@ export function discoveryLines(
       return `${entry.file}/${entry.key}${when}${desc}`;
     })
     .join("\n");
+}
+
+/**
+ * Renders a `resolve_keys` answer: one entry per key, in the order asked.
+ *
+ * Values are free text — a journal note spans lines, and `store_note` lets an
+ * agent write anything, including a line shaped like an entry header. Each
+ * entry therefore opens with a marker drawn fresh for this response, which no
+ * stored value can have known in advance. The legend names it once; entries
+ * repeat only the marker, the locator and, when the key did not resolve, why.
+ *
+ * `isError` follows `resolve_key`: set when not a single value came back.
+ */
+export function renderResolutions(
+  results: Resolution[],
+  marker: string = crypto.randomBytes(4).toString("hex"),
+): { text: string; isError: boolean } {
+  const entries = results.map(({ file, key, outcome }) => {
+    const status = outcome.kind === "value" ? "" : ` (${outcome.kind})`;
+    return `[${marker}] ${file}/${key}${status}\n${outcome.message}`;
+  });
+  return {
+    text: [`Entries start with [${marker}].`, ...entries].join("\n\n"),
+    isError: results.every((result) => result.outcome.kind !== "value"),
+  };
 }
 
 /**
@@ -189,7 +272,7 @@ export async function startMcpServer(vaultDir: string, configuredAgent: string):
 
   server.tool(
     "list_keys",
-    "List every available key name and its non-sensitive description across the vault, one 'file/KEY — description' per line. Contains NO values. Always call this before resolve_key.",
+    "List every available key name and its non-sensitive description across the vault, one 'file/KEY — description' per line. Contains NO values. Always call this before resolve_key or resolve_keys.",
     {},
     async () => {
       const schema = readSchema(vaultDir, passphrase);
@@ -232,7 +315,7 @@ export async function startMcpServer(vaultDir: string, configuredAgent: string):
 
   server.tool(
     "resolve_key",
-    "Decrypt and return the value for exactly one key in one file. This call is logged to the vault's audit trail, and a grant policy may narrow or mask what comes back. Only call this for a key you already identified via list_keys/find_key — never guess a key name.",
+    "Decrypt and return the value for exactly one key in one file. This call is logged to the vault's audit trail, and a grant policy may narrow or mask what comes back. Only call this for a key you already identified via list_keys/find_key — never guess a key name. To read several keys, use resolve_keys instead.",
     {
       file: z.string().describe("vault file name without extension, e.g. 'health'"),
       key: z.string().describe("exact key name, e.g. 'DOCTOR_NEXT_APPOINTMENT'"),
@@ -240,6 +323,31 @@ export async function startMcpServer(vaultDir: string, configuredAgent: string):
     async ({ file, key }) => {
       const outcome = resolveForAgent(vaultDir, agent, file, key, passphrase);
       return text(outcome.message, outcome.kind !== "value");
+    },
+  );
+
+  server.tool(
+    "resolve_keys",
+    `Decrypt and return up to ${MAX_RESOLVE_BATCH} values in one call, for keys you already identified via list_keys/find_key. Prefer this over repeated resolve_key calls when you need several keys. Each key is governed, masked and audited exactly as resolve_key would handle it. Name every key explicitly; there is no wildcard.`,
+    {
+      keys: z
+        .array(
+          z.object({
+            file: z.string().describe("vault file name without extension, e.g. 'health'"),
+            key: z.string().describe("exact key name, e.g. 'DOCTOR_NEXT_APPOINTMENT'"),
+          }),
+        )
+        .min(1)
+        .max(MAX_RESOLVE_BATCH)
+        .describe("the keys to resolve, each named once"),
+    },
+    async ({ keys }) => {
+      try {
+        const rendered = renderResolutions(resolveManyForAgent(vaultDir, agent, keys, passphrase));
+        return text(rendered.text, rendered.isError);
+      } catch (error) {
+        return text(error instanceof Error ? error.message : String(error), true);
+      }
     },
   );
 
