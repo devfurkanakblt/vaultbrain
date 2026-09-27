@@ -5,11 +5,15 @@ Versioning once the encrypted storage format reaches 1.0.
 
 ## Unreleased
 
-The npm workflow refuses a version that is already on the registry, so the
-next publish starts by raising the version in `package.json`.
+Nothing yet. The npm workflow refuses a version that is already on the
+registry, so the next publish starts by raising the version in `package.json`.
 
-These close the three items left open by a live review of 0.3.0 against a
-28-key project vault.
+## 0.3.1 — prepared for npm, not yet published
+
+Three MCP fixes, closing the items left open by a live review of 0.3.0 against
+a 28-key project vault. No change to the encrypted format or the Rust core; the
+desktop manifests move to 0.3.1 with the package, as the native release check
+requires, and the desktop application is still not released.
 
 - Fixed: a category named in the wrong case under a grant scoped to its stored
   spelling (`PROJECT` for `project`) was denied with "Ask the vault owner to
@@ -29,12 +33,16 @@ These close the three items left open by a live review of 0.3.0 against a
   this vault only by sync shows no date. Journal notes keep the full timestamp
   their key encodes.
 
-## 0.3.0 — prepared for npm, not yet published
+## 0.3.0 — published to npm on 2026-09-27
 
 `resolve_keys` for MCP agents, a clear refusal for a category named in the
 wrong case, and two packaging fixes. The desktop change below ships in the
 repository only; the desktop application is still not released, for the
 reasons given under 0.2.0.
+
+Published from `25678ed` by the `Publish to npm` workflow, with provenance.
+65 files, 979,023 bytes unpacked, integrity
+`sha512-wr2RPGTnevV3s93+rfrBjcMBI+EIYQUPrNU5Snna72BVA3HYEqJyYR6ngm7slOBJenRKE7xE2GFDoimXrD882g==`.
 
 ### Packaging
 
