@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { createRequire } from "node:module";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -18,6 +19,11 @@ import {
 } from "./grants.js";
 import { redactValue, type RedactionLevel } from "./redaction.js";
 import { withVaultLock } from "./vault-lock.js";
+
+// Read from the manifest that ships beside `dist/`, the way the CLI reads it
+// for `--version`. A literal here kept telling every client "0.2.0", whatever
+// version was actually installed.
+const packageVersion = (createRequire(import.meta.url)("../package.json") as { version: string }).version;
 
 /**
  * What a governed resolution produced. Split out from the tool handler so the
@@ -268,7 +274,7 @@ export async function startMcpServer(vaultDir: string, configuredAgent: string):
   }
 
 
-  const server = new McpServer({ name: "vault-brain", version: "0.2.0" });
+  const server = new McpServer({ name: "vault-brain", version: packageVersion });
 
   server.tool(
     "list_keys",
