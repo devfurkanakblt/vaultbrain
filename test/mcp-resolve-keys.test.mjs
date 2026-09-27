@@ -6,14 +6,22 @@
 // resolve_key would give it, and a malformed list must be refused before any
 // key is decrypted.
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import { readAudit } from "../dist/audit.js";
-import { addGrant, approveRequest, normalizeScope } from "../dist/grants.js";
-import { MAX_RESOLVE_BATCH, renderResolutions, resolveManyForAgent } from "../dist/mcp-server.js";
+import { addGrant, approveRequest, normalizeScope, pendingRequests } from "../dist/grants.js";
+import {
+  MAX_RESOLVE_BATCH,
+  renderResolutions,
+  resolveContext,
+  resolveForAgent,
+  resolveManyForAgent,
+} from "../dist/mcp-server.js";
+import { noteCreatedAt } from "../dist/schema.js";
 import { upsertEntry } from "../dist/store.js";
 
 const PASSPHRASE = "correct horse battery staple";
@@ -244,4 +252,103 @@ test("the framing costs a small, fixed amount per key", () => {
   );
   const perKey = (rendered.text.length - payload) / results.length;
   assert.ok(perKey < 20, `framing costs ${perKey.toFixed(1)} characters per key`);
+});
+
+test("a held key tells the agent to call again the tool it actually called", () => {
+  const vault = seededVault();
+  addGrant(vault, { agent: "claude", scopes: [scope()], confirm: "always" }, PASSPHRASE);
+
+  const single = resolveForAgent(vault, "claude", "health", "BLOOD", PASSPHRASE);
+  const [batched] = resolveManyForAgent(vault, "claude", [{ file: "health", key: "DOCTOR" }], PASSPHRASE);
+
+  assert.match(single.message, /Then call resolve_key again\./u);
+  assert.match(batched.outcome.message, /Then call resolve_keys again\./u);
+});
+
+test("a batch with several held keys hands the owner one approve command for all of them", () => {
+  const vault = seededVault();
+  addGrant(vault, { agent: "claude", scopes: [scope()], confirm: "always" }, PASSPHRASE);
+  const results = resolveManyForAgent(
+    vault,
+    "claude",
+    [{ file: "health", key: "BLOOD" }, { file: "health", key: "DOCTOR" }],
+    PASSPHRASE,
+  );
+  const ids = results.map((result) => result.outcome.requestId.slice(0, 8));
+
+  const { text } = renderResolutions(results, "cafebabe");
+  assert.ok(text.endsWith(`2 keys are held for approval. The owner can approve them all at once:  vbrain grant approve ${ids.join(" ")}`));
+
+  const alone = renderResolutions(results.slice(0, 1), "cafebabe").text;
+  assert.equal(alone.includes("held for approval"), false, "one held key already carries its own command");
+});
+
+test("vbrain grant approve takes several ids, and one that matches nothing does not block the rest", () => {
+  const vault = seededVault();
+  addGrant(vault, { agent: "claude", scopes: [scope()], confirm: "always" }, PASSPHRASE);
+  const ids = resolveManyForAgent(
+    vault,
+    "claude",
+    [{ file: "health", key: "BLOOD" }, { file: "health", key: "DOCTOR" }],
+    PASSPHRASE,
+  ).map((result) => result.outcome.requestId.slice(0, 8));
+
+  let failure;
+  try {
+    execFileSync(process.execPath, ["dist/cli.js", "--vault", vault, "grant", "approve", ids[0], "ffffffff", ids[1]], {
+      encoding: "utf8",
+      env: { ...process.env, VBRAIN_PASSPHRASE: PASSPHRASE },
+      stdio: "pipe",
+    });
+  } catch (error) {
+    failure = error;
+  }
+  assert.equal(failure?.status, 1, "an unmatched id fails the command as a whole");
+  assert.match(failure.stderr, /No pending request matches: ffffffff/u);
+  assert.equal((failure.stdout.match(/^Approved /gmu) ?? []).length, 2);
+  assert.equal(pendingRequests(vault, PASSPHRASE).length, 0, "both real ids were approved");
+
+  const again = resolveManyForAgent(
+    vault,
+    "claude",
+    [{ file: "health", key: "BLOOD" }, { file: "health", key: "DOCTOR" }],
+    PASSPHRASE,
+  );
+  assert.deepEqual(again.map((result) => result.outcome.kind), ["value", "value"]);
+});
+
+test("a permitted lookup of a key that does not exist is audited; a denied one stays a denial", () => {
+  const vault = seededVault();
+  addGrant(vault, { agent: "claude", scopes: [scope({ keys: ["BLOOD", "GUESS*"] })] }, PASSPHRASE);
+  const before = readAudit(vault).length;
+
+  resolveManyForAgent(
+    vault,
+    "claude",
+    [{ file: "health", key: "GUESS_1" }, { file: "health", key: "IBAN" }, { file: "health", key: "BLOOD" }],
+    PASSPHRASE,
+  );
+
+  const lines = readAudit(vault).slice(before);
+  assert.deepEqual(lines.map((line) => [line.key, line.outcome]), [
+    ["GUESS_1", "missing"],
+    ["IBAN", "denied"],
+    ["BLOOD", "allowed"],
+  ]);
+  assert.ok(lines[0].grant, "the missing lookup names the grant that let it through");
+});
+
+test("one batch reads the grant policy and each category once", () => {
+  const vault = seededVault();
+  addGrant(vault, { agent: "claude", scopes: [scope()] }, PASSPHRASE);
+  const context = resolveContext(vault, PASSPHRASE, "resolve_keys");
+  // Each read decrypts into a fresh object, so getting the same one back is
+  // what shows the second key did not decrypt again.
+  assert.equal(context.entries("health"), context.entries("health"));
+  assert.equal(context.policy(), context.policy());
+});
+
+test("a journal note carries the date its key encodes; a fact carries none", () => {
+  assert.equal(noteCreatedAt("NOTE_20260920_212739_0e78a1b2c3d4"), "2026-09-20T21:27:39.000Z");
+  assert.equal(noteCreatedAt("IBAN"), undefined);
 });

@@ -16,8 +16,12 @@ export interface AuditEntry {
   grant?: string;
   /** How much of the value the caller actually received. */
   redaction?: "none" | "partial" | "full";
-  /** A denial and a held-back resolution are recorded, not only successes. */
-  outcome?: "allowed" | "denied" | "pending";
+  /**
+   * A denial and a held-back resolution are recorded, not only successes. So
+   * is a permitted lookup of a key that does not exist, so an agent guessing
+   * names leaves a trail.
+   */
+  outcome?: "allowed" | "denied" | "pending" | "missing";
   prevHash?: string;
   hash?: string;
 }

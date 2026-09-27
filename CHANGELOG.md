@@ -38,6 +38,27 @@ agent's side, since the server already keeps the unwrapped keyset for the life
 of the process. Each key is still decided, held, masked and audited on its own
 through the same path as `resolve_key`, which is unchanged.
 
+Follow-ups from an external review of the batch, before it shipped:
+
+- Fixed: a key held for approval inside `resolve_keys` told the agent to "call
+  resolve_key again". It now names the tool that was called.
+- Added: `vbrain grant approve` takes several ids. Under a confirming grant a
+  batch still opens one request per key, since each approval is single-use and
+  answers one key; when more than one is held, the `resolve_keys` answer ends
+  with a single `vbrain grant approve <id> <id> ...` line for the owner. An id
+  that matches nothing is reported, exits 1, and does not block the others.
+- Changed: a batch decrypts the grant policy and each category file once, not
+  once per key. Approvals are still spent and requested per key under the
+  grants lock, and each key still writes its own audit line.
+- Added: a permitted lookup of a key that does not exist is audited, with the
+  outcome `missing`. `list_keys` already names every visible key, so this
+  leaks nothing; it means an agent guessing names — up to twenty a call — no
+  longer does so unseen. Both cores read `outcome` as a free string, so older
+  readers verify these entries unchanged.
+- Added: `list_keys` and `find_key` show the date a journal note was written,
+  as `find_notes_in_range` already did. The date comes from the note's
+  generated key; facts carry none, because the catalog stores no timestamps.
+
 ### Category names in the wrong case
 
 - Fixed: on Windows and macOS, naming a category in a different case

@@ -157,6 +157,14 @@ function dateFromNoteKey(key: string): Date | null {
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
+/**
+ * When a journal note was written, read from its generated key, or undefined
+ * for a fact. The catalog stores no timestamps; a note's key is its timestamp.
+ */
+export function noteCreatedAt(key: string): string | undefined {
+  return dateFromNoteKey(key)?.toISOString();
+}
+
 function parseBoundary(value: string | undefined, endOfDay: boolean): Date | null {
   if (!value) return null;
   const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(value);

@@ -71,7 +71,7 @@ vbrain grant add research-bot --scope "*:*:discover:full" --confirm
 
 vbrain grant list                  # every grant, active, expired or revoked
 vbrain grant requests              # resolutions waiting on you
-vbrain grant approve <id>          # single-use, expires in five minutes
+vbrain grant approve <id>...       # one or more; single-use, expires in five minutes
 vbrain grant revoke <id>           # effective on the agent's very next call
 ```
 
@@ -826,7 +826,8 @@ The server exposes six tools:
 Under a grant policy the three value-free tools return only the keys that
 agent may discover, `store_note` needs a `store` action, and `resolve_key`
 additionally records who asked, under which grant, how much came back, and
-whether the answer was allowed, denied or held for approval.
+whether the answer was allowed, denied, held for approval, or asked for a key
+that does not exist.
 
 `resolve_keys` is `resolve_key` for several keys at once: the agent names each
 `{file, key}` pair, up to twenty, and gets them back in one answer instead of
